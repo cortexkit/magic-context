@@ -69,6 +69,47 @@ test("mutex retries ticket creation when empty-directory cleanup wins the mkdir 
     }
 });
 
+test("mutex retries mkdir after EEXIST during lock directory cleanup", () => {
+    const { dir: root, cleanup } = createTestTempDir("mc-mutex-mkdir-race-");
+    const directory = join(root, "locks");
+    const mkdir = fs.mkdirSync;
+    let attempts = 0;
+    const mkdirSpy = spyOn(fs, "mkdirSync").mockImplementation((...args) => {
+        if (args[0] === directory && attempts++ === 0) {
+            throw Object.assign(new Error("lock mkdir raced with cleanup"), { code: "EEXIST" });
+        }
+        return mkdir(...args);
+    });
+    try {
+        expect(withStorageFileMutex(directory, () => "acquired")).toBe("acquired");
+        expect(attempts).toBeGreaterThan(1);
+    } finally {
+        mkdirSpy.mockRestore();
+        cleanup();
+    }
+});
+
+test("mutex retries ticket creation after EINVAL during lock directory cleanup", () => {
+    const { dir: root, cleanup } = createTestTempDir("mc-mutex-open-race-");
+    const directory = join(root, "locks");
+    const write = permissions.writeStorageFileSync;
+    let attempts = 0;
+    const writer = spyOn(permissions, "writeStorageFileSync").mockImplementation((...args) => {
+        if (attempts++ === 0) {
+            rmdirSync(directory);
+            throw Object.assign(new Error("ticket open raced with cleanup"), { code: "EINVAL" });
+        }
+        return write(...args);
+    });
+    try {
+        expect(withStorageFileMutex(directory, () => "acquired")).toBe("acquired");
+        expect(attempts).toBe(3);
+    } finally {
+        writer.mockRestore();
+        cleanup();
+    }
+});
+
 test("mutex keeps retrying ticket creation while cleanups remove the directory", () => {
     const { dir: root, cleanup } = createTestTempDir("mc-mutex-rmdir-repeat-");
     const directory = join(root, "locks");

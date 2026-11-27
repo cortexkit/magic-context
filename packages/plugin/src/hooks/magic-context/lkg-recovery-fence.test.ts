@@ -359,7 +359,8 @@ describe.skipIf(process.platform === "win32")("durable recovery fence", () => {
     test("two processes racing to publish serialize commit through clean certification", async () => {
         const f = fixture();
         f.raw.exec("CREATE TABLE publication_log (ordinal INTEGER PRIMARY KEY, actor TEXT)");
-        const run = async (actor: string) => {
+        const publicationsPerActor = 12;
+        const run = (actor: string) => {
             const script = `
 import { Database } from 'bun:sqlite';
 import { loadPersistedLkgSlot, saveLkgSlotToDb } from ${JSON.stringify(join(import.meta.dir, "lkg-persist.ts"))};
@@ -368,7 +369,7 @@ const db = new Database(${JSON.stringify(f.dbPath)});
 db.exec('PRAGMA busy_timeout=5000');
 const pause = new Int32Array(new SharedArrayBuffer(4));
 __test.setObserver(phase => { if (phase === 'committed') Atomics.wait(pause, 0, 0, 15); });
-for (let i=0, attempts=0; i<12;) {
+for (let i=0, attempts=0; i<${publicationsPerActor};) {
  if (++attempts > 1000) throw new Error('publication never completed');
  const old = loadPersistedLkgSlot(db, 'session');
  const value = {...old, jsonPrefix:JSON.stringify([{text:${JSON.stringify(actor)} + i}]), capturedAt:Date.now()};
@@ -390,24 +391,26 @@ for (let i=0, attempts=0; i<12;) {
                 windowsHide: true,
                 stderr: "pipe",
             });
-            const [exit, error] = await Promise.all([
-                child.exited,
-                new Response(child.stderr).text(),
-            ]);
-            expect(exit, error).toBe(0);
+            return Promise.all([child.exited, new Response(child.stderr).text()]);
         };
         try {
-            await Promise.all([run("A"), run("B")]);
-            expect(
-                (f.raw.query("SELECT COUNT(*) AS n FROM publication_log").get() as { n: number }).n,
-            ).toBe(24);
-            expect(f.record().slotKey).toBe(lkgRecoverySlotKey(f.load()!));
-            clearLkgFenceProcessState("session");
-            expect(hasCleanLkgRecoveryFence("session", f.load()!)).toBe(true);
+            const count = f.raw.query<{ n: number }, []>(
+                "SELECT COUNT(*) AS n FROM publication_log",
+            );
+            for (let round = 1; round <= 20; round++) {
+                const results = await Promise.all([run("A"), run("B")]);
+                for (const [exit, error] of results) {
+                    expect(exit, `Round ${round}: ${error}`).toBe(0);
+                }
+                expect(count.get()?.n).toBe(round * 2 * publicationsPerActor);
+                expect(f.record().slotKey).toBe(lkgRecoverySlotKey(f.load()!));
+                clearLkgFenceProcessState("session");
+                expect(hasCleanLkgRecoveryFence("session", f.load()!)).toBe(true);
+            }
         } finally {
             f.raw.close();
         }
-    });
+    }, 60_000);
     test("a failed final clean notification cannot leave a visible clean certificate", () => {
         const f = fixture();
         f.dirty();
