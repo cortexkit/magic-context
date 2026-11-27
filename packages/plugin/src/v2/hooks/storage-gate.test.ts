@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it, test } from "bun:test";
+import { afterEach, describe, expect, it, jest, test } from "bun:test";
 import type { execFileSync } from "node:child_process";
 import { mkdirSync, type readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,6 +19,7 @@ import {
 } from "../../features/magic-context/storage-db";
 import {
     __resetOffThreadMigrationClockForTests,
+    __setOffThreadMigrationClockForTests,
     beginOffThreadMigration,
 } from "../../shared/off-thread-migration-clock";
 import { __resetRpcIdentityTestHooks, __setRpcIdentityTestHooks } from "../../shared/rpc-utils";
@@ -282,20 +283,39 @@ test("boot wait retains a healthy database when the pending open becomes ready",
 });
 
 test("boot wait does not count time an off-thread schema migration spends", async () => {
-    const database = openDatabase();
-    const endMigration = beginOffThreadMigration();
-    const gate = createV2StorageGate({
-        open: async () => {
-            await Bun.sleep(150);
-            endMigration();
-            return database;
+    // Run the boot deadline on a clock the test moves, so the result does not
+    // depend on how fast the machine is. setImmediate stays real: it lets the
+    // deadline's pending callbacks run between steps.
+    jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+    const started = Date.now();
+    __setOffThreadMigrationClockForTests({
+        now: () => Date.now() - started,
+        setTimeout(callback, delayMs) {
+            const timer = setTimeout(callback, delayMs);
+            return () => clearTimeout(timer);
         },
     });
+    const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const database = openDatabase();
+    const endMigration = beginOffThreadMigration();
+    const opened = Promise.withResolvers<typeof database>();
+    const gate = createV2StorageGate({ open: () => opened.promise });
     try {
-        expect(await probeV2StorageAtBoot(gate, 30)).toBe(database);
+        const pending = probeV2StorageAtBoot(gate, 30);
+        // Five times the boot wait passes, all of it while the migration runs.
+        jest.advanceTimersByTime(150);
+        await settle();
+        endMigration();
+        // The deadline is checked again here, before the open resolves. If
+        // migration time counted, the wait would end now without a database.
+        await settle();
+        opened.resolve(database);
+        expect(await pending).toBe(database);
     } finally {
         endMigration();
+        opened.resolve(database);
         __resetOffThreadMigrationClockForTests();
+        jest.useRealTimers();
     }
 });
 
