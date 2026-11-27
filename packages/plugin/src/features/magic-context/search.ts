@@ -240,7 +240,11 @@ export interface UnifiedSearchOptions {
      * build.
      */
     chunkPoolWarmOnly?: boolean;
-    /** The kept worker starts upkeep after it posts the result. */
+    /**
+     * Do not start the pool warm during the search. Set by the search worker
+     * that stays alive between turns: it warms the pool in its own upkeep,
+     * right after it posts the result, so the search itself answers sooner.
+     */
     deferChunkPoolWarmup?: boolean;
     /** Optional sink for how long each lane took. Durations and states only. */
     stepTimings?: UnifiedSearchStepTimings;

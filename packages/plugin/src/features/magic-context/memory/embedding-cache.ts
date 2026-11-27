@@ -26,7 +26,11 @@ interface KeptWorkerEmbeddingCache {
 }
 const keptWorkerCaches = new WeakMap<Database, KeptWorkerEmbeddingCache>();
 
-/** Only kept search workers have a private, read-only connection to refresh. */
+/**
+ * Keep this connection's memory vectors loaded between searches and refresh
+ * them when the store changes. Only the search worker that stays alive between
+ * turns calls this: it has a private, read-only connection of its own.
+ */
 export function keepWorkerMemoryEmbeddings(db: Database): void {
     keptWorkerCaches.set(db, {
         entries: new Map(),
