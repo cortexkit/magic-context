@@ -1,5 +1,21 @@
 use super::*;
 
+fn with_lifecycle_store<F: std::future::Future<Output = ()>>(
+    name: &str,
+    run: impl FnOnce(std::path::PathBuf) -> F,
+) {
+    let dir = scratch(name);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(run(dir.clone()));
+    // In-process worker tasks can still hold the stores after the assertions.
+    // Drop the runtime before removing their scratch files.
+    drop(runtime);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 fn saved(dir: &std::path::Path) -> Value {
     let text: String = rusqlite::Connection::open(dir.join("sessions.db"))
         .unwrap()
@@ -12,9 +28,12 @@ fn saved(dir: &std::path::Path) -> Value {
     serde_json::from_str(&text).unwrap()
 }
 
-#[tokio::test]
-async fn lifecycle_a_tool_before_setup_restores_compaction_but_not_notice_readiness() {
-    let dir = scratch("tool-before-setup");
+#[test]
+fn lifecycle_a_tool_before_setup_restores_compaction_but_not_notice_readiness() {
+    with_lifecycle_store("tool-before-setup", tool_before_setup);
+}
+
+async fn tool_before_setup(dir: std::path::PathBuf) {
     let mut runner = start_full(
         config("worker", Kind::OpenAi, free()),
         Settings::default(),
@@ -70,7 +89,6 @@ async fn lifecycle_a_tool_before_setup_restores_compaction_but_not_notice_readin
         seen(runner.host(), 5).as_deref(),
         Some(placeholder(5).as_str())
     );
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
@@ -98,9 +116,12 @@ async fn lifecycle_a_tools_only_worker_still_requires_setup_for_notices() {
     );
 }
 
-#[tokio::test]
-async fn lifecycle_a_keep_called_before_restart_lands_on_the_next_notice() {
-    let dir = scratch("pending-keep");
+#[test]
+fn lifecycle_a_keep_called_before_restart_lands_on_the_next_notice() {
+    with_lifecycle_store("pending-keep", keep_before_restart);
+}
+
+async fn keep_before_restart(dir: std::path::PathBuf) {
     let settings = Settings {
         protected_tokens: Some(0),
         ..Settings::default()
@@ -143,12 +164,14 @@ async fn lifecycle_a_keep_called_before_restart_lands_on_the_next_notice() {
         seen(runner.host(), 3).as_deref(),
         Some(placeholder(3).as_str())
     );
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
-#[tokio::test]
-async fn lifecycle_an_unchanged_job_retries_a_failed_state_save() {
-    let dir = scratch("retry-save");
+#[test]
+fn lifecycle_an_unchanged_job_retries_a_failed_state_save() {
+    with_lifecycle_store("retry-save", retry_state_save);
+}
+
+async fn retry_state_save(dir: std::path::PathBuf) {
     let mut runner = start_full(
         config("worker", Kind::OpenAi, free()),
         Settings::default(),
@@ -182,7 +205,6 @@ async fn lifecycle_an_unchanged_job_retries_a_failed_state_save() {
         .await
         .unwrap();
     assert_eq!(saved(&dir)["queued"].as_array().unwrap().len(), 1);
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 fn move_request(dir: &std::path::Path) -> mc_module::move_in::MoveRequest {
@@ -238,6 +260,7 @@ fn lifecycle_move_never_fences_a_failed_state_save() {
         "{result:?}"
     );
     assert_eq!(fenced(&dir), 0);
+    drop(store);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -278,6 +301,7 @@ fn lifecycle_move_refuses_unrenderable_memories_and_profile_without_writes() {
         );
         assert!(store.load(&move_request(&dir).session).is_none());
         assert_eq!(fenced(&dir), 0);
+        drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
@@ -299,6 +323,7 @@ fn lifecycle_move_refuses_incompatible_message_ordinals() {
     );
     assert_eq!(fenced(&dir), 0);
     assert!(store.load(&request.session).is_none());
+    drop(store);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -373,6 +398,8 @@ fn lifecycle_move_converts_the_plugins_numbers_across_a_compaction() {
         )
         .unwrap();
     assert_eq!(fence, 2);
+    drop(connection);
+    drop(store);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
