@@ -18,7 +18,7 @@ import {
 	gaDatabasePath,
 	V2StoreReader,
 } from "../../../plugin/src/v2/store-reader";
-import { spawnOpencode2, waitForPluginActive, waitForPluginLog } from '../../src/opencode2-runner/spawn';
+import { spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
 
 const sha = (value: unknown) =>
 	createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -327,16 +327,11 @@ test("I9b hook_never_throws on deterministic storage failure; interrupt returns 
 	}
 }, 60000);
 
-test("I9b hook_never_throws on a poisoned shared draft", async () => {
+test("I9b transforms a working copy when a preceding plugin freezes the draft messages", async () => {
 	const capture = observer(true);
-	const host = await spawnOpencode2({ probePlugin: capture.plugin });
+	// Freeze the message array before Magic Context gets the draft.
+	const host = await spawnOpencode2({ prePlugin: capture.plugin });
 	try {
-		// Location plugins are first activated by session.create. Put the poisoner
-		// first so MC, not the observer, has to survive the frozen shared array.
-		const path = join(host.cwd, "opencode.json");
-		const config = JSON.parse(readFileSync(path, "utf8"));
-		config.plugins.reverse();
-		writeFileSync(path, JSON.stringify(config));
 		const client = clientFor(host);
 		const session = await client.session.create({
 			location: { directory: host.cwd },
@@ -357,15 +352,11 @@ test("I9b hook_never_throws on a poisoned shared draft", async () => {
 		const frames = capture.frames().filter((frame) => frame.kind === "context");
 		expect(frames).toHaveLength(1);
 		expect(JSON.stringify(frames)).not.toContain(HEAD_IDS[0]);
-		expect(
-			host.mock
-				.requests()
-				.filter((request) => request.body.model === "mock-model"),
-		).toHaveLength(1);
+		const served = host.mock.requests().filter((request) => request.body.model === "mock-model");
+		expect(served).toHaveLength(1);
+		expect(JSON.stringify(served[0]!.body.input)).toContain("§1§ Poisoned draft turn");
+		expect(JSON.stringify(served[0]!.body.input)).toContain("<session-history>");
 		expect(host.stderr()).not.toContain("Failed to drain Session");
-		expect(await waitForPluginLog(host.env, "v2 context unavailable")).toContain(
-			"v2 context unavailable",
-		);
 	} finally {
 		await host.stop();
 	}
@@ -585,12 +576,8 @@ test("I6 real-host contributions match the v1 e2e fixture golden across three de
 			content: [{ type: "text", text: "continue probe" }],
 		},
 	]);
-	const host = await spawnOpencode2({ probePlugin: capture.plugin });
+	const host = await spawnOpencode2({ prePlugin: capture.plugin });
 	try {
-		const path = join(host.cwd, "opencode.json");
-		const config = JSON.parse(readFileSync(path, "utf8"));
-		config.plugins.reverse();
-		writeFileSync(path, JSON.stringify(config));
 		const client = clientFor(host);
 		const session = await client.session.create({
 			location: { directory: host.cwd },
@@ -616,14 +603,17 @@ test("I6 real-host contributions match the v1 e2e fixture golden across three de
 			.map((request) => {
 				const items = request.body.input as Array<{
 					type?: string;
+					role?: string;
 					output?: string;
-					content?: Array<{ type: string; text: string }>;
+					content?: string | Array<{ type: string; text: string }>;
 				}>;
 				return sha(
 					items.flatMap((item) =>
 						item.type === "function_call_output"
 							? [item.output]
-							: (item.content ?? [])
+							: typeof item.content === "string"
+								? item.role === "user" ? [item.content] : []
+								: (item.content ?? [])
 									.filter((part) => part.type === "input_text")
 									.map((part) => part.text),
 					),
@@ -770,14 +760,11 @@ test("I16a tool_argument_surfaces_v2 preserve edit regions and share supersessio
 
 test("I17 compaction-off mode preserves additive memory heads without tags or refusals", async () => {
 	const capture = observer();
-	const host = await spawnOpencode2({ probePlugin: capture.plugin });
+	const host = await spawnOpencode2({
+		probePlugin: capture.plugin,
+		magicContextConfig: { compaction: { enabled: false }, auto_update: false },
+	});
 	try {
-		const configDir = join(host.env.XDG_CONFIG_HOME!, "cortexkit");
-		mkdirSync(configDir, { recursive: true });
-		writeFileSync(
-			join(configDir, "magic-context.jsonc"),
-			JSON.stringify({ compaction: { enabled: false }, auto_update: false }),
-		);
 		const client = clientFor(host);
 		const session = await client.session.create({
 			location: { directory: host.cwd },
