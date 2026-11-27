@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+    chmodSync,
+    copyFileSync,
+    existsSync,
+    mkdirSync,
+    readFileSync,
+    rmSync,
+    statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LATEST_SUPPORTED_VERSION } from "@magic-context/core/features/magic-context/storage-db";
@@ -64,12 +72,29 @@ test("store init honours the explicit storage directory and leaves existing stor
 
 test("store init inspects a stopped WAL database without creating sidecars or changing bytes", () => {
     const path = join(data, "context.db");
-    expect(runDoctorStoreInit(() => {})).toBe(0);
-    const writer = new Database(path);
-    writer.exec("PRAGMA journal_mode=WAL");
-    writer.prepare("INSERT INTO project_state(project_path) VALUES (?)").run("dir:stopped");
-    writer.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    writer.close();
+    const sourceDir = join(root, "writer");
+    const source = join(sourceDir, "context.db");
+    process.env.MAGIC_CONTEXT_STORAGE_DIR = sourceDir;
+    try {
+        expect(runDoctorStoreInit(() => {})).toBe(0);
+    } finally {
+        delete process.env.MAGIC_CONTEXT_STORAGE_DIR;
+    }
+    const writer = new Database(source);
+    try {
+        expect(writer.prepare("PRAGMA journal_mode=WAL").get()).toEqual({ journal_mode: "wal" });
+        writer.prepare("INSERT INTO project_state(project_path) VALUES (?)").run("dir:stopped");
+        expect(writer.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get()).toEqual({
+            busy: 0,
+            log: 0,
+            checkpointed: 0,
+        });
+    } finally {
+        writer.close();
+    }
+    // Apple's SQLite can keep sidecars after close. Copy only the fully checkpointed WAL-mode file.
+    mkdirSync(data, { recursive: true });
+    copyFileSync(source, path);
     expect(existsSync(`${path}-wal`)).toBe(false);
     expect(existsSync(`${path}-shm`)).toBe(false);
 

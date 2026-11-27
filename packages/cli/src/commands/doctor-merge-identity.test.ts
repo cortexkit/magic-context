@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
     chmodSync,
+    copyFileSync,
     existsSync,
     mkdirSync,
     readdirSync,
@@ -202,22 +203,46 @@ describe("offline identity command", () => {
         expect(fileHash(path)).toBe(before);
     }, 30_000);
     it("previews a checkpointed WAL database without sidecars and preserves its bytes", () => {
-        const { path, args } = fixture();
-        const writer = new Database(path);
-        writer.exec("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE)");
-        writer.close();
+        const { path: source } = fixture();
+        const directory = join(dirname(source), "stopped");
+        const path = join(directory, "context.db");
+        const writer = new Database(source);
+        try {
+            expect(writer.prepare("PRAGMA journal_mode=WAL").get()).toEqual({
+                journal_mode: "wal",
+            });
+            expect(writer.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get()).toEqual({
+                busy: 0,
+                log: 0,
+                checkpointed: 0,
+            });
+        } finally {
+            writer.close();
+        }
+        // Apple's SQLite can keep sidecars after close. Copy only the fully checkpointed WAL-mode file.
+        mkdirSync(directory);
+        copyFileSync(source, path);
         expect(existsSync(`${path}-wal`)).toBe(false);
         expect(existsSync(`${path}-shm`)).toBe(false);
 
         const before = fileHash(path);
-        const directory = dirname(path);
         const originalMode = statSync(directory).mode & 0o777;
         const output: string[] = [];
         const originalLog = console.log;
         chmodSync(directory, originalMode & ~0o222);
         console.log = (...values: unknown[]) => output.push(values.join(" "));
         try {
-            expect(runMergeIdentityCli(args)).toBe(0);
+            expect(
+                runMergeIdentityCli([
+                    "--db",
+                    path,
+                    "--from",
+                    "dir:source",
+                    "--to",
+                    "git:target",
+                    "--force",
+                ]),
+            ).toBe(0);
             expect(output.join("\n")).toContain("Identity merge preview: dir:source → git:target");
             expect(output.join("\n")).toContain("project_state: 1 row(s)");
             expect(fileHash(path)).toBe(before);

@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdirSync,
+    readdirSync,
+    readFileSync,
+    realpathSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
@@ -164,7 +172,8 @@ describe("OpenCode doctor --issue --report", () => {
     });
 
     it("shows the sanitized backup warning for OpenCode 1 and OpenCode 2", async () => {
-        const root = tempRoot();
+        // Match process.cwd()'s physical path when the temp directory is reached through a symlink.
+        const root = realpathSync(tempRoot());
         const originalHome = process.env.HOME;
         process.env.HOME = root;
         restores.push(() => {
