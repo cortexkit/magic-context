@@ -86,6 +86,9 @@ export default { id: "opencode-magic-context", async setup(context) {
                     if (Date.now() >= deadline) throw Error("test did not release the recovery admission");
                     await new Promise((done) => setTimeout(done, 5));
                 }
+                const result = await context.session.synthetic(input);
+                writeFileSync(root + "/recovery-accepted", "");
+                return result;
             }
             return context.session.synthetic(input);
         },
@@ -380,6 +383,8 @@ test.each([false, true])(
 			const fact = "A fact read from the real tool result.";
 			const text = "Read fact.txt for the storage notice regression.";
 			writeFileSync(file, fact);
+			const releaseTool = Promise.withResolvers<void>();
+			let holdToolReply = false;
 			f.host.mock.addMatcher((body) => {
 				if (
 					!Array.isArray(body.messages) ||
@@ -406,7 +411,7 @@ test.each([false, true])(
 					],
 					stop_reason: "tool_use",
 					usage: { input_tokens: 150, output_tokens: 9 },
-					streamHoldMs: 1_500,
+					streamHoldUntil: holdToolReply ? releaseTool.promise : undefined,
 				};
 			});
 			const control = await f.create();
@@ -416,18 +421,39 @@ test.each([false, true])(
 			expect(expected).toHaveLength(2);
 			expect(expected[1]?.rawBody).toContain(fact);
 			const at = f.host.mock.requests().length;
-			await f.client.session.prompt({ sessionID: f.sessionID, text });
-			await eventually(
-				() =>
-					f.host.mock
-						.requests()
-						.slice(at)
-						.find((r) => r.rawBody?.includes(text)),
-				"first tool call in flight",
-			);
-			writeFileSync(join(f.host.root, "allow-recovery"), "");
-			await f.notice(recovery);
+			holdToolReply = true;
+			try {
+				await f.client.session.prompt({ sessionID: f.sessionID, text });
+				await eventually(
+					() =>
+						f.host.mock
+							.requests()
+							.slice(at)
+							.find((r) => r.rawBody?.includes(text)),
+					"first tool call in flight",
+				);
+				// Accept the notice during the tool reply; the host only stores it
+				// after that step finishes, so waiting for the row here would stall.
+				writeFileSync(join(f.host.root, "allow-recovery"), "");
+				await eventually(
+					() =>
+						existsSync(join(f.host.root, "recovery-accepted")) ? true : undefined,
+					"host acceptance of the recovery notice",
+				);
+			} finally {
+				releaseTool.resolve();
+			}
+			const banner = await f.notice(recovery);
 			await f.wait();
+			const rawContinuation = f.frames().findLast(
+				(frame) =>
+					frame.name === "context" &&
+					frame.sessionID === f.sessionID &&
+					frame.raw.some((message) => message.id === banner.id),
+			);
+			expect(
+				rawContinuation?.raw.some((message) => message.role === "tool"),
+			).toBe(true);
 			const actual = f.host.mock.requests().slice(at);
 			expect(actual).toHaveLength(expected.length);
 			expect(actual[1]?.rawBody).toContain(fact);
