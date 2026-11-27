@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -22,6 +22,8 @@ async function result(worker: Worker) {
 }
 
 describe("reusable job workers", () => {
+    afterEach(() => jest.useRealTimers());
+
     test("reuses a thread but gives each job fresh input and port state", async () => {
         const path = `reuse-${++key}`;
         const first = await result(start(path, { value: "first" }));
@@ -45,20 +47,27 @@ describe("reusable job workers", () => {
     test("terminates a hung job and replaces its thread", async () => {
         const path = `hang-${++key}`;
         const first = await result(start(path));
-        const hung = start(path, { hang: true });
-        // Allow dispatch, then terminate the worker to exercise the hard-stop behavior.
-        await new Promise((resolve) => setTimeout(resolve, 25));
-        await hung.terminate();
+        const hung = start(path, { hang: true, acknowledgeHang: true });
+        try {
+            const [reply] = await once(hung, "message");
+            expect(reply).toEqual({ threadId: first.threadId, hanging: true });
+        } finally {
+            await hung.terminate();
+        }
         const next = await result(start(path));
         expect(next.threadId).not.toBe(first.threadId);
     });
 
     test("shuts the thread down after its idle lifetime", async () => {
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
         const path = `idle-${++key}`;
         const first = await result(start(path, {}, 20));
-        await new Promise((resolve) => setTimeout(resolve, 80));
+        jest.advanceTimersByTime(19);
+        expect((await result(start(path, {}, 20))).threadId).toBe(first.threadId);
+        jest.advanceTimersByTime(20);
         const next = await result(start(path, {}, 20));
         expect(next.threadId).not.toBe(first.threadId);
+        jest.advanceTimersByTime(20);
     });
 
     test("rejects late replies from a released job", async () => {
@@ -67,13 +76,14 @@ describe("reusable job workers", () => {
         const oldReplies: unknown[] = [];
         prior.on("message", (reply) => oldReplies.push(reply));
         const first = await result(prior);
-        const next = start(path, { hang: true });
+        const next = start(path, { deliverLate: true, value: "next" });
         const replies: unknown[] = [];
         next.on("message", (reply) => replies.push(reply));
-        await new Promise((resolve) => setTimeout(resolve, 60));
+        // The fixture sends both stale packets before acknowledging the next job.
+        const nextReply = await result(next);
+        expect(nextReply).toEqual({ threadId: first.threadId, value: "next" });
         expect(oldReplies).toHaveLength(1);
-        expect(replies).toEqual([]);
-        await next.terminate();
+        expect(replies).toEqual([nextReply]);
         expect(first.threadId).toBeGreaterThan(0);
     });
 
