@@ -208,6 +208,7 @@ Project config may only set \`"rerank": {"provider": "off"}\`. Project routing, 
         ],
         title: "Advanced",
         intro: "Behavior tuning most installs never need to touch.",
+        outro: "On Unix, if the Magic Context data folder is a symbolic link, Magic Context follows it and applies the usual owner-only permissions to the folder it points to (`0700` for directories, `0600` for files). The startup check leaves symbolic links inside that folder alone. If you turn off `storage.enforce_private_permissions`, Magic Context still uses the linked folder but does not tighten its permissions.",
     },
 ];
 

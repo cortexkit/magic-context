@@ -19,6 +19,7 @@ import {
     readdirSync,
     readlinkSync,
     readSync,
+    realpathSync,
     renameSync,
     rmdirSync,
     rmSync,
@@ -39,9 +40,8 @@ const STORAGE_PERMISSIONS_MARKER_MAX_AGE_MS = 24 * 60 * 60_000;
 const LEGACY_FENCE_TEMP_MIN_AGE_MS = 10 * 60_000;
 
 /**
- * Storage roots that this process checked with tightenStorageTreeSync. Only a
- * root has a marker. Each database open checks its root, so a process that
- * writes storage files knows its root.
+ * Storage roots and their configured aliases. Marker invalidation must stop
+ * at the storage boundary whether a writer uses the physical path or the alias.
  */
 const storagePermissionRoots = new Set<string>();
 
@@ -299,15 +299,51 @@ function readStoragePermissionCertificate(marker: string): Stats | undefined {
     }
 }
 
-/** Tighten existing entries during storage startup; symlinks are never followed. */
+type StoragePermissionCheck = {
+    tightened: number;
+    failures: number;
+    rootLink?: { path: string; target: string } | { path: string; failure: string };
+};
+
+/** Tighten existing entries during startup. Follow a linked storage root, but no links inside it. */
 export function tightenStorageTreeSync(
     directory: string,
     dbPath = join(directory, "context.db"),
-): { tightened: number; failures: number } {
+): StoragePermissionCheck {
     if (process.platform === "win32") {
         return { tightened: 0, failures: 0 };
     }
-    const root = resolve(directory);
+    const enforce = shouldEnforcePrivateStoragePermissions();
+    const startupPath = resolve(directory);
+    let root = startupPath;
+    let rootStat: Stats | undefined;
+    let rootLink: StoragePermissionCheck["rootLink"];
+    try {
+        rootStat = lstatSync(root);
+    } catch {
+        if (enforce) return { tightened: 0, failures: 1 };
+    }
+    if (rootStat?.isSymbolicLink()) {
+        try {
+            root = realpathSync(startupPath);
+            rootStat = lstatSync(root);
+        } catch (error) {
+            const failure = (error as NodeJS.ErrnoException).code ?? String(error);
+            return { tightened: 0, failures: 1, rootLink: { path: startupPath, failure } };
+        }
+        if (!rootStat.isDirectory()) {
+            return {
+                tightened: 0,
+                failures: 1,
+                rootLink: { path: startupPath, failure: `${root} is not a directory` },
+            };
+        }
+        rootLink = { path: startupPath, target: root };
+        // Check the DB and sidecars in the same directory as the walk and marker,
+        // even if the configured link is redirected during the check.
+        dbPath = join(root, basename(dbPath));
+        storagePermissionRoots.add(startupPath);
+    }
     const marker = join(root, STORAGE_PERMISSIONS_MARKER);
     let tightened = 0;
     let failures = 0;
@@ -320,18 +356,12 @@ export function tightenStorageTreeSync(
             return false;
         }
     };
-    if (!shouldEnforcePrivateStoragePermissions()) {
+    if (!enforce) {
         storagePermissionRoots.add(root);
         if (!removeMarker()) failures++;
-        return { tightened, failures };
+        return { tightened, failures, ...(rootLink && { rootLink }) };
     }
-    let rootStat: Stats;
-    try {
-        rootStat = lstatSync(root);
-        if (!rootStat.isDirectory()) return { tightened, failures: 1 };
-    } catch {
-        return { tightened, failures: 1 };
-    }
+    if (!rootStat?.isDirectory()) return { tightened, failures: 1 };
     storagePermissionRoots.add(root);
     let certificate: Stats | undefined;
     let discardMarker = false;
@@ -469,5 +499,5 @@ export function tightenStorageTreeSync(
             }
         }
     }
-    return { tightened, failures };
+    return { tightened, failures, ...(rootLink && { rootLink }) };
 }

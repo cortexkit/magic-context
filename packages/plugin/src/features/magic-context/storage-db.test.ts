@@ -7,6 +7,7 @@ import {
     mkdirSync,
     readdirSync,
     readFileSync,
+    realpathSync,
     rmSync,
     statSync,
     symlinkSync,
@@ -15,6 +16,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import * as logger from "../../shared/logger";
 import {
     __resetRpcIdentityTestHooks,
     __setRpcIdentityTestHooks,
@@ -235,9 +237,7 @@ describe("explicit shared storage resolution", () => {
         it.skipIf(process.platform === "win32")(
             `opens a store whose storage folder is a symbolic link on the first ${asynchronous ? "async" : "sync"} open`,
             async () => {
-                // Released behaviour: a linked storage folder is followed. The
-                // permission pass reports it and does not certify it (see
-                // storage-permissions-startup.test.ts).
+                // A linked storage folder can put the store on another disk.
                 const open = asynchronous ? openDatabaseAsync : openDatabase;
                 const root = makeTempDir("storage-db-linked-root-");
                 const target = join(root, "target");
@@ -253,6 +253,43 @@ describe("explicit shared storage resolution", () => {
                 }
             },
         );
+
+        for (const [kind, code] of [
+            ["dangling", "ENOENT"],
+            ["file", "EEXIST"],
+            ["loop", "ELOOP"],
+        ]) {
+            it.skipIf(process.platform === "win32")(
+                `keeps the ${asynchronous ? "async" : "sync"} open error for a ${kind} root link and logs one permission failure`,
+                async () => {
+                    const open = asynchronous ? openDatabaseAsync : openDatabase;
+                    const root = realpathSync(makeTempDir("storage-db-bad-root-link-"));
+                    const alias = join(root, "alias");
+                    const target = kind === "loop" ? alias : join(root, "target");
+                    if (kind === "file") writeFileSync(target, "not a directory");
+                    symlinkSync(target, alias);
+                    const log = spyOn(logger, "log");
+                    try {
+                        await expect(
+                            Promise.resolve().then(() => open(join(alias, "context.db"))),
+                        ).rejects.toThrow(
+                            "storage unavailable: EEXIST: file already exists, mkdir",
+                        );
+                        const permissionLines = log.mock.calls
+                            .map(([line]) => line)
+                            .filter((line) => line.includes("storage permission tightening"));
+                        expect(permissionLines).toHaveLength(1);
+                        expect(permissionLines[0]).toContain("failures=1");
+                        expect(permissionLines[0]).toContain(alias);
+                        expect(permissionLines[0]).toContain(
+                            kind === "file" ? "not a directory" : code,
+                        );
+                    } finally {
+                        log.mockRestore();
+                    }
+                },
+            );
+        }
 
         it(`selects native turn routing before the first ${asynchronous ? "async" : "sync"} open`, async () => {
             const open = asynchronous ? openDatabaseAsync : openDatabase;
@@ -271,6 +308,28 @@ describe("explicit shared storage resolution", () => {
             await closeDatabase();
         });
     }
+
+    it.skipIf(process.platform === "win32")(
+        "logs the root link and its target once per open",
+        () => {
+            const root = realpathSync(makeTempDir("storage-db-linked-root-log-"));
+            const target = join(root, "target");
+            const alias = join(root, "alias");
+            mkdirSync(target);
+            symlinkSync(target, alias);
+            const log = spyOn(logger, "log");
+            try {
+                expect(openDatabase(join(alias, "context.db"))).not.toBeNull();
+                const linkLines = log.mock.calls
+                    .map(([line]) => line)
+                    .filter((line) => line.includes("resolved storage root link"));
+                expect(linkLines).toHaveLength(1);
+                expect(linkLines[0]).toContain(`${alias} -> ${target}`);
+            } finally {
+                log.mockRestore();
+            }
+        },
+    );
 
     it("keeps path resolution and database opening in the per-test XDG fixture", () => {
         process.env.MAGIC_CONTEXT_TEST_DATA_DIR = makeTempDir("storage-db-test-guard-");

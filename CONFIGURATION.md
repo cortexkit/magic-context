@@ -143,6 +143,8 @@ For semantic search to work cross-harness, every host resolves embedding config 
 
 ### Trusted-group shared storage
 
+On Unix, if the Magic Context data folder is a symbolic link, Magic Context follows it and applies the usual owner-only permissions to the folder it points to (`0700` for directories, `0600` for files). The startup check leaves symbolic links inside that folder alone. If you turn off `storage.enforce_private_permissions`, Magic Context still uses the linked folder but does not tighten its permissions.
+
 By default, Magic Context enforces owner-only `0700` storage directories and `0600` storage files. For a deliberate Unix deployment where trusted users share one store and an operator manages permissions externally, set this **in user config only**:
 
 ```jsonc

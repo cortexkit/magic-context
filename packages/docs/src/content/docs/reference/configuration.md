@@ -296,6 +296,8 @@ Behavior tuning most installs never need to touch.
 | `storage` | object | — | Storage permission policy. The default keeps session content and memories owner-private. Disabling enforcement is for trusted shared-group storage managed externally; TypeScript mode follows that policy, but Rust transform mode always keeps its shared data directory owner-only because ck-mc's store library enforces it. |
 | `storage.enforce_private_permissions` | boolean | `true` | When true (default), Magic Context creates and re-tightens its TypeScript-mode storage directories to owner-only 0700 and storage files to owner-only 0600. Set false only for a deliberate trusted-group deployment whose operator manages those files externally; in TypeScript mode Magic Context then skips its own creation modes and recursive tightening. In Rust transform mode, ck-mc's store library always keeps the shared data directory owner-only 0700, regardless of this setting. USER-LEVEL ONLY — ignored in project config for security. On Windows, POSIX chmod modes are already meaningless, so this setting is a no-op. |
 
+On Unix, if the Magic Context data folder is a symbolic link, Magic Context follows it and applies the usual owner-only permissions to the folder it points to (`0700` for directories, `0600` for files). The startup check leaves symbolic links inside that folder alone. If you turn off `storage.enforce_private_permissions`, Magic Context still uses the linked folder but does not tighten its permissions.
+
 ## Other
 
 | Key | Type | Default | Description |

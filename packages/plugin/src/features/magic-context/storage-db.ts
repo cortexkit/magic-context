@@ -1,6 +1,7 @@
 import {
     type Dirent,
     existsSync,
+    lstatSync,
     readdirSync,
     readFileSync,
     rmdirSync,
@@ -204,16 +205,37 @@ export const LATEST_SUPPORTED_VERSION = 95;
  */
 export const BOOT_SQLITE_BUSY_TIMEOUT_MS = 5_000;
 
-function ensureSecureStorageDir(dir: string): void {
-    // A storage folder that is a symbolic link is followed, as in every release so
-    // far: people keep the store on another disk that way. The startup permission
-    // pass does not follow links, so it reports such a root as a failure and never
-    // certifies it.
-    ensureStorageDirectorySync(dir);
+function isLinkedStorageRoot(dir: string): boolean {
+    if (process.platform === "win32") return false;
+    try {
+        return lstatSync(dir).isSymbolicLink();
+    } catch {
+        return false;
+    }
 }
 
-function tightenStorageTree(dbPath: string): void {
-    const { failures } = tightenStorageTreeSync(dirname(dbPath), dbPath);
+function ensureSecureStorageDir(dir: string, dbPath: string): void {
+    try {
+        ensureStorageDirectorySync(dir);
+    } catch (error) {
+        // A broken root link can fail during mkdir, before the startup check.
+        // Report the permission failure without replacing the original open error.
+        if (isLinkedStorageRoot(dir)) tightenStorageTree(dbPath, true);
+        throw error;
+    }
+}
+
+function tightenStorageTree(dbPath: string, reportResolvedLink = false): void {
+    const { failures, rootLink } = tightenStorageTreeSync(dirname(dbPath), dbPath);
+    if (rootLink && "failure" in rootLink) {
+        log(
+            `[magic-context] storage permission tightening failures=${failures}: storage root link ${rootLink.path}: ${rootLink.failure}`,
+        );
+        return;
+    }
+    if (rootLink && reportResolvedLink) {
+        log(`[magic-context] resolved storage root link ${rootLink.path} -> ${rootLink.target}`);
+    }
     log(`[magic-context] storage permission tightening failures=${failures}`);
 }
 
@@ -310,7 +332,7 @@ function migrateLegacyStorageIfNeeded(targetDbPath: string, targetDbDir: string)
     log(
         `[magic-context] migrating legacy plugin storage: ${legacyDir} -> ${targetDbDir} (legacy left in place as backup)`,
     );
-    ensureSecureStorageDir(targetDbDir);
+    ensureSecureStorageDir(targetDbDir, targetDbPath);
 
     // Fold the legacy WAL into the main DB FIRST so the copied target is one
     // crash-consistent file. Copying .db/-wal/-shm as three separate files is
@@ -1157,9 +1179,9 @@ function finishDatabaseOpen(
     setToolDefinitionDatabase(db);
     loadToolDefinitionMeasurements(db);
     // When enabled, tighten the DB + WAL/SHM sidecars now that WAL mode has
-    // created them. Externally managed trusted-group storage skips this entirely.
+    // created them. storage.enforce_private_permissions=false skips mode changes.
     // SQLite creates WAL sidecars itself; the startup tree pass also covers files
-    // materialized during this open. The helper logs failure counts only.
+    // materialized during this open. The pre-open check logs a resolved root link.
     tightenStorageTree(dbPath);
     databases.set(dbPath, db);
     pathByDatabase.set(db, dbPath);
@@ -2719,8 +2741,8 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
         if (!explicitDbPath) {
             migrateLegacyStorageIfNeeded(dbPath, dbDir);
         }
-        ensureSecureStorageDir(dbDir);
-        tightenStorageTree(dbPath);
+        ensureSecureStorageDir(dbDir, dbPath);
+        tightenStorageTree(dbPath, true);
         if (!existsSync(dbPath) && shouldEnforcePrivateStoragePermissions()) {
             try {
                 writeStorageFileSync(dbPath, new Uint8Array(), { flag: "wx" });
@@ -2841,8 +2863,8 @@ export async function openDatabaseAsync(
         let migrateStartedAt: number | null = null;
         try {
             if (!explicitDbPath) migrateLegacyStorageIfNeeded(dbPath, dbDir);
-            ensureSecureStorageDir(dbDir);
-            tightenStorageTree(dbPath);
+            ensureSecureStorageDir(dbDir, dbPath);
+            tightenStorageTree(dbPath, true);
             if (!existsSync(dbPath) && shouldEnforcePrivateStoragePermissions()) {
                 try {
                     writeStorageFileSync(dbPath, new Uint8Array(), { flag: "wx" });

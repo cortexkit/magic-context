@@ -17,7 +17,7 @@ const markerName = ".storage-permissions-v1";
 function fixture(): string {
     const { dir: parent } = createTestTempDir("mc-storage-startup-");
     roots.push(parent);
-    const root = join(parent, "storage");
+    const root = join(fs.realpathSync(parent), "storage");
     fs.mkdirSync(root, { mode: 0o700 });
     fs.mkdirSync(join(root, "lkg-recovery-fences"), { mode: 0o700 });
     for (let i = 0; i < 2000; i++) {
@@ -203,11 +203,83 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
         expect(fs.lstatSync(loose).mode & 0o777).toBe(0o600);
     });
 
-    it("does not certify a storage root that is a symbolic link", () => {
+    it("tightens and certifies the target of a linked storage root", () => {
         const root = fixture();
-        const alias = join(root, "alias");
+        const alias = join(root, "..", "alias");
+        fs.symlinkSync("storage", alias);
+        const before = fs.lstatSync(alias);
+        const db = join(root, "context.db");
+        const fence = join(root, "lkg-recovery-fences", "5.json");
+        fs.chmodSync(root, 0o755);
+        fs.chmodSync(db, 0o644);
+        fs.chmodSync(fence, 0o644);
+
+        tightenStorageTreeSync(alias);
+
+        expect(fs.lstatSync(root).mode & 0o777).toBe(0o700);
+        expect(fs.lstatSync(db).mode & 0o777).toBe(0o600);
+        expect(fs.lstatSync(fence).mode & 0o777).toBe(0o600);
+        expect(fs.readFileSync(join(root, markerName), "utf8")).toBe("1\n");
+        expect(fs.lstatSync(join(root, markerName)).mode & 0o777).toBe(0o600);
+        const after = fs.lstatSync(alias);
+        expect(after.isSymbolicLink()).toBe(true);
+        expect(after.ino).toBe(before.ino);
+        expect(after.mode).toBe(before.mode);
+        expect(fs.readlinkSync(alias)).toBe("storage");
+    });
+
+    it("uses the bounded check on the target of a certified root link chain", () => {
+        const root = fixture();
+        const alias = join(root, "..", "alias");
+        const intermediate = join(root, "..", "intermediate");
+        fs.symlinkSync(intermediate, alias);
+        fs.symlinkSync(root, intermediate);
+        expect(tightenStorageTreeSync(alias).failures).toBe(0);
+
+        const lstat = spyOn(fs, "lstatSync");
+        try {
+            expect(tightenStorageTreeSync(alias, join(alias, "context.db")).failures).toBe(0);
+            expect(lstat.mock.calls.map(([path]) => path)).toContain(join(root, "context.db"));
+            expect(lstat.mock.calls.length).toBeLessThanOrEqual(10);
+        } finally {
+            lstat.mockRestore();
+        }
+    });
+
+    it("does not follow an interior link to a loose directory outside storage", () => {
+        const root = fixture();
+        const outside = join(root, "..", "outside");
+        const outsideFile = join(outside, "private.json");
+        const link = join(root, "models");
+        fs.mkdirSync(outside);
+        fs.writeFileSync(outsideFile, "{}");
+        fs.chmodSync(outside, 0o755);
+        fs.chmodSync(outsideFile, 0o644);
+        fs.symlinkSync(outside, link);
+        const linkMode = fs.lstatSync(link).mode;
+
+        for (let start = 0; start < 2; start++) {
+            expect(tightenStorageTreeSync(root).failures).toBe(0);
+            expect(fs.lstatSync(link).mode).toBe(linkMode);
+            expect(fs.readlinkSync(link)).toBe(outside);
+            expect(fs.lstatSync(outside).mode & 0o777).toBe(0o755);
+            expect(fs.lstatSync(outsideFile).mode & 0o777).toBe(0o644);
+        }
+    });
+
+    it("does not tighten through a root link with enforcement off", () => {
+        const root = fixture();
+        const alias = join(root, "..", "alias");
+        const file = join(root, "context.db");
         fs.symlinkSync(root, alias);
-        expect(tightenStorageTreeSync(alias).failures).toBe(1);
+        fs.chmodSync(root, 0o755);
+        fs.chmodSync(file, 0o644);
+        fs.writeFileSync(join(root, markerName), "1\n", { mode: 0o600 });
+        setStoragePrivatePermissionEnforcement(false);
+
+        expect(tightenStorageTreeSync(alias)).toMatchObject({ tightened: 0, failures: 0 });
+        expect(fs.lstatSync(root).mode & 0o777).toBe(0o755);
+        expect(fs.lstatSync(file).mode & 0o777).toBe(0o644);
         expect(fs.existsSync(join(root, markerName))).toBe(false);
     });
 
@@ -239,7 +311,10 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
             const root = fixture();
             const marker = join(root, markerName);
             if (kind === "symlink") fs.symlinkSync("context.db", marker);
-            else fs.writeFileSync(marker, "1\n", { mode: 0o644 });
+            else {
+                fs.writeFileSync(marker, "1\n", { mode: 0o600 });
+                fs.chmodSync(marker, 0o644);
+            }
             const lstat = spyOn(fs, "lstatSync");
             try {
                 tightenStorageTreeSync(root);
@@ -399,6 +474,23 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
         const directory = join(root, "lkg-recovery-fences");
         fs.chmodSync(directory, 0o755);
         ensurePrivateStorageDirectorySync(directory);
+        expect(fs.existsSync(join(root, markerName))).toBe(false);
+        expect(fs.existsSync(decoy)).toBe(true);
+    });
+
+    it("stops marker invalidation at the linked storage boundary", () => {
+        const root = fixture();
+        const alias = join(root, "..", "alias");
+        const decoy = join(root, "..", markerName);
+        fs.symlinkSync(root, alias);
+        expect(tightenStorageTreeSync(alias).failures).toBe(0);
+        expect(fs.existsSync(join(root, markerName))).toBe(true);
+        fs.writeFileSync(decoy, "1\n", { mode: 0o600 });
+
+        const directory = join(alias, "lkg-recovery-fences");
+        fs.chmodSync(directory, 0o755);
+        ensurePrivateStorageDirectorySync(directory);
+
         expect(fs.existsSync(join(root, markerName))).toBe(false);
         expect(fs.existsSync(decoy)).toBe(true);
     });
