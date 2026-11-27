@@ -249,7 +249,8 @@ fn generated_sessions_keep_the_lines_promises_at_every_budget() {
                 for (index, (&form, &line)) in plan.forms.iter().zip(&by_line).enumerate() {
                     // Never longer than the line gives, except a hidden summary
                     // scored 90 or more that the floor brings back as a title.
-                    let floor = line == NOT_SHOWN && form == TITLE && plan.floor_scores[index] >= 90.0;
+                    let floor =
+                        line == NOT_SHOWN && form == TITLE && plan.floor_scores[index] >= 90.0;
                     assert!(
                         form >= line || floor,
                         "{at}: summary {index} at {form}, line {line}"
@@ -306,7 +307,10 @@ fn the_plan_fits_its_budget_or_is_empty_at_any_budget() {
                 // Everything older than the last summary stepped down is hidden,
                 // everything newer keeps the line's form, and that summary is
                 // one form short of not fitting.
-                assert!(plan.forms[..last].iter().all(|&form| form == NOT_SHOWN), "{at}");
+                assert!(
+                    plan.forms[..last].iter().all(|&form| form == NOT_SHOWN),
+                    "{at}"
+                );
                 assert_eq!(plan.forms[last + 1..], on_line[last + 1..], "{at}");
                 assert!(plan.forms[last] > on_line[last], "{at}");
                 let mut longer = plan.forms.clone();
@@ -582,12 +586,24 @@ fn stopping_the_sums_early_changes_no_choice() {
             let (mut session, mut table) = Generated::new(&mut random, count);
             if round == 1 {
                 // No stored score the floor could bring back.
-                session.scores.iter_mut().for_each(|score| *score = score.min(85.0));
+                session
+                    .scores
+                    .iter_mut()
+                    .for_each(|score| *score = score.min(85.0));
             }
             let summaries = session.summaries();
             let full: u64 = table.forms.iter().map(|forms| forms[0]).sum();
             let budgets = [
-                1, 10, 100, 1_000, 5_000, 30_000, 98_000, full - 1, full, full * 10,
+                1,
+                10,
+                100,
+                1_000,
+                5_000,
+                30_000,
+                98_000,
+                full - 1,
+                full,
+                full * 10,
             ];
             for budget in budgets.map(|budget| budget as f64) {
                 for reference_scale in [true, false] {
@@ -609,7 +625,10 @@ fn stopping_the_sums_early_changes_no_choice() {
                         let early_asked = asked.asked;
                         asked.asked = 0;
                         let without = plan(&summaries, budget, &mut asked, all);
-                        assert_eq!(with, without, "{count} (round {round}) at {budget}, {early:?}");
+                        assert_eq!(
+                            with, without,
+                            "{count} (round {round}) at {budget}, {early:?}"
+                        );
                         assert!(early_asked <= asked.asked);
                         fewer += usize::from(early_asked < asked.asked);
                         early_total += early_asked;
@@ -619,7 +638,10 @@ fn stopping_the_sums_early_changes_no_choice() {
             }
         }
     }
-    assert!(fewer > 0 && early_total < all_total, "{early_total} against {all_total}");
+    assert!(
+        fewer > 0 && early_total < all_total,
+        "{early_total} against {all_total}"
+    );
 }
 
 #[test]
@@ -647,12 +669,25 @@ fn stopping_the_sums_early_changes_nothing_on_the_lab_session() {
         .collect();
     let mut table = Table {
         forms: fixture.rows.iter().map(|row| row.costs).collect(),
-        lines: fixture.rows.iter().map(|row| row.costs[4].saturating_sub(4)).collect(),
+        lines: fixture
+            .rows
+            .iter()
+            .map(|row| row.costs[4].saturating_sub(4))
+            .collect(),
         header: 12,
     };
     let full: u64 = table.forms.iter().map(|forms| forms[0]).sum();
     for budget in [
-        1, 500, 5_000, 15_000, 30_000, 60_000, 98_000, 150_000, full, full + 1,
+        1,
+        500,
+        5_000,
+        15_000,
+        30_000,
+        60_000,
+        98_000,
+        150_000,
+        full,
+        full + 1,
     ] {
         for options in [
             Options::default(),
@@ -685,7 +720,11 @@ fn stopping_the_sums_early_changes_nothing_on_the_lab_session() {
 fn a_tied_top_group_still_has_floor_titles() {
     // (summaries, share tied at the top, the top score); the tied summaries
     // are the oldest, so the line hides them.
-    let cases = [(1_000usize, 0.03, 100.0), (3_800, 0.015, 95.0), (200, 1.0, 60.0)];
+    let cases = [
+        (1_000usize, 0.03, 100.0),
+        (3_800, 0.015, 95.0),
+        (200, 1.0, 60.0),
+    ];
     for (count, share, top) in cases {
         let tied = (count as f64 * share) as usize;
         let summaries: Vec<Summary> = (0..count)
@@ -720,9 +759,7 @@ fn a_tied_top_group_still_has_floor_titles() {
         // next newer hidden one did not fit.
         let spent = floored.len() as f64 * 20.0;
         assert!(spent <= 0.05 * budget, "{at}: spent {spent}");
-        let hidden_tied: Vec<usize> = (0..tied)
-            .filter(|&i| plan.forms[i] == NOT_SHOWN)
-            .collect();
+        let hidden_tied: Vec<usize> = (0..tied).filter(|&i| plan.forms[i] == NOT_SHOWN).collect();
         assert!(!hidden_tied.is_empty(), "{at}: the cap did not cut");
         assert!(
             hidden_tied.iter().max() < floored.iter().min(),
@@ -732,7 +769,8 @@ fn a_tied_top_group_still_has_floor_titles() {
     }
 }
 
-/// The lab session's floor and forms with the reference scale: 34 summaries
+/// The floor and forms on the real session's shape in
+/// `testdata/history-line-shape.json`, with the reference scale: 34 summaries
 /// qualify, and the forms at the six budgets are pinned (day headings off).
 #[test]
 fn the_lab_sessions_floor_on_the_reference_scale_is_pinned() {
@@ -794,7 +832,11 @@ fn the_lab_sessions_floor_on_the_reference_scale_is_pinned() {
 fn a_score_exactly_at_the_line_is_not_shown() {
     for height in [6.0, 32.0, 70.0, 96.0] {
         assert_eq!(form_under_line(height, height), NOT_SHOWN, "at {height}");
-        assert_eq!(form_under_line(height + 0.01, height), TITLE, "above {height}");
+        assert_eq!(
+            form_under_line(height + 0.01, height),
+            TITLE,
+            "above {height}"
+        );
     }
     // In a plan: the newest summary, scored 6 where the line starts at 6.
     let summaries = [Summary {
@@ -822,7 +864,11 @@ fn an_unknown_window_gives_twenty_five_thousand_tokens() {
     let (session, mut table) = Generated::new(&mut random, 600);
     let plan = plan(&session.summaries(), 0.0, &mut table, Options::default());
     assert_eq!(plan.budget, 25_000.0);
-    assert!(plan.total <= 25_000 && plan.total > 23_000, "{}", plan.total);
+    assert!(
+        plan.total <= 25_000 && plan.total > 23_000,
+        "{}",
+        plan.total
+    );
 }
 
 /// The widest stretch is 12: a session just past fitting in full takes it,
@@ -833,7 +879,12 @@ fn the_widest_stretch_is_twelve() {
     let (session, mut table) = Generated::new(&mut random, 400);
     let summaries = session.summaries();
     let full: u64 = table.forms.iter().map(|forms| forms[0]).sum();
-    let plan = plan(&summaries, full as f64 - 1.0, &mut table, Options::default());
+    let plan = plan(
+        &summaries,
+        full as f64 - 1.0,
+        &mut table,
+        Options::default(),
+    );
     assert_eq!(plan.stretch, Some(12.0));
     assert_eq!(plan.forms, line_forms_with_floor(&plan, 12.0, &mut table));
     // The line's far end at 12: flat at 96 from age 1718.3 × 12.

@@ -9,18 +9,26 @@
 //!
 //! The line has a fixed shape. To fit a budget, its ages are stretched by one
 //! factor: a larger factor lowers the line everywhere, so every summary keeps
-//! its form or gets a longer one. The fold takes the largest factor whose
-//! rendered size fits, counting each summary's chosen form with the session's
-//! own counter. Old short forms are therefore never removed to keep a newer
-//! long one, as a guard that cuts from the oldest end would.
+//! its form or gets a longer one, and the total nearly always grows with it
+//! (the floor's titles for old high scores can make it fall a little). The
+//! fold halves the range of factors and keeps the largest one it saw fit,
+//! counting every piece it looks at with the session's own counter. Old short
+//! forms are therefore never removed to keep a newer long one, as a guard
+//! that cuts from the oldest end would. Only when even the smallest factor
+//! is over the budget (the newest summary alone can be larger than a small
+//! budget) do the shown summaries step down from the oldest end, so the
+//! block always fits or is empty.
 //!
 //! When every summary fits in full there is nothing to trade, and every
-//! summary is shown in full. Old summaries the line hides whose score is 90
-//! or more come back as titles, within a small share of the budget. Titles of
-//! the same day share one heading.
+//! summary is shown in full. Old summaries the line hides whose reference
+//! score is 90 or more come back as titles, within a small share of the
+//! budget. Titles of the same day share one heading.
 //!
-//! Everything here is plain arithmetic on the inputs, so the same summaries,
-//! scores and budget always give the same forms and the same bytes.
+//! Everything here is arithmetic on the inputs, so on one platform the same
+//! summaries, scores and budget always give the same forms and the same
+//! bytes. The line's power function may round differently in the last bit on
+//! another platform; that is enough, because a stored baseline is replayed
+//! as it was rendered, never rendered again on another machine.
 
 use std::collections::HashMap;
 

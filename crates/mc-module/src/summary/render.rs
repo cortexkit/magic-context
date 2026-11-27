@@ -8,10 +8,12 @@
 //! `estimate_tokens` (the session's own token counter at a fold), so the
 //! search for the budget sees the real size of every form.
 //!
-//! How one summary renders (its heading, escaping, legacy rows) is a port of
-//! the TypeScript plugin's `decay-render.ts` and stays byte-identical to it;
-//! goldens in `testdata/` check that. Same summaries and budget always give
-//! the same bytes.
+//! How one summary renders at the four stored forms (its heading, escaping,
+//! legacy rows) is a port of the TypeScript plugin's `decay-render.ts` and
+//! stays byte-identical to it; goldens in `testdata/` check that. The title
+//! form (the heading alone, where the plugin's tier 5 renders nothing) and
+//! the day headings over runs of titles are this renderer's own. Same
+//! summaries and budget always give the same bytes.
 
 use std::collections::HashMap;
 
@@ -1002,8 +1004,9 @@ pub(crate) mod tests {
     }
 }
 
-/// Convert the real history allowance only at a materialization edge. Both the
-/// curve pressure and exact demotion loop consume the resulting local allowance.
+/// Convert the real history allowance only at a materialization edge. The
+/// line's search and the outer fit in `fit_history` both work in the
+/// resulting local allowance.
 pub fn history_local_budget(provider_tokens: f64, model_key: Option<&str>) -> f64 {
     let ratio = crate::count::Counter::for_model(model_key)
         .calibration()

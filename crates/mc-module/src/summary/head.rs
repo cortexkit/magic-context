@@ -421,8 +421,8 @@ impl Baseline {
 }
 
 /// The `<session-history>` block within `budget` local tokens. The render
-/// already fits the joined summaries to the budget, but the wrapper adds a
-/// little, so a block more than 5% over
+/// fits the joined summaries to the budget, or leaves them out, but the
+/// wrapper adds a little, so a block more than 5% over
 /// is rendered again against a budget 15% tighter, at most three times (the
 /// plugin's `decayPressureMultiplier` loop in `materializeM0`). A budget of
 /// zero or less means the window is unknown and is replaced by
@@ -484,8 +484,7 @@ pub(crate) fn fold_with_counts(
     let history = fit_history(
         inputs.history_local_budget_tokens as f64,
         |budget| {
-            let rendered =
-                render_history_counted(
+            let rendered = render_history_counted(
                 &summaries,
                 budget,
                 estimate,

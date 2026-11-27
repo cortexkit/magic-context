@@ -597,7 +597,8 @@ fn stored(rows: &[DecayRenderCompartment]) -> Vec<StoredCompartment> {
 /// What a fold costs on 3,800 summaries, with the exact Claude counter and
 /// with the estimator: the first fold of a session after a start, which
 /// counts every piece the search looks at, and a later fold, which finds
-/// those counts kept; against the curve's history render. Also how large
+/// those counts kept; against the history render of the decay curve the
+/// released build uses ([`super::render_before_line`]). Also how large
 /// history gets with no budget, and how much budget the widest line leaves
 /// unused just past the point where everything fits in full.
 #[test]

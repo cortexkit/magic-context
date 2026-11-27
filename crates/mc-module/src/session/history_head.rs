@@ -471,9 +471,7 @@ impl Session {
                         *start = start
                             .take()
                             .or_else(|| crate::summary::dates::utc_day(first));
-                        *end = end
-                            .take()
-                            .or_else(|| crate::summary::dates::utc_day(last));
+                        *end = end.take().or_else(|| crate::summary::dates::utc_day(last));
                     }
                 }
             };

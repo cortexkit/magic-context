@@ -353,22 +353,61 @@ fn budgets_below_one_summary_are_held() {
     for budget in [1.0, 10.0, 50.0] {
         let rendered = render_history(&normal[..1], budget, count);
         let tokens = counter.count(&rendered.text);
-        assert_fits_or_empty(&rendered, budget, tokens, &format!("one summary at {budget}"));
+        assert_fits_or_empty(
+            &rendered,
+            budget,
+            tokens,
+            &format!("one summary at {budget}"),
+        );
     }
     let mut high_newest = normal.clone();
     high_newest[299].importance = Some(95);
     let rendered = render_history(&high_newest, 200.0, count);
     let tokens = counter.count(&rendered.text);
-    assert_fits_or_empty(&rendered, 200.0, tokens, "300, the newest scored 95, at 200");
+    assert_fits_or_empty(
+        &rendered,
+        200.0,
+        tokens,
+        "300, the newest scored 95, at 200",
+    );
 
     // One summary far larger than the budget, alone and as the newest of 300.
     let vocabulary = [
-        "the", "reader", "parser", "kept", "diagnostics", "stable", "while", "summary_due",
-        "crates/mc-module/src/session.rs", "traced", "notice", "through", "regression", "test",
-        "cargo", "fold", "baseline", "budget", "cache", "prefix", "rebuild", "memory", "and", "of",
+        "the",
+        "reader",
+        "parser",
+        "kept",
+        "diagnostics",
+        "stable",
+        "while",
+        "summary_due",
+        "crates/mc-module/src/session.rs",
+        "traced",
+        "notice",
+        "through",
+        "regression",
+        "test",
+        "cargo",
+        "fold",
+        "baseline",
+        "budget",
+        "cache",
+        "prefix",
+        "rebuild",
+        "memory",
+        "and",
+        "of",
     ];
     let mut huge = normal[299].clone();
-    huge.p1 = Some(vocabulary.iter().cycle().take(40_000).copied().collect::<Vec<_>>().join(" "));
+    huge.p1 = Some(
+        vocabulary
+            .iter()
+            .cycle()
+            .take(40_000)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
     huge.importance = Some(80);
     let full = counter.count(&render_compartment_at_tier(&huge, 1));
     assert!(full > 100_000, "the large summary is {full} tokens");
@@ -381,11 +420,16 @@ fn budgets_below_one_summary_are_held() {
     with[299] = huge;
     let rendered = render_history(&with, 30_000.0, count);
     let tokens = counter.count(&rendered.text);
-    assert_fits_or_empty(&rendered, 30_000.0, tokens, "300, the newest large, at 30000");
+    assert_fits_or_empty(
+        &rendered,
+        30_000.0,
+        tokens,
+        "300, the newest large, at 30000",
+    );
 }
 
-/// What the oldest-first guard of the earlier renderer promised, for any
-/// session and any budget from one token up: the body fits, or it is empty.
+/// For any session and any budget from one token up, the body fits, or it
+/// is empty.
 #[test]
 fn the_body_fits_its_budget_or_is_empty_for_generated_sessions() {
     let mut random = Random::new(80);
@@ -400,23 +444,82 @@ fn the_body_fits_its_budget_or_is_empty_for_generated_sessions() {
 }
 
 const LATIN: [&str; 24] = [
-    "the", "reader", "parser", "kept", "diagnostics", "stable", "while", "summary_due",
-    "crates/mc-module/src/session.rs", "traced", "notice", "through", "regression", "test",
-    "cargo", "fold", "baseline", "budget", "cache", "prefix", "rebuild", "memory", "and", "of",
+    "the",
+    "reader",
+    "parser",
+    "kept",
+    "diagnostics",
+    "stable",
+    "while",
+    "summary_due",
+    "crates/mc-module/src/session.rs",
+    "traced",
+    "notice",
+    "through",
+    "regression",
+    "test",
+    "cargo",
+    "fold",
+    "baseline",
+    "budget",
+    "cache",
+    "prefix",
+    "rebuild",
+    "memory",
+    "and",
+    "of",
 ];
 const CJK: [&str; 24] = [
-    "解析器", "读取了文件", "并保持诊断稳定", "缓存前缀", "重建", "の設定を確認した",
-    "テストを追加", "メモリ", "🚀", "✅", "🔧📦", "历史记录", "折叠", "基线", "ストア", "和", "の",
-    "在", "😀😀", "检查", "修复", "👍", "変更", "确认",
+    "解析器",
+    "读取了文件",
+    "并保持诊断稳定",
+    "缓存前缀",
+    "重建",
+    "の設定を確認した",
+    "テストを追加",
+    "メモリ",
+    "🚀",
+    "✅",
+    "🔧📦",
+    "历史记录",
+    "折叠",
+    "基线",
+    "ストア",
+    "和",
+    "の",
+    "在",
+    "😀😀",
+    "检查",
+    "修复",
+    "👍",
+    "変更",
+    "确认",
 ];
 const CODE: [&str; 24] = [
     "```rust\nfn render_history_with_line(rows: &[Row]) -> RenderedHistory {\n    todo!()\n}\n```",
-    "HISTORY_BUDGET_WHEN_WINDOW_UNKNOWN", "crate::summary::line::CountedCosts::new",
-    "`render_decayed_with_items`", "0x9E37_79B9_7F4A_7C15", "{\"tier\":5,\"tokens\":20}",
-    "SELECT message_id, at_ms FROM app_read_message_index", "->", "=>", "&&", "||",
+    "HISTORY_BUDGET_WHEN_WINDOW_UNKNOWN",
+    "crate::summary::line::CountedCosts::new",
+    "`render_decayed_with_items`",
+    "0x9E37_79B9_7F4A_7C15",
+    "{\"tier\":5,\"tokens\":20}",
+    "SELECT message_id, at_ms FROM app_read_message_index",
+    "->",
+    "=>",
+    "&&",
+    "||",
     "/Users/someone/Work/Projects/CortexKit/magic-context/crates/mc-module/src/summary/head.rs:430",
-    "assert_eq!(plan.total, 4991);", "Vec<Vec<usize>>", "fn", "let", "impl", "the", "and",
-    "a3f9c0d2e1b4", "--features memory-replica", "cargo test --locked", "§12§", "x<y&z",
+    "assert_eq!(plan.total, 4991);",
+    "Vec<Vec<usize>>",
+    "fn",
+    "let",
+    "impl",
+    "the",
+    "and",
+    "a3f9c0d2e1b4",
+    "--features memory-replica",
+    "cargo test --locked",
+    "§12§",
+    "x<y&z",
 ];
 
 /// A generated summary written in `vocabulary`, its forms sized like real
@@ -465,8 +568,8 @@ pub(super) fn script(name: &str, index: usize, count: usize) -> &'static [&'stat
         "newest 400 cjk" => &LATIN,
         "oldest cjk, newest 800 code" if index + 800 >= count => &CODE,
         "oldest cjk, newest 800 code" => &CJK,
-        // The 64 rows spread evenly over the session in Latin, the rest in
-        // CJK and emoji: the rows the earlier estimate measured its ratio on.
+        // 64 rows spread evenly over the session in Latin, the rest in CJK and
+        // emoji: a sample of rows says little about the rest.
         "sample rows latin"
             if (0..64.min(count)).any(|k| k * (count - 1) / 63.min(count - 1).max(1) == index) =>
         {
@@ -742,9 +845,15 @@ fn the_first_plan_charges_the_joints_between_pieces() {
     for budget in [5_000.0, 30_000.0, 98_000.0] {
         let rendered = render_history(&comps, budget, count);
         let plan = &rendered.plan;
-        let pieces = plan.forms.iter().filter(|&&form| form < NOT_SHOWN).count() + plan.groups.len();
+        let pieces =
+            plan.forms.iter().filter(|&&form| form < NOT_SHOWN).count() + plan.groups.len();
         assert_eq!(plan.joints, 2 * (pieces as u64 - 1), "at {budget}");
-        assert_eq!(rendered.body_tokens.len(), 1, "at {budget}: {:?}", rendered.body_tokens);
+        assert_eq!(
+            rendered.body_tokens.len(),
+            1,
+            "at {budget}: {:?}",
+            rendered.body_tokens
+        );
         assert!(rendered.body_tokens[0] as f64 <= budget);
         // A line under a day heading joins with one newline, not two.
         assert!(rendered.body_tokens[0] <= plan.total);

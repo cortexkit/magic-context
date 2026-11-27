@@ -336,10 +336,17 @@ mod tests {
     impl TimedMessages for Listed {
         type Time = u64;
         fn first_in(&self, start: i64, end: i64) -> Option<u64> {
-            self.0.iter().find(|(n, _)| (start..=end).contains(n)).map(|t| t.1)
+            self.0
+                .iter()
+                .find(|(n, _)| (start..=end).contains(n))
+                .map(|t| t.1)
         }
         fn last_in(&self, start: i64, end: i64) -> Option<u64> {
-            self.0.iter().rev().find(|(n, _)| (start..=end).contains(n)).map(|t| t.1)
+            self.0
+                .iter()
+                .rev()
+                .find(|(n, _)| (start..=end).contains(n))
+                .map(|t| t.1)
         }
         fn last_before(&self, number: i64) -> Option<u64> {
             self.0.iter().rev().find(|(n, _)| *n < number).map(|t| t.1)
