@@ -21,7 +21,7 @@ import { isolation, spawnOpencode2, waitForPluginActive } from "../../src/openco
 // which pass the prompt change was detected on, and a late detection shows up as
 // a second large cache write rather than only as a log line.
 
-type Body = { model?: string; instructions?: unknown; input?: unknown[] };
+type Body = { model?: string; instructions?: unknown; input?: Array<{ role?: string }> };
 
 // Large enough that the first message leaves the protected working set, so the
 // drop queued for it is applied on the next cache-losing pass instead of held.
@@ -31,7 +31,15 @@ const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 
 /** Ordered provider-visible units of one request: the instructions, then each input item. */
 function units(body: Body): string[] {
-    return [JSON.stringify(body.instructions ?? null), ...(body.input ?? []).map((item) => JSON.stringify(item))];
+    return [
+        ...(body.instructions === undefined ? [] : [JSON.stringify(body.instructions)]),
+        ...(body.input ?? []).map((item) => JSON.stringify(item)),
+    ];
+}
+
+/** Responses can carry instructions separately or as developer input items. */
+function systemPrompt(body: Body): string {
+    return JSON.stringify([body.instructions, ...(body.input ?? []).filter((item) => item.role === "developer")]);
 }
 
 /**
@@ -76,6 +84,7 @@ test("a restart that changes the system prompt pays exactly one HARD fold, on th
             decision: string;
             hardReasons: string[];
             hashChanged: boolean;
+            systemPrompt: string;
             units: string[];
         }> = [];
         const turn = async (text: string) => {
@@ -109,6 +118,7 @@ test("a restart that changes the system prompt pays exactly one HARD fold, on th
                         return match ? [match[1]!] : [];
                     }),
                     hashChanged: segment.some((entry) => entry.includes("system prompt hash changed")),
+                    systemPrompt: systemPrompt(bodies[index]!),
                     units: units(bodies[index]!),
                 });
                 segment = [];
@@ -183,8 +193,8 @@ test("a restart that changes the system prompt pays exactly one HARD fold, on th
         const afterPasses = passes.slice(beforeRestart);
         expect(after.length).toBe(3);
         // Precondition: the config change really changed the system prompt the provider saw.
-        expect(afterPasses[0]!.units[0]).not.toBe(passes[beforeRestart - 1]!.units[0]);
-        expect(afterPasses[0]!.units[0]).toContain("Turkish");
+        expect(passes[beforeRestart - 1]!.systemPrompt).not.toContain("Turkish");
+        expect(afterPasses[0]!.systemPrompt).toContain("Turkish");
         // Exactly one HARD fold across the three passes after the restart, on the first of them,
         // and the queued drop rides it.
         expect(after.map((pass) => pass.hardReasons)).toEqual([["system_hash"], [], []]);
