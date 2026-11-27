@@ -3,6 +3,7 @@
 import { afterAll, beforeAll, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createOpencodeClient } from "@opencode-ai/sdk";
 import { estimateTokens } from "../../plugin/src/hooks/magic-context/read-session-formatting";
 import { TestHarness } from "../src/harness";
 
@@ -120,7 +121,6 @@ it(
     async () => {
         const parent = await h.createSession();
         for (let index = 0; index < 24; index++) await prompt(parent, `Turn ${index}: ${TURN_TEXT}`);
-        expect(oversized.length).toBeGreaterThan(0);
 
         const response = await fetch(
             `${h.opencode.url}/session/${encodeURIComponent(parent)}/fork?directory=${encodeURIComponent(h.workdir)}`,
@@ -130,6 +130,16 @@ it(
         const fork = ((await response.json()) as { id: string }).id;
         expect(fork).not.toBe(parent);
         expect(forbiddenOpenFiles()).toEqual([]);
+        // The parent need not send an oversized request for its copied raw history
+        // to be oversized. Inspect the clone before Magic Context can reduce it.
+        const client = createOpencodeClient({ baseUrl: h.opencode.url });
+        const forkHistory = await client.session.messages({
+            path: { id: fork }, query: { directory: h.workdir }, throwOnError: true,
+        });
+        const rawText = forkHistory.data!
+            .flatMap(({ parts }) => parts.filter((part) => part.type === "text").map((part) => part.text))
+            .join("\n");
+        expect(estimateTokens(rawText)).toBeGreaterThan(WINDOW);
 
         enforced = true;
         oversized.length = 0;
