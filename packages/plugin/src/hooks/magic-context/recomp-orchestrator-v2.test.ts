@@ -113,15 +113,24 @@ async function withMessages<T>(
     run: () => Promise<T>,
     omitIds: number[] = [],
     noiseFrom = Infinity,
+    {
+        noiseThrough = count - 5,
+        text = (ordinal) => `message ${ordinal} alpha beta gamma delta`,
+        role = () => "user",
+    }: {
+        noiseThrough?: number;
+        text?: (ordinal: number) => string;
+        role?: (ordinal: number) => "user" | "assistant";
+    } = {},
 ): Promise<T> {
     const raw = Array.from({ length: count }, (_, index) => ({
         ordinal: index + 1,
         id: omitIds.includes(index + 1) ? `replacement-${index + 1}` : `m-${index + 1}`,
-        role: index + 1 >= noiseFrom && index < count - 5 ? "assistant" : "user",
+        role: index + 1 >= noiseFrom && index + 1 <= noiseThrough ? "assistant" : role(index + 1),
         parts:
-            index + 1 >= noiseFrom && index < count - 5
+            index + 1 >= noiseFrom && index + 1 <= noiseThrough
                 ? []
-                : [{ type: "text", text: `message ${index + 1} alpha beta gamma delta` }],
+                : [{ type: "text", text: text(index + 1) }],
     }));
     const unregister = rawSession.setRawMessageProvider(sessionId, {
         readMessages: () => raw,
@@ -879,6 +888,76 @@ describe("full recomp staging", () => {
             }),
         );
         expect(range).toStartWith("## Magic Recomp — Partial Complete");
+    });
+
+    it.each([
+        ["full budget", false],
+        ["model failed", true],
+    ] as const)("discards an unsafe resumed chunk only at full budget (%s)", async (_case, modelFailed) => {
+        appendCompartments(db, sessionId, [oldSummary(1, 46, 0)]);
+        saveRecompStagingPass(db, sessionId, 1, [rebuiltPrefix], []);
+        const staged = getRecompStaging(db, sessionId);
+        const live = getCompartments(db, sessionId);
+        const ex = executorCoveringRequestedRange(() => null);
+        const checkedEnds: number[] = [];
+        const realCoverage = validation.validateChunkCoverage;
+        const coverage = spyOn(validation, "validateChunkCoverage").mockImplementation((chunk) => {
+            checkedEnds.push(chunk.endIndex);
+            return !modelFailed || ex.requestedStarts.length > 0
+                ? "unrepresented message"
+                : realCoverage(chunk);
+        });
+        try {
+            const result = await withMessages(
+                sessionId,
+                60,
+                () => runManagedRecomp(context(db, ex), sessionId),
+                [],
+                Infinity,
+                {
+                    text: (ordinal) =>
+                        `message ${ordinal} ${"lorem ipsum dolor sit amet consectetur adipiscing elit ".repeat(60)}`,
+                    role: (ordinal) => (ordinal % 2 === 1 ? "user" : "assistant"),
+                },
+            );
+            expect(result).toContain("The next chunk could not be represented safely. (MC-R01)");
+            if (modelFailed) {
+                expect(ex.requestedStarts.length).toBeGreaterThan(0);
+                expect(ex.requestedStarts.every((start) => start === 19)).toBe(true);
+                expect(checkedEnds).toHaveLength(2);
+                expect(checkedEnds[1]!).toBeLessThan(checkedEnds[0]!);
+                expect(result).toStartWith("## Magic Recomp — Paused");
+                expect(getRecompStaging(db, sessionId)).toEqual(staged);
+            } else {
+                expect(ex.requestedStarts).toEqual([]);
+                expect(checkedEnds).toHaveLength(1);
+                expect(result).toContain("The unfinished rebuild was discarded.");
+                expect(getRecompStaging(db, sessionId)).toBeNull();
+            }
+            expect(getCompartments(db, sessionId)).toEqual(live);
+        } finally {
+            coverage.mockRestore();
+        }
+    });
+
+    it("resumes an empty-chunk pause when the session gains summarizable messages", async () => {
+        appendCompartments(db, sessionId, [oldSummary(1, 46, 0)]);
+        const ex = executorCoveringRequestedRange((start, end) => (start === 1 ? 18 : end));
+        const run = (count: number) =>
+            withMessages(
+                sessionId,
+                count,
+                () => runManagedRecomp(context(db, ex), sessionId),
+                [],
+                19,
+                { noiseThrough: 55 },
+            );
+        expect(await run(60)).toStartWith("## Magic Recomp — Paused");
+        expect(getRecompStaging(db, sessionId)?.lastEndMessage).toBe(18);
+        expect(await run(70)).toStartWith("## Magic Recomp — Complete");
+        expect(ex.requestedStarts).toEqual([1, 19]);
+        expect(getCompartments(db, sessionId).at(-1)?.endMessage).toBe(65);
+        expect(getRecompStaging(db, sessionId)).toBeNull();
     });
 
     it.each(["window", "model"] as const)("keeps staging on repeated %s stops", async (exit) => {

@@ -415,6 +415,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         let passCount = existingStaging?.passCount ?? 0;
         let currentTokenBudget = historianChunkTokens;
         let passAttempt = 1;
+        let hadModelFailureOrBudgetReduction = false;
         const resumed = existingStaging !== null;
 
         if (resumed) {
@@ -475,10 +476,17 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
 
             // Check the live boundary under the same transaction and lease as publication:
             // the normal historian could have added summaries while this rebuild was paused.
+            // Staging does not distinguish a crash from an earlier empty, unsafe or
+            // nonadvancing chunk. Even the first such stop after a crash can discard
+            // staged model work; it never discards the user's published history.
             const promoted = promoteRecompStaging(db, sessionId, leaseHolderId, {
                 allowCarry: heading === "Complete",
                 discardIfShort:
-                    repeatsWithSameInput && resumed && passCount === existingStaging.passCount,
+                    repeatsWithSameInput &&
+                    passAttempt === 1 &&
+                    !hadModelFailureOrBudgetReduction &&
+                    resumed &&
+                    passCount === existingStaging.passCount,
             });
             if (promoted === "would-shrink" || promoted === "discarded") {
                 const detail = renderUserFacingFailure(failure, "markdown", {
@@ -656,6 +664,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                     `recomp prompt fit: ${describeHistorianPromptTrim(promptFit)} requestedChunkTokens=${currentTokenBudget}`,
                 );
             }
+            if (promptFit.chunkTokens < currentTokenBudget) hadModelFailureOrBudgetReduction = true;
             const chunk = readSessionChunk(
                 sessionId,
                 promptFit.chunkTokens,
@@ -745,6 +754,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 language: deps.language,
                 callbacks: {
                     onRepairRetry: async (error) => {
+                        hadModelFailureOrBudgetReduction = true;
                         emitProgress(`Repair retry (pass ${passCount + 1})…`);
                         sessionLog(
                             sessionId,
@@ -758,6 +768,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                         );
                     },
                     onModelFallback: (modelId, index, total) => {
+                        hadModelFailureOrBudgetReduction = true;
                         // Short model label (drop provider prefix) for the sidebar.
                         const short = modelId.includes("/") ? modelId.split("/").pop() : modelId;
                         emitProgress(`Trying fallback ${short} (${index}/${total})…`);
@@ -765,6 +776,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 },
             });
             if (!validatedPass.ok) {
+                hadModelFailureOrBudgetReduction = true;
                 const reducedBudget = getReducedRecompTokenBudget(promptFit.chunkTokens);
                 if (reducedBudget !== null) {
                     const smallerChunk = readSessionChunk(
