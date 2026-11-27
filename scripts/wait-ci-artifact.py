@@ -2,8 +2,10 @@
 """Wait for a same-attempt artifact, stopping on a terminal producer or bounded deadline."""
 
 import argparse
+import contextlib
 import errno
 import http.client
+import io
 import json
 import os
 import socket
@@ -12,6 +14,7 @@ import time
 import unittest
 from datetime import datetime, timezone
 from email.message import Message
+from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -31,7 +34,7 @@ def _timestamp(value, producer):
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (TypeError, ValueError) as error:
-        raise RuntimeError(f"{producer}: invalid producer timestamp {value!r}") from error
+        raise RuntimeError(f"{producer}: invalid timestamp {value!r}") from error
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.timestamp()
@@ -122,7 +125,7 @@ def _is_transient_api_error(error):
     return False
 
 
-def _request_json(request, deadline, clock=time.monotonic, pause=time.sleep, open_url=urlopen):
+def _request_json(request, deadline, clock=time.monotonic, pause=time.sleep, open_url=urlopen, *, max_retries=None):
     retries = 0
     while True:
         remaining = deadline - clock()
@@ -132,7 +135,7 @@ def _request_json(request, deadline, clock=time.monotonic, pause=time.sleep, ope
             with open_url(request, timeout=max(0.001, min(30, remaining))) as response:
                 return json.load(response)
         except Exception as error:
-            if not _is_transient_api_error(error):
+            if not _is_transient_api_error(error) or (max_retries is not None and retries >= max_retries):
                 raise
             remaining = deadline - clock()
             if remaining <= 0:
@@ -171,6 +174,34 @@ def originating_attempt(job, history):
         if other["name"] == job["name"] and other.get("started_at") == started and other.get("run_attempt") is not None
     ]
     return min(same_run + [attempt])
+
+
+def artifact_in_producer_interval(job, artifacts, prefix, current_attempt):
+    start = _timestamp(job.get("started_at"), job["name"])
+    end = _timestamp(job.get("completed_at"), job["name"])
+    if start is None or end is None or end < start:
+        return None
+    name_prefix = prefix + "-"
+    matches = []
+    for item in artifacts:
+        name = item["name"]
+        if item["expired"] or not name.startswith(name_prefix):
+            continue
+        suffix = name.removeprefix(name_prefix)
+        if not (suffix.isascii() and suffix.isdecimal()):
+            continue
+        if not 1 <= int(suffix) <= current_attempt:
+            continue
+        created = _timestamp(item.get("created_at"), f"{job['name']}: artifact {name}")
+        if created is not None and start <= created <= end + ARTIFACT_PROPAGATION_GRACE_SECONDS:
+            matches.append(name)
+    if len(matches) > 1:
+        raise RuntimeError(f"{job['name']}: ambiguous artifacts in producer interval: {', '.join(matches)}")
+    return matches[0] if matches else None
+
+
+class ApiQueryError(RuntimeError):
+    pass
 
 
 class WaitTests(unittest.TestCase):
@@ -267,8 +298,6 @@ class WaitTests(unittest.TestCase):
             resolve_max_wait_seconds(120 * 60, 119 * 60)
 
     def test_transient_api_errors_are_retried(self):
-        import io
-
         failures = [
             HTTPError("https://example.test", 503, "busy", Message(), None),
             URLError(socket.timeout("timed out")),
@@ -292,8 +321,6 @@ class WaitTests(unittest.TestCase):
                 self.assertEqual(pauses, [1])
 
     def test_a_long_transient_outage_is_waited_out_until_the_total_cap(self):
-        import io
-
         now = [0.0]
         pauses = []
         attempts = [0]
@@ -340,6 +367,101 @@ class WaitTests(unittest.TestCase):
         self.assertEqual(producer_for_attempt(current, [previous], "producer")[0]["status"], "queued")
 
 
+class ArtifactSelectionTests(unittest.TestCase):
+    def setUp(self):
+        self.now = 0
+        self.routes = []
+        self.output = io.StringIO()
+        self.current = {
+            "id": 4, "name": "producer", "status": "completed", "conclusion": "success", "run_attempt": 4,
+            "started_at": "2026-11-27T08:00:00Z", "completed_at": "2026-11-27T08:10:00Z",
+        }
+        self.history = [self.current]
+        self.history_broken = True
+        self.artifacts = []
+
+    def add_artifact(self, attempt, created_at):
+        self.artifacts.append({"id": 100 + attempt, "name": f"dist-{attempt}", "expired": False, "created_at": created_at})
+
+    def run_main(self):
+        def pause(seconds):
+            self.now += seconds
+
+        def open_url(request, timeout):
+            route = request.full_url.removeprefix("https://example.test/repos/owner/repo/actions/runs/42")
+            self.routes.append(route)
+            if route == "/attempts/4/jobs?per_page=100&page=1":
+                items = {"jobs": [self.current], "total_count": 1}
+            elif route == "/jobs?filter=all&per_page=100&page=1":
+                items = {"jobs": self.history, "total_count": 101 if self.history_broken else len(self.history)}
+            elif route == "/jobs?filter=all&per_page=100&page=2" and self.history_broken:
+                raise HTTPError(request.full_url, 502, "Bad Gateway", Message(), None)
+            elif route == "/artifacts?per_page=100&page=1":
+                items = {"artifacts": self.artifacts, "total_count": len(self.artifacts)}
+            else:
+                self.fail(f"Unexpected request: {route}")
+            return io.BytesIO(json.dumps(items).encode())
+
+        request_json = _request_json
+
+        def read_page(request, deadline, **kwargs):
+            return request_json(request, deadline, lambda: self.now, pause, open_url, **kwargs)
+
+        env = {"GITHUB_API_URL": "https://example.test", "GITHUB_REPOSITORY": "owner/repo",
+               "GITHUB_RUN_ID": "42", "GITHUB_RUN_ATTEMPT": "4", "GH_TOKEN": "test-token"}
+        argv = [sys.argv[0], "--producer", "producer", "--artifact", "dist", "--timeout-minutes", "2", "--max-wait-minutes", "2"]
+        wait = wait_for_artifact
+        with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv), \
+                patch.object(time, "monotonic", lambda: self.now), patch(f"{__name__}._request_json", read_page), \
+                patch(f"{__name__}.wait_for_artifact", lambda *a, **kw: wait(*a, clock=lambda: self.now, pause=pause, **kw)), \
+                contextlib.redirect_stdout(self.output), contextlib.redirect_stderr(self.output):
+            main()
+
+    def test_history_failure_finds_the_original_artifact_on_attempt_four(self):
+        self.add_artifact(1, "2026-11-27T08:10:45Z")
+        self.run_main()
+        self.assertIn("artifact 101 ready", self.output.getvalue())
+        self.assertEqual(self.routes.count("/jobs?filter=all&per_page=100&page=2"), 2)
+        self.assertEqual(self.now, 1)
+
+    def test_rerun_producer_selects_the_newer_artifact(self):
+        self.add_artifact(1, "2026-11-27T07:59:50Z")
+        self.add_artifact(4, "2026-11-27T08:09:30Z")
+        self.add_artifact(5, "2026-11-27T08:09:40Z")
+        self.run_main()
+        self.assertIn("artifact 104 ready", self.output.getvalue())
+
+    def test_artifact_outside_producer_interval_is_refused_without_retrying_history_again(self):
+        self.add_artifact(1, "2026-11-27T07:59:59Z")
+        self.add_artifact(4, "2026-11-27T08:11:01Z")
+        with self.assertRaisesRegex(RuntimeError, "producer succeeded without artifact dist"):
+            self.run_main()
+        self.assertGreater(self.routes.count("/artifacts?per_page=100&page=1"), 1)
+        self.assertEqual(self.routes.count("/jobs?filter=all&per_page=100&page=1"), 1)
+        self.assertEqual(self.routes.count("/jobs?filter=all&per_page=100&page=2"), 2)
+        self.assertEqual(self.output.getvalue().count("history unavailable"), 1)
+
+    def test_history_and_interval_disagreement_names_both_attempts(self):
+        self.history_broken = False
+        self.add_artifact(1, "2026-11-27T08:09:30Z")
+        self.add_artifact(4, "2026-11-27T07:59:50Z")
+        with self.assertRaisesRegex(RuntimeError, "history selects dist-4.*interval selects dist-1"):
+            self.run_main()
+
+    def test_ambiguous_interval_is_refused(self):
+        self.add_artifact(1, "2026-11-27T08:09:30Z")
+        self.add_artifact(4, "2026-11-27T08:09:40Z")
+        with self.assertRaisesRegex(RuntimeError, "ambiguous.*dist-1.*dist-4"):
+            self.run_main()
+
+    def test_healthy_history_and_interval_agree_on_copied_producer(self):
+        self.history_broken = False
+        self.history.append(dict(self.current, id=1, run_attempt=1))
+        self.add_artifact(1, "2026-11-27T08:09:30Z")
+        self.run_main()
+        self.assertIn("artifact 101 ready", self.output.getvalue())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--producer", required=True)
@@ -358,47 +480,65 @@ def main():
     except ValueError as error:
         parser.error(str(error))
     base = os.environ["GITHUB_API_URL"] + "/repos/" + os.environ["GITHUB_REPOSITORY"] + "/actions/runs/" + os.environ["GITHUB_RUN_ID"]
-    attempt = os.environ["GITHUB_RUN_ATTEMPT"]
+    attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
     deadline = time.monotonic() + max_wait
-    selected_attempt = [attempt]
+    selected_job = None
+    selected_attempt = attempt
+    history_unavailable = False
 
-    def request_page(route):
+    def request_page(route, max_retries):
         request = Request(base + route, headers={
             "Authorization": "Bearer " + os.environ["GH_TOKEN"],
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         })
         try:
-            result = _request_json(request, deadline)
+            return _request_json(request, deadline, max_retries=max_retries)
         except Exception as error:
-            raise RuntimeError(f"{args.producer}: artifact API query failed: {error}") from error
-        return result
+            raise ApiQueryError(f"{args.producer}: artifact API query failed for {route}: {error}") from error
 
-    def inventory(route, kind):
-        first = request_page(route + "per_page=100&page=1")
+    def inventory(route, kind, max_retries=None):
+        first = request_page(route + "per_page=100&page=1", max_retries)
         items = first[kind]
         for page in range(2, (first["total_count"] + 99) // 100 + 1):
-            items.extend(request_page(route + f"per_page=100&page={page}")[kind])
+            items.extend(request_page(route + f"per_page=100&page={page}", max_retries)[kind])
         return items
 
+    def job_history():
+        nonlocal history_unavailable
+        if not history_unavailable:
+            try:
+                return inventory("/jobs?filter=all&", "jobs", max_retries=1)
+            except ApiQueryError as error:
+                history_unavailable = True
+                print(f"{error}; history unavailable, using the producer's interval", file=sys.stderr, flush=True)
+        return None
+
     def fetch(kind):
+        nonlocal selected_job, selected_attempt
         if kind == "jobs":
             current = inventory(f"/attempts/{attempt}/jobs?", "jobs")
-            history = []
-            if not any(job["name"] in (args.producer, "Preflight (checks and dists)") for job in current):
-                history = inventory("/jobs?filter=all&", "jobs")
-            matches = producer_for_attempt(current, history, args.producer)
-            if matches:
-                producer = matches[0]
-                if producer.get("status") == "completed" and producer.get("conclusion") == "success":
-                    if not history:
-                        history = inventory("/jobs?filter=all&", "jobs")
-                    selected_attempt[0] = str(originating_attempt(producer, history) or attempt)
-                else:
-                    selected_attempt[0] = str(producer.get("run_attempt", attempt))
+            history_needed = not any(job["name"] in (args.producer, "Preflight (checks and dists)") for job in current)
+            history = job_history() if history_needed else None
+            matches = producer_for_attempt(current, history or [], args.producer)
+            selected_job = matches[0] if len(matches) == 1 else None
+            selected_attempt = attempt if history is not None else None
+            if selected_job and selected_job["status"] == "completed" and selected_job["conclusion"] == "success":
+                if not history_needed:
+                    history = job_history()
+                selected_attempt = (originating_attempt(selected_job, history) or attempt) if history is not None else None
+            elif selected_job:
+                selected_attempt = selected_job.get("run_attempt") or attempt
             return {"jobs": matches}
-        expected_name = args.artifact + "-" + selected_attempt[0]
-        matches = [item for item in inventory("/artifacts?", "artifacts") if item["name"] == expected_name]
+
+        artifacts = inventory("/artifacts?", "artifacts")
+        expected_name = f"{args.artifact}-{selected_attempt}" if selected_attempt is not None else None
+        if selected_job and selected_job["status"] == "completed":
+            interval_name = artifact_in_producer_interval(selected_job, artifacts, args.artifact, attempt)
+            if expected_name and interval_name and expected_name != interval_name:
+                raise RuntimeError(f"{args.producer}: history selects {expected_name}, but interval selects {interval_name}")
+            expected_name = expected_name or interval_name
+        matches = [item for item in artifacts if item["name"] == expected_name]
         return {"artifacts": [dict(item, name=args.artifact) for item in matches]}
 
     print(
