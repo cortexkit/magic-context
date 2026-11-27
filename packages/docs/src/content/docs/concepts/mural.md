@@ -74,6 +74,7 @@ The gate keeps small projects from waiting forever while avoiding a mostly empty
 ## Requirements and limits
 
 - **Vision model required** for the image part. Non-vision models get the same text baseline as with the feature off (no mural marker, no image).
+- **Magic Context takes the host's word for image support.** On OpenCode 2, a model that you define in your OpenCode config without `capabilities` is listed by the host as accepting text and images. If that model is text-only (many local servers are), declare it, or the mural image is sent to it: set `capabilities.input` to `["text"]` on the model in your OpenCode config. The log says `[mural] skipped: model <provider/model> does not accept images` once per session when a model is treated as text-only.
 - **Opt-in** — disabled by default.
 - Works on **OpenCode, Pi, and OMP** with the same config and shared store. The image envelope differs between OpenCode and the Pi-compatible hosts (file part vs native image content); the PNG and the fold/replay rules match.
 
