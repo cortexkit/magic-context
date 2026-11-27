@@ -227,10 +227,10 @@ export async function seedLegacyPartialRebuild(
         expect(db.prepare(`
             SELECT cached_m0_bytes AS m0, cached_m1_bytes AS m1,
                 cached_m0_last_baseline_end_message_id AS boundary,
-                (SELECT count(*) FROM recomp_compartments WHERE session_id = ?1) AS stagedSummaries,
-                (SELECT count(*) FROM recomp_facts WHERE session_id = ?1) AS stagedFacts
-            FROM session_meta WHERE session_id = ?1
-        `).get(s.sessionId)).toEqual({ m0: null, m1: null, boundary: null, stagedSummaries: 0, stagedFacts: 0 });
+                (SELECT count(*) FROM recomp_compartments WHERE session_id = ?) AS stagedSummaries,
+                (SELECT count(*) FROM recomp_facts WHERE session_id = ?) AS stagedFacts
+            FROM session_meta WHERE session_id = ?
+        `).get(s.sessionId, s.sessionId, s.sessionId)).toEqual({ m0: null, m1: null, boundary: null, stagedSummaries: 0, stagedFacts: 0 });
     } finally {
         db.close();
     }
