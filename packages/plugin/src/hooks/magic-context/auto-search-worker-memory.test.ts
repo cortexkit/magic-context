@@ -10,7 +10,12 @@ import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { WORKER_CLOSE_MESSAGE } from "../../shared/worker-shutdown";
-import type { AutoSearchWorkerInput, AutoSearchWorkerReply } from "./auto-search-worker-client";
+import {
+    type AutoSearchWorkerInput,
+    type AutoSearchWorkerReply,
+    disposeIdleAutoSearchWorkers,
+    searchAutoHint,
+} from "./auto-search-worker-client";
 
 const projectPath = "/synthetic";
 const model = "test-model";
@@ -38,7 +43,7 @@ async function withWorker(
         first: number;
         archived: number;
         advance(ms: number, upkeep?: boolean): Promise<void>;
-        search(): Promise<Result[]>;
+        search(modelId?: string): Promise<Result[]>;
         loads(): number;
     }) => Promise<void>,
 ) {
@@ -101,8 +106,17 @@ async function withWorker(
                 worker.postMessage({ kind: "clock", advance: ms, upkeep });
                 await waitFor("clock");
             },
-            async search() {
-                if (++jobId > 1) worker.postMessage({ kind: "run", input: { ...input, jobId } });
+            async search(modelId = model) {
+                if (++jobId > 1) {
+                    worker.postMessage({
+                        kind: "run",
+                        input: {
+                            ...input,
+                            jobId,
+                            options: { ...input.options, embeddingModelIdOverride: modelId },
+                        },
+                    });
+                }
                 const reply = await waitFor("result");
                 if (reply.kind !== "result") throw new Error("expected search result");
                 return reply.results.filter(
@@ -161,5 +175,45 @@ test("a recent memory-vector load keeps the release's staleness allowance", asyn
         await advance(2, false);
         expect((await search()).map((r) => r.memoryId)).toEqual([archived]);
         expect(loads()).toBe(2);
+    });
+});
+
+test("upkeep reloads only the last model per identity and switching back loads fresh vectors", async () => {
+    await withWorker(async ({ db, first, archived, search, advance, loads }) => {
+        expect((await search()).map((r) => r.memoryId)).toEqual([first, archived]);
+        const otherModel = "other-model";
+        saveEmbedding(db, first, queryVector, otherModel);
+        expect((await search(otherModel)).map((r) => r.memoryId)).toEqual([first]);
+        expect(loads()).toBe(2);
+
+        saveEmbedding(db, first, opposite, model);
+        saveEmbedding(db, first, opposite, otherModel);
+        await advance(minute);
+        expect(loads()).toBe(3);
+        expect(await search(otherModel)).toEqual([]);
+        expect(loads()).toBe(3);
+
+        const switchedBack = await search();
+        expect(loads()).toBe(4);
+        expect(switchedBack.map((r) => r.memoryId)).toEqual([archived]);
+        try {
+            const cold = await searchAutoHint(
+                db,
+                "session",
+                projectPath,
+                "historian cache wiring",
+                {
+                    sources: ["memory"],
+                    memoryEnabled: true,
+                    embeddingEnabled: true,
+                    embeddingModelIdOverride: model,
+                    embedQuery: async () => queryVector,
+                    isEmbeddingRuntimeEnabled: () => true,
+                },
+            );
+            expect(switchedBack).toEqual(cold);
+        } finally {
+            disposeIdleAutoSearchWorkers();
+        }
     });
 });

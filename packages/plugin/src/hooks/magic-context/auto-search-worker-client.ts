@@ -360,7 +360,12 @@ function scheduleSearchWorkerExpiry(db: Database, slot: SearchWorkerSlot): void 
                     cache_ttl?: string;
                     last_response_time?: number;
                 } | null;
-                if (!row?.cache_ttl || !row.last_response_time) continue;
+                if (!row) {
+                    slot.searchedSessions.delete(session);
+                    continue;
+                }
+                if (!row.cache_ttl || !row.last_response_time || row.last_response_time > now)
+                    continue;
                 let ttl: number;
                 try {
                     ttl = Math.min(parseCacheTtl(row.cache_ttl), MAX_SEARCH_WORKER_CACHE_TTL_MS);
@@ -368,7 +373,7 @@ function scheduleSearchWorkerExpiry(db: Database, slot: SearchWorkerSlot): void 
                     continue;
                 }
                 if (ttl <= SEARCH_WORKER_IDLE_MS) continue;
-                expires = Math.max(expires, Math.min(now, row.last_response_time) + ttl);
+                expires = Math.max(expires, row.last_response_time + ttl);
             }
         } catch {
             // The owning database may have closed. Don't retain a worker for

@@ -189,8 +189,7 @@ test("a turn with a cold pool skips the chunk lane at once and warms it in the b
     expect(hasChunkHit(await search())).toBe(true);
 });
 
-test("a cold worker posts the text-only result before it starts reading history vectors", async () => {
-    const db = fixture();
+async function coldWorkerTrace(db: Database, vector: Float32Array | null, virtualUpkeep = false) {
     const input: AutoSearchWorkerInput = {
         jobId: 1,
         job: "search",
@@ -212,33 +211,55 @@ test("a cold worker posts the text-only result before it starts reading history 
         snapshot: undefined,
     };
     const worker = new Worker(new URL("./auto-search-worker-probe.fixture.ts", import.meta.url), {
-        workerData: input,
+        workerData: { ...input, virtualUpkeep },
     });
     const exit = once(worker, "exit");
     const completed = Promise.withResolvers<void>();
     const order: string[] = [];
     let results: UnifiedSearchResult[] = [];
     worker.on("error", completed.reject);
-    worker.on("message", (message: AutoSearchWorkerReply | { kind: "history-load-started" }) => {
-        if (message.kind === "query") {
-            worker.postMessage({ jobId: 1, id: message.id, result: new Float32Array([1, 0]) });
-        } else if (message.kind === "error") {
-            completed.reject(new Error(message.error));
-        } else if (message.kind === "result" || message.kind === "history-load-started") {
-            order.push(message.kind);
-            if (message.kind === "result") results = message.results;
-            if (order.length === 2) completed.resolve();
-        }
-    });
+    worker.on(
+        "message",
+        (message: AutoSearchWorkerReply | { kind: "history-load-started" | "clock" }) => {
+            if (message.kind === "query") {
+                worker.postMessage({ jobId: 1, id: message.id, result: vector });
+            } else if (message.kind === "error") {
+                completed.reject(new Error(message.error));
+            } else if (message.kind === "clock") {
+                completed.resolve();
+            } else if (message.kind === "result" || message.kind === "history-load-started") {
+                order.push(message.kind);
+                if (message.kind === "result") {
+                    results = message.results;
+                    if (virtualUpkeep)
+                        worker.postMessage({ kind: "clock", advance: 5_000, upkeep: true });
+                }
+                if (!virtualUpkeep && order.length === 2) completed.resolve();
+            }
+        },
+    );
     try {
         await completed.promise;
-        expect(order).toEqual(["result", "history-load-started"]);
-        expect(hasChunkHit(results)).toBe(false);
-        expect(results.some((result) => result.source === "message")).toBe(true);
+        return { order, results };
     } finally {
         worker.postMessage(WORKER_CLOSE_MESSAGE);
         await exit;
     }
+}
+
+test("a cold worker posts the text-only result before it starts reading history vectors", async () => {
+    const { order, results } = await coldWorkerTrace(fixture(), new Float32Array([1, 0]));
+    expect(order).toEqual(["result", "history-load-started"]);
+    expect(hasChunkHit(results)).toBe(false);
+    expect(results.some((result) => result.source === "message")).toBe(true);
+});
+
+test("a cold search with a late query vector still schedules history warmup", async () => {
+    // When the vector misses its deadline the owner sends null to the worker.
+    const { order, results } = await coldWorkerTrace(fixture(), null, true);
+    expect(hasChunkHit(results)).toBe(false);
+    expect(results.some((result) => result.source === "message")).toBe(true);
+    expect(order).toEqual(["result", "history-load-started"]);
 });
 
 test("worker diagnostics report cold starts, warm reuse and signature-invalidated peeks without content", async () => {

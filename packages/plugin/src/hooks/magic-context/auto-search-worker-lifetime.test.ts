@@ -33,15 +33,16 @@ function idleClock() {
         ...args: unknown[]
     ) => {
         if (delay === undefined || delay <= 2_000) return schedule(callback, delay, ...args);
-        const handle = schedule(() => {}, 0);
-        cancel(handle);
+        const handle = schedule(() => {}, delay);
         pending.set(handle, { at: now + delay, fire: () => callback(...args) });
         return handle;
     }) as typeof setTimeout);
     const clear = spyOn(globalThis, "clearTimeout").mockImplementation((handle) => {
-        if (!pending.delete(handle as ReturnType<typeof setTimeout>)) cancel(handle);
+        pending.delete(handle as ReturnType<typeof setTimeout>);
+        cancel(handle);
     });
     return {
+        referencedTimers: () => [...pending.keys()].map((handle) => handle.hasRef()),
         advance(delta: number) {
             const end = now + delta;
             for (;;) {
@@ -49,12 +50,14 @@ function idleClock() {
                 if (!next || next[1].at > end) break;
                 const [handle, entry] = next;
                 pending.delete(handle);
+                cancel(handle);
                 now = entry.at;
                 entry.fire();
             }
             now = end;
         },
         restore() {
+            for (const handle of pending.keys()) cancel(handle);
             clear.mockRestore();
             timer.mockRestore();
             time.mockRestore();
@@ -121,6 +124,61 @@ test("a worker with the default cache lifetime is gone after six idle minutes", 
     reply(db);
     clock.advance(2 * minute);
     expect(await reused(db)).toBe(false);
+});
+
+test("a future reply timestamp cannot extend the worker past its five-minute grace", async () => {
+    const db = fixture();
+    setLifetime(db, "session", "1h");
+    expect(await reused(db)).toBe(false);
+    updateSessionMeta(db, "session", { lastResponseTime: Date.now() + 24 * 60 * minute });
+    clock.advance(5 * minute);
+    expect(await reused(db)).toBe(false);
+});
+
+test("expiry after the owner store closes disposes the worker without throwing", async () => {
+    const db = fixture();
+    const ref = spyOn(Worker.prototype, "ref");
+    try {
+        expect(await reused(db)).toBe(false);
+        const exit = once(ref.mock.contexts[0] as Worker, "exit");
+        db.close();
+        expect(() => clock.advance(5 * minute)).not.toThrow();
+        expect(await exit).toEqual([0]);
+    } finally {
+        ref.mockRestore();
+    }
+});
+
+test("every initial and rearmed worker idle timer is unreferenced", async () => {
+    const db = fixture();
+    setLifetime(db, "session", "1h");
+    expect(await reused(db)).toBe(false);
+    reply(db);
+    expect(clock.referencedTimers()).toEqual([false]);
+    clock.advance(5 * minute);
+    expect(clock.referencedTimers()).toEqual([false]);
+    clock.advance(10 * minute);
+    reply(db);
+    clock.advance(45 * minute);
+    expect(clock.referencedTimers()).toEqual([false]);
+    clock.advance(15 * minute);
+    expect(clock.referencedTimers()).toEqual([]);
+});
+
+test("expiry forgets a deleted session while another session keeps the worker alive", async () => {
+    const db = fixture();
+    setLifetime(db, "remaining", "1h");
+    setLifetime(db, "deleted", "1h");
+    expect(await reused(db, "remaining")).toBe(false);
+    expect(await reused(db, "deleted")).toBe(true);
+    reply(db, "remaining");
+    db.prepare("DELETE FROM session_meta WHERE session_id = ?").run("deleted");
+    clock.advance(30 * minute);
+    // A new row for this ID cannot renew the slot unless it searches again.
+    setLifetime(db, "deleted", "1h");
+    reply(db, "deleted");
+    clock.advance(30 * minute);
+    expect(await reused(db, "remaining")).toBe(false);
 });
 
 test("a shared worker uses the last reply of each session, not the last search or the last lease holder", async () => {

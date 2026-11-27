@@ -86,13 +86,10 @@ serveWorkerJobs<AutoSearchWorkerInput>(async (initial, port) => {
     const { closePort } = exitOnWorkerClose(port, () => db.close());
 
     /**
-     * How often a pooled search worker checks whether the sessions it searched have
-     * new or changed history-chunk vectors, and decodes them into its pool. This is
-     * what keeps the pool warm between turns: after a compartment is published or
-     * its vectors are written, the next check picks the rows up, so the next hint
-     * finds the pool warm. Between full metadata probes (at most one a minute per
-     * session), a check that finds nothing new costs one index-only count per
-     * session.
+     * Upkeep keeps history and memory vectors warm between searches. History
+     * normally checks session row counts, with periodic checks of each row's
+     * metadata. Memory refreshes aged entries after a database commit, in at
+     * most one batch per minute.
      */
     const CHUNK_POOL_MAINTENANCE_INTERVAL_MS = 5_000;
     let maintenanceTimer: ReturnType<typeof setInterval> | undefined;

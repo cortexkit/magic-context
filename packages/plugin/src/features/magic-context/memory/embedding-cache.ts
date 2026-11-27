@@ -48,9 +48,9 @@ function loadKeptWorkerEntry(
     loadedAt: number,
 ): Map<number, StoredMemoryEmbedding> {
     const embeddings = loadAllEmbeddings(db, projectPath, modelId);
-    // Capture the revision before the read, so a concurrent commit cannot be
-    // recorded as part of a snapshot that might not contain it.
-    cache.entries.set(cacheKey(projectPath, modelId), {
+    // Callers pass the version they read before loading these vectors. A later
+    // commit must not be mistaken for part of the loaded snapshot.
+    cache.entries.set(projectPath, {
         projectPath,
         modelId,
         version,
@@ -105,7 +105,8 @@ export function getProjectEmbeddings(
     const kept = keptWorkerCaches.get(db);
     if (kept) {
         const now = Date.now();
-        const entry = kept.entries.get(cacheKey(projectPath, modelId));
+        const cached = kept.entries.get(projectPath);
+        const entry = cached?.modelId === modelId ? cached : undefined;
         if (entry && now - entry.loadedAt < DEFAULT_EMBEDDING_CACHE_TTL_MS) return entry.embeddings;
         const version = readDataVersion(db, kept);
         if (entry?.version === version) return entry.embeddings;

@@ -1821,8 +1821,9 @@ async function searchCompartmentChunks(args: {
         if (args.timings) args.timings.chunkPool = "no-vector";
         if (args.diagnostics) args.diagnostics.pool = "no-vector";
         args.reportDiagnostics?.();
-        // A late query vector is common for automatic hints. Warm the pool now
-        // anyway, so a later turn whose vector does arrive finds it ready.
+        // A missing query vector skips scoring, not warmup. Register the scope
+        // for the worker's post-result upkeep, or start warming it directly
+        // when no worker will do the upkeep.
         if (args.warmOnly) {
             if (args.deferWarmup)
                 trackCompartmentChunkSearchPool(
