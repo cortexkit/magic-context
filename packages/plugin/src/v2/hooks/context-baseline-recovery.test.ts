@@ -502,8 +502,10 @@ test("read-only recovery cannot use the fresh-baseline start without a receipt",
     const admission = installBusyAdmission();
     const limit = spyOn(models, "getSdkContextLimit").mockReturnValue(1_000_000);
     const f = await oc2ContextFixture(63045, { ...options, instructions: false });
-    // Hold capture unavailable so a valid in-memory or captured floor cannot
-    // make the two replay inputs match for reasons unrelated to writer admission.
+    // The read-only replay is served only when the input it rebuilds equals
+    // the input saved with the last good request. Keep the post-pass capture
+    // from saving a floor, so those two can only match if the read-only path
+    // wrongly takes the writer's fresh-baseline start.
     const capture = spyOn(NativeFoldReplay.prototype, "capture").mockResolvedValue(undefined);
     try {
         f.compartment(5);

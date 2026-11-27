@@ -2,8 +2,10 @@ import { expect, test } from "bun:test";
 import { clearCachedM0M1 } from "../../features/magic-context/storage-meta-shared";
 import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 
-// A child session can run manual /compact and use the explicit recomp RPC.
-// Its context pass still bypasses summary injection.
+// A subagent session can still get a host checkpoint (a manual /compact) and
+// stored summaries (the /ctx-recomp command rebuilds them on request). Its
+// requests never carry the history head, so nothing would replace the
+// messages a missing checkpoint floor hides: the turn must stay refused.
 test("a checkpoint without a rendered history head still refuses when its floor is gone", async () => {
     const f = await oc2ContextFixture(62997, {
         area: "oc2-child-fresh-baseline-witness",
