@@ -26,6 +26,7 @@ ARTIFACT_PROPAGATION_GRACE_SECONDS = 60
 # outage of a few minutes (502s for minutes at a time on 2026-11-12) is
 # waited out under that cap instead of failing the consuming job.
 TRANSIENT_RETRY_DELAYS = (1, 2, 4, 8, 16, 30)
+RETRY_LOG_INTERVAL_SECONDS = 60
 
 
 def _timestamp(value, producer):
@@ -125,7 +126,15 @@ def _is_transient_api_error(error):
     return False
 
 
-def _request_json(request, deadline, clock=time.monotonic, pause=time.sleep, open_url=urlopen, *, max_retries=None):
+def _api_error_kind(error):
+    if isinstance(error, HTTPError):
+        return f"HTTP {error.code}"
+    if isinstance(error, URLError):
+        return type(error.reason).__name__ if isinstance(error.reason, Exception) else "transport error"
+    return type(error).__name__
+
+
+def _request_json(request, deadline, clock=time.monotonic, pause=time.sleep, open_url=urlopen, *, max_retries=None, on_retry=None):
     retries = 0
     while True:
         remaining = deadline - clock()
@@ -141,6 +150,8 @@ def _request_json(request, deadline, clock=time.monotonic, pause=time.sleep, ope
             if remaining <= 0:
                 raise
             delay = TRANSIENT_RETRY_DELAYS[min(retries, len(TRANSIENT_RETRY_DELAYS) - 1)]
+            if on_retry is not None:
+                on_retry(error)
             pause(min(delay, remaining))
             retries += 1
 
@@ -379,6 +390,7 @@ class ArtifactSelectionTests(unittest.TestCase):
         self.history = [self.current]
         self.history_broken = True
         self.artifacts = []
+        self.artifact_errors_remaining = 0
 
     def add_artifact(self, attempt, created_at):
         self.artifacts.append({"id": 100 + attempt, "name": f"dist-{attempt}", "expired": False, "created_at": created_at})
@@ -395,8 +407,11 @@ class ArtifactSelectionTests(unittest.TestCase):
             elif route == "/jobs?filter=all&per_page=100&page=1":
                 items = {"jobs": self.history, "total_count": 101 if self.history_broken else len(self.history)}
             elif route == "/jobs?filter=all&per_page=100&page=2" and self.history_broken:
-                raise HTTPError(request.full_url, 502, "Bad Gateway", Message(), None)
+                raise HTTPError(request.full_url, 502, "Bad Gateway; secret-response-header", Message(), None)
             elif route == "/artifacts?per_page=100&page=1":
+                if self.artifact_errors_remaining:
+                    self.artifact_errors_remaining -= 1
+                    raise HTTPError(request.full_url, 503, "busy; secret-response-header", Message(), None)
                 items = {"artifacts": self.artifacts, "total_count": len(self.artifacts)}
             else:
                 self.fail(f"Unexpected request: {route}")
@@ -461,6 +476,19 @@ class ArtifactSelectionTests(unittest.TestCase):
         self.run_main()
         self.assertIn("artifact 101 ready", self.output.getvalue())
 
+    def test_api_retry_logs_status_and_route_at_most_once_a_minute_without_secrets(self):
+        self.add_artifact(1, "2026-11-27T08:09:30Z")
+        self.artifact_errors_remaining = 7
+        self.run_main()
+        retry_lines = [line for line in self.output.getvalue().splitlines() if "retrying" in line]
+        self.assertEqual(retry_lines, [
+            "producer: retrying artifact API query /jobs?filter=all&per_page=100&page=2 (HTTP 502)",
+            "producer: retrying artifact API query /artifacts?per_page=100&page=1 (HTTP 503)",
+            "producer: retrying artifact API query /artifacts?per_page=100&page=1 (HTTP 503)",
+        ])
+        self.assertNotIn("test-token", self.output.getvalue())
+        self.assertNotIn("secret-response-header", self.output.getvalue())
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -485,6 +513,14 @@ def main():
     selected_job = None
     selected_attempt = attempt
     history_unavailable = False
+    last_retry_log = {}
+
+    def log_retry(route, error):
+        now = time.monotonic()
+        if route in last_retry_log and now - last_retry_log[route] < RETRY_LOG_INTERVAL_SECONDS:
+            return
+        last_retry_log[route] = now
+        print(f"{args.producer}: retrying artifact API query {route} ({_api_error_kind(error)})", file=sys.stderr, flush=True)
 
     def request_page(route, max_retries):
         request = Request(base + route, headers={
@@ -493,9 +529,9 @@ def main():
             "X-GitHub-Api-Version": "2022-11-28",
         })
         try:
-            return _request_json(request, deadline, max_retries=max_retries)
+            return _request_json(request, deadline, max_retries=max_retries, on_retry=lambda error: log_retry(route, error))
         except Exception as error:
-            raise ApiQueryError(f"{args.producer}: artifact API query failed for {route}: {error}") from error
+            raise ApiQueryError(f"{args.producer}: artifact API query failed for {route} ({_api_error_kind(error)})") from error
 
     def inventory(route, kind, max_retries=None):
         first = request_page(route + "per_page=100&page=1", max_retries)
