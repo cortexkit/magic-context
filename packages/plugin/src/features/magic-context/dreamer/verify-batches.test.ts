@@ -161,23 +161,45 @@ test("fake provider emits five-memory progress and banks an interrupted verdict 
     let child = 0;
     let calls = 0;
     const realTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
     let sliceFiredAt = 0;
+    // The second batch's provider call never answers; the batch's wall slice must
+    // interrupt it. A timer of 30 s or more (the slice) is shortened to 120 ms, and
+    // it also waits until that call is hanging. Without the wait, a slow machine
+    // can spend more than 120 ms before the first provider call, and the slice
+    // then ends the first batch before any call is made.
+    let secondCallHangs = () => {};
+    const hanging = new Promise<void>((resolve) => {
+        secondCallHangs = resolve;
+    });
+    // A slice that already waits for the hanging call can no longer be stopped by
+    // the real clearTimeout, so cleared timers are remembered here.
+    const cleared = new Set<unknown>();
+    const clearTimer = spyOn(globalThis, "clearTimeout").mockImplementation(((
+        handle?: Parameters<typeof clearTimeout>[0],
+    ) => {
+        cleared.add(handle);
+        realClearTimeout(handle);
+    }) as typeof clearTimeout);
     // Speed up the real wall timer without replacing the retry or abort machinery.
     const timer = spyOn(globalThis, "setTimeout").mockImplementation(((
         fn: TimerHandler,
         ms?: number,
         ...args: unknown[]
-    ) =>
-        realTimeout(
-            ms && ms >= 30_000
-                ? (...values: unknown[]) => {
-                      sliceFiredAt ||= Date.now();
-                      (fn as (...a: unknown[]) => void)(...values);
-                  }
-                : fn,
-            ms && ms >= 30_000 ? 120 : ms,
+    ) => {
+        if (!ms || ms < 30_000) return realTimeout(fn, ms, ...args);
+        const handle: ReturnType<typeof setTimeout> = realTimeout(
+            async (...values: unknown[]) => {
+                await hanging;
+                if (cleared.has(handle)) return;
+                sliceFiredAt ||= Date.now();
+                (fn as (...a: unknown[]) => void)(...values);
+            },
+            120,
             ...args,
-        )) as typeof setTimeout);
+        );
+        return handle;
+    }) as typeof setTimeout);
     try {
         const result = await runVerify({
             ...f.args,
@@ -201,7 +223,10 @@ test("fake provider emits five-memory progress and banks an interrupted verdict 
                         .slice(0, child === 1 ? 5 : 1)
                         .map((id) => `<verified id="${id}" files="src/fact.ts"/>`)
                         .join("")}${child === 1 ? "</verify>" : ""}`;
-                    if (child > 1) await new Promise(() => {});
+                    if (child > 1) {
+                        secondCallHangs();
+                        await new Promise(() => {});
+                    }
                 },
                 collect: async () => ({
                     text,
@@ -228,6 +253,7 @@ test("fake provider emits five-memory progress and banks an interrupted verdict 
         );
     } finally {
         timer.mockRestore();
+        clearTimer.mockRestore();
         f.db.close();
     }
 });
