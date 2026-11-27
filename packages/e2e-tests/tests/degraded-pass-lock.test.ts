@@ -286,10 +286,12 @@ for (const [stage, fn, lkg] of [
 			mkdirSync(probeRoot, { recursive: true });
 			const arm = join(probeRoot, "arm");
 			const fired = join(probeRoot, `fired-${Date.now()}`);
+			const noticesPath = join(probeRoot, "refusal-notices.json");
 			const wrapper = join(probeRoot, "plugin.ts");
 			const entry = resolve(import.meta.dir, "../../plugin/src/index.ts");
 			writeFileSync(wrapper, `import mc from ${JSON.stringify(entry)};
 import { dropSlot } from ${JSON.stringify(join(dirname(entry), "hooks/magic-context/lkg-slot.ts"))};
+import { drainNotifications } from ${JSON.stringify(join(dirname(entry), "shared/rpc-notifications.ts"))};
 import { existsSync, writeFileSync } from "node:fs";
 export default {
     id: mc.id,
@@ -319,7 +321,15 @@ export default {
                   }
                 }
             }
-            return transform(input, output);
+            const sessionId = output.messages.find(m => m.info.sessionID)?.info.sessionID;
+            try {
+                return await transform(input, output);
+            } finally {
+                if (${!lkg} && injected && sessionId) {
+                    const notices = drainNotifications(0, sessionId, { sessionOnly: true });
+                    writeFileSync(${JSON.stringify(noticesPath)}, JSON.stringify(notices));
+                }
+            }
         };
         return hooks;
     },
@@ -370,7 +380,16 @@ export default {
 					expect(log).toContain("lkg_replay_served");
 					expect(after.length).toBeGreaterThan(0);
 				} else {
-					expect(outcome).toContain("MC-S06");
+					expect(outcome).toStartWith("refused:");
+					expect(JSON.parse(readFileSync(noticesPath, "utf8"))).toContainEqual(
+						expect.objectContaining({
+							type: "toast",
+							sessionId,
+							payload: expect.objectContaining({
+								message: "Magic Context could not safely prepare this turn [MC-S06] (image-strip-exception: injected image-strip-exception). This request was not sent.",
+							}),
+						}),
+					);
 					expect(after).toEqual([]);
 				}
 				for (const body of after) {

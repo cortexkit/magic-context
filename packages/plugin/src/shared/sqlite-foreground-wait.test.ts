@@ -57,7 +57,7 @@ for (const holdMs of [1000, 2500]) {
         const diagnostics: string[] = [];
         registerSqliteDiagnosticSink((line) => diagnostics.push(line));
         const handler = createMessagesTransformHandler({
-            onStorageBusyRefusal: async (id) => {
+            onRefusal: async (id) => {
                 expect(id).toBe(sessionId);
                 refusals++;
             },
@@ -128,7 +128,7 @@ for (const holdMs of [1000, 2500]) {
             ],
         };
         const handler = createMessagesTransformHandler({
-            onStorageBusyRefusal: async () => {
+            onRefusal: async () => {
                 refusals++;
             },
             magicContext: {

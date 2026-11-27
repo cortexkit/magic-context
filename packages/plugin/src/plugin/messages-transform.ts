@@ -1,5 +1,6 @@
 import {
     type FailClosedController,
+    formatFailClosedBlockingSummary,
     isFailClosedBlockingError,
     resolveAgentNameFromMessages,
     shouldBypassFailClosedBlock,
@@ -75,6 +76,20 @@ export class IncompleteUserMessageError extends Error {
         super("Your message hadn't finished arriving. Send it again.");
         this.name = "IncompleteUserMessageError";
     }
+}
+
+function isTransformRefusal(error: unknown): error is Error & { code: string } {
+    return (
+        isFailClosedBlockingError(error) ||
+        error instanceof EmergencyFailClosedError ||
+        error instanceof RawFallbackContextLimitError ||
+        error instanceof AssistantTerminalRetryError ||
+        error instanceof IncompleteUserMessageError ||
+        error instanceof UnresolvedHistoryBoundaryError ||
+        error instanceof UnmanagedOverWindowError ||
+        error instanceof DegradedPassRefusalError ||
+        error instanceof StorageBusyRefusalError
+    );
 }
 
 type MessageWithParts = {
@@ -423,9 +438,8 @@ export function tryMessagesTransformLkgReplay(args: {
  * Error handling is tiered:
  *
  * - **FailClosedBlockingError / EmergencyFailClosedError / RawFallbackContextLimitError /
- *   AssistantTerminalRetryError**: Intentional loud aborts. Rethrown so the terminal UI surfaces the
- *   message and the turn does not silently fall through to native compaction or a
- *   provider-rejected raw prompt.
+ *   AssistantTerminalRetryError**: Intentional loud aborts. Rethrown so the turn does not
+ *   silently fall through to native compaction or a provider-rejected raw prompt.
  *
  * - **SQLITE_BUSY / SQLITE_LOCKED**: Try validated LKG before backing off on
  *   writer acquisition. Replay or refuse; never retry the mutating transform.
@@ -468,7 +482,7 @@ export function createMessagesTransformHandler(args: {
      * error it raises is converted to passthrough here.
      */
     compactionOff?: boolean;
-    onStorageBusyRefusal?: (sessionId: string, message: string) => Promise<void>;
+    onRefusal?: (sessionId: string, message: string, refusal: Error) => Promise<void>;
     /** Fit saved messages against the host's current tools and paired system prompt. */
     replayFits?: (messages: MessageLike[]) => boolean;
     /** Validate and restore host-owned prompt segments before adopting replayed messages. */
@@ -686,18 +700,9 @@ export function createMessagesTransformHandler(args: {
                 isTransientSqliteError(error) || error instanceof StorageBusyRefusalError;
             if (isTransient) {
                 if (!args.compactionOff) {
-                    const refusal =
-                        error instanceof StorageBusyRefusalError
-                            ? error
-                            : new StorageBusyRefusalError(error, "messages-transform");
-                    if (sessionId && args.onStorageBusyRefusal) {
-                        try {
-                            await args.onStorageBusyRefusal(sessionId, refusal.message);
-                        } catch (noticeError) {
-                            log("[magic-context] storage-busy host refusal failed:", noticeError);
-                        }
-                    }
-                    throw refusal;
+                    throw error instanceof StorageBusyRefusalError
+                        ? error
+                        : new StorageBusyRefusalError(error, "messages-transform");
                 }
                 log(
                     `[magic-context] transform skipped this pass — ${code} (transient; retrying next pass): ${message}`,
@@ -794,6 +799,29 @@ export function createMessagesTransformHandler(args: {
                 const served = await servePass(input, output);
                 returned = true;
                 return served;
+            } catch (error) {
+                // OpenCode hides hook errors. Notify at the boundary, after replay and
+                // compaction-off fallbacks have had their chance to serve the request.
+                if (args.onRefusal && isTransformRefusal(error)) {
+                    const sessionId = servedSessionId ?? resolveSessionId(output);
+                    if (sessionId) {
+                        try {
+                            // A migration toast needs the blockers' PIDs, not their full command lines.
+                            const message =
+                                isFailClosedBlockingError(error) &&
+                                error.reason.kind === "migration_guard"
+                                    ? formatFailClosedBlockingSummary(error.reason)
+                                    : error.message;
+                            const notice = /\bMC-[A-Z]\d{2}\b/.test(message)
+                                ? message
+                                : `${message} [${error.code}]`;
+                            await args.onRefusal(sessionId, notice, error);
+                        } catch (noticeError) {
+                            sessionLog(sessionId, "host refusal notice failed:", noticeError);
+                        }
+                    }
+                }
+                throw error;
             } finally {
                 if (servedSessionId) finishServedRequest(servedSessionId, output, returned);
             }

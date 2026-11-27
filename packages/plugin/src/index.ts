@@ -56,6 +56,7 @@ import {
 import { preloadTokenizer } from "./hooks/magic-context/read-session-formatting";
 import type { RustLkgReplayParticipant } from "./hooks/magic-context/rust-lkg-freeze-registry";
 import type { RustModeModuleClient } from "./hooks/magic-context/rust-mode-transform";
+import { StorageBusyRefusalError } from "./hooks/magic-context/storage-busy-refusal";
 import {
     createBootBudget,
     emitBootEnteringBreadcrumb,
@@ -961,17 +962,19 @@ const server: Plugin = async (ctx) => {
                         getRustReplayParticipant?: () => RustLkgReplayParticipant | null;
                     } | null
                 )?.getRustReplayParticipant?.() ?? null,
-            onStorageBusyRefusal: async (sessionId, message) => {
+            onRefusal: async (sessionId, message, refusal) => {
                 const { sendStatusNotification } = await importPluginModule(
                     () => import("./hooks/magic-context/send-session-notification"),
-                );
-                const { abortSessionFailClosed } = await importPluginModule(
-                    () => import("./hooks/magic-context/transform-postprocess-phase"),
                 );
                 await sendStatusNotification(ctx.client, sessionId, message, {
                     toastDurationMs: 15000,
                 });
-                await abortSessionFailClosed(ctx.client, sessionId);
+                if (refusal instanceof StorageBusyRefusalError) {
+                    const { abortSessionFailClosed } = await importPluginModule(
+                        () => import("./hooks/magic-context/transform-postprocess-phase"),
+                    );
+                    await abortSessionFailClosed(ctx.client, sessionId);
+                }
             },
         }) as unknown as NonNullable<Hooks["experimental.chat.messages.transform"]>,
         "experimental.chat.system.transform": async (input, output) => {

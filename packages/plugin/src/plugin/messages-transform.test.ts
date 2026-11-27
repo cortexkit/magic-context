@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import {
     createFailClosedController,
     FAIL_CLOSED_DOCTOR_COMMAND,
@@ -26,6 +26,7 @@ import {
     recordToolDefinition,
 } from "../features/magic-context/tool-definition-tokens";
 import { DegradedPassRefusalError } from "../hooks/magic-context/degraded-pass-refusal";
+import { EmergencyFailClosedError } from "../hooks/magic-context/emergency-fail-closed";
 import {
     clearLkgMeasuredRequest,
     noteLkgProviderResponse,
@@ -34,11 +35,20 @@ import { saveLkgSlotToDb } from "../hooks/magic-context/lkg-persist";
 import { captureLkgSlot } from "../hooks/magic-context/lkg-replay";
 import { dropSlot, getSlot } from "../hooks/magic-context/lkg-slot";
 import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallback-context-limit";
-import { StorageBusyRefusalError } from "../hooks/magic-context/storage-busy-refusal";
+import {
+    STORAGE_BUSY_MESSAGE,
+    StorageBusyRefusalError,
+} from "../hooks/magic-context/storage-busy-refusal";
 import { finalizeMessageRepresentation } from "../hooks/magic-context/transform-postprocess-phase";
+import { UnmanagedOverWindowError } from "../hooks/magic-context/unmanaged-over-window";
 import { UnresolvedHistoryBoundaryError } from "../hooks/magic-context/unresolved-history-boundary";
+import * as logger from "../shared/logger";
 import { Database } from "../shared/sqlite";
-import { createMessagesTransformHandler, IncompleteUserMessageError } from "./messages-transform";
+import {
+    AssistantTerminalRetryError,
+    createMessagesTransformHandler,
+    IncompleteUserMessageError,
+} from "./messages-transform";
 
 afterEach(() => {
     resetEmergencyRecoveryRegistryForTest();
@@ -180,6 +190,86 @@ function makeOutput(overrides?: { agent?: string; sessionID?: string }): any {
         ],
     };
 }
+
+describe("createMessagesTransformHandler — refusal notices", () => {
+    for (const [refusal, notice] of [
+        [
+            new DegradedPassRefusalError("image-strip-exception", {
+                cause: new Error("strip failed"),
+            }),
+            "Magic Context could not safely prepare this turn [MC-S06] (image-strip-exception: strip failed). This request was not sent.",
+        ],
+        [new UnresolvedHistoryBoundaryError(6_200_000, 500_000), /(MC-H04)/],
+        [new UnmanagedOverWindowError(6_200_000, 500_000), /(MC-H06)/],
+        [
+            new EmergencyFailClosedError("Emergency recovery failed"),
+            "Emergency recovery failed [EMERGENCY_FAIL_CLOSED]",
+        ],
+        [new RawFallbackContextLimitError(3_300_000, 1_000_000), /\[RAW_FALLBACK_CONTEXT_LIMIT\]$/],
+        [new AssistantTerminalRetryError(), /\[ASSISTANT_TERMINAL_RETRY\]$/],
+        [
+            new StorageBusyRefusalError(new Error("fixture busy"), "messages-transform"),
+            `${STORAGE_BUSY_MESSAGE} [STORAGE_BUSY_REFUSAL]`,
+        ],
+    ] as const) {
+        it(`notifies before rejecting with ${refusal.name}`, async () => {
+            const onRefusal = mock(
+                async (_sessionId: string, _message: string, _refusal: Error) => {},
+            );
+            const args = {
+                magicContext: {
+                    "experimental.chat.messages.transform": async () => {
+                        throw refusal;
+                    },
+                },
+                onRefusal,
+            };
+            const output = makeOutput();
+            const before = structuredClone(output);
+
+            await expect(createMessagesTransformHandler(args)({}, output)).rejects.toBe(refusal);
+
+            expect(onRefusal).toHaveBeenCalledTimes(1);
+            expect(onRefusal.mock.calls[0]).toEqual([
+                "ses_test",
+                typeof notice === "string" ? notice : expect.stringMatching(notice),
+                refusal,
+            ]);
+            expect(output).toEqual(before);
+        });
+    }
+
+    it("logs a failed notice and still rejects with the original refusal", async () => {
+        const refusal = new DegradedPassRefusalError("failed-strip");
+        const deliveryError = new Error("notification unavailable");
+        const log = spyOn(logger, "sessionLog");
+        const onRefusal = mock(async () => {
+            throw deliveryError;
+        });
+        const args = {
+            magicContext: {
+                "experimental.chat.messages.transform": async () => {
+                    throw refusal;
+                },
+            },
+            onRefusal,
+        };
+
+        try {
+            await expect(createMessagesTransformHandler(args)({}, makeOutput())).rejects.toBe(
+                refusal,
+            );
+            expect(onRefusal).toHaveBeenCalledTimes(1);
+            expect(log).toHaveBeenCalledWith(
+                "ses_test",
+                "host refusal notice failed:",
+                deliveryError,
+            );
+        } finally {
+            log.mockRestore();
+        }
+    });
+});
 
 describe("createMessagesTransformHandler — error boundary (issue #23)", () => {
     it("refuses SQLITE_BUSY without LKG instead of sending raw", async () => {

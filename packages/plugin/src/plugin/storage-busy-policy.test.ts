@@ -113,8 +113,8 @@ for (const host of ["OpenCode 1", "OpenCode 2"]) {
         const { output } = fixture();
         let notices = 0;
         const handler = createMessagesTransformHandler({
-            onStorageBusyRefusal: async (_session, message) => {
-                expect(message).toBe(STORAGE_BUSY_MESSAGE);
+            onRefusal: async (_session, message) => {
+                expect(message).toBe(`${STORAGE_BUSY_MESSAGE} [STORAGE_BUSY_REFUSAL]`);
                 notices++;
             },
             magicContext: {
