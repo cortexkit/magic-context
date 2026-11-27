@@ -23,15 +23,19 @@ async function until(check: () => boolean, label: string): Promise<void> {
     throw new Error(`timed out waiting for ${label}`);
 }
 
-test("the first real turn caches image input for a project-local model", async () => {
+test("the first real turn caches declared image input and logs the text-only mural skip", async () => {
     const fixture = isolation();
     fixture.env.OPENCODE_DISABLE_MODELS_FETCH = "1";
     const modelIDs = ["mock-model", "other-vision-model"];
+    const modelCapabilities = {
+        "mock-model": { input: ["text"], output: ["text", "image"] },
+        "other-vision-model": { input: ["text", "image"], output: ["text"] },
+    };
     let host: Awaited<ReturnType<typeof spawnOpencode2>> | undefined;
     try {
         host = await spawnOpencode2({
             existingIsolation: fixture,
-            visionModel: true,
+            modelCapabilities,
             additionalModelIDs: modelIDs.slice(1),
             modelContextLimit: 200_000,
             modelInputLimit: 150_000,
@@ -41,6 +45,7 @@ test("the first real turn caches image input for a project-local model", async (
                 historian: { disable: true },
                 dreamer: { disable: true },
                 mural: { enabled: true },
+                memory: { enabled: true },
                 compaction: { enabled: false },
             },
         });
@@ -60,16 +65,18 @@ test("the first real turn caches image input for a project-local model", async (
         const before = models();
         expect(before).toEqual({ "mock-model": undefined, "other-vision-model": undefined });
         const catalog = await client.model.list({ location: { directory: fixture.cwd } });
-        for (const id of modelIDs) {
+        for (const [id, capabilities] of Object.entries(modelCapabilities)) {
             const model = catalog.data.find((row) => row.providerID === "openai" && row.id === id);
-            expect(model?.capabilities.input).toContain("image");
+            expect(model?.capabilities.input).toEqual(capabilities.input);
+            expect(model?.capabilities.output).toEqual(capabilities.output);
         }
 
-        await client.session.prompt({ sessionID: session.id, text: "First vision-model turn" });
+        const text = "First text-only model turn";
+        await client.session.prompt({ sessionID: session.id, text });
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(30_000) });
         const usage = "v2 usage: inputTokens=";
         expect(await waitForPluginLog(fixture.env, usage, 15_000)).toContain(usage);
-        expect(host.mock.requests().some(({ body }) => JSON.stringify(body).includes("First vision-model turn"))).toBe(true);
+        expect(host.mock.requests().some(({ body }) => JSON.stringify(body).includes(text))).toBe(true);
 
         const pid = host.pid!;
         const dbPaths = [...new Set(inspectOpenFiles(pid, fixture.root, fixture.env)
@@ -80,8 +87,16 @@ test("the first real turn caches image input for a project-local model", async (
 
         const after = models();
         console.log(`Project-local models in startup cache: ${Object.values(before).filter(Boolean).length}; after usage: ${JSON.stringify(after)}`);
-        const expected = { limit: 200_000, contextLimit: 200_000, inputLimit: 150_000, outputLimit: 8192, vision: true };
-        expect(after).toEqual({ "mock-model": expected, "other-vision-model": expected });
+        const expected = { limit: 200_000, contextLimit: 200_000, inputLimit: 150_000, outputLimit: 8192 };
+        expect(after).toEqual({
+            "mock-model": { ...expected, vision: false },
+            "other-vision-model": { ...expected, vision: true },
+        });
+        const skipLine = "[mural] skipped: model openai/mock-model does not accept images";
+        const skips = (await waitForPluginLog(fixture.env, skipLine)).split("\n")
+            .filter((line) => line.includes(skipLine));
+        expect(skips).toHaveLength(1);
+        console.log(skips[0]);
     } finally {
         try { await host?.stop(); } finally { cleanupE2ETempDir(fixture.root); }
     }

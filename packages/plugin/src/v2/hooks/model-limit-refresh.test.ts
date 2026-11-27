@@ -10,6 +10,7 @@ import * as transformModule from "../../hooks/magic-context/transform";
 import { _resetDreamTimerForTests } from "../../plugin/dream-timer";
 import {
     getSdkContextLimit,
+    getSdkOutputLimit,
     modelSupportsVision,
     refreshModelLimitsFromApi,
 } from "../../shared/models-dev-cache";
@@ -32,6 +33,8 @@ const config = MagicContextConfigSchema.parse({
 });
 
 let currentLimit = 1_000_000;
+let currentOutputLimit = 32_000;
+let currentInputs = ["text", "image"];
 let listCalls = 0;
 let hook: ((draft: SessionContext) => Promise<void>) | undefined;
 let dispose: (() => Promise<void>) | undefined;
@@ -54,8 +57,8 @@ function catalog() {
                 id: "gpt-4.1",
                 providerID: "openai",
                 name: "GPT-4.1",
-                limit: { context: currentLimit, output: 32_000 },
-                capabilities: { input: ["text", "image"] },
+                limit: { context: currentLimit, output: currentOutputLimit },
+                capabilities: { input: currentInputs },
             },
         ],
     };
@@ -178,12 +181,16 @@ test("re-reads the model catalog after a provider reload", async () => {
     expect(modelSupportsVision("openai", "gpt-4.1")).toBe(true);
 
     currentLimit = 500_000;
+    currentOutputLimit = 0;
+    currentInputs = ["text"];
     releaseEvent();
     await processed;
 
     const draft = pass("u2");
-    draft.model.limit = { context: 450_000, output: 20_000 };
+    draft.model.limit = { context: 450_000, output: 0 };
     await hook!(draft);
     expect(listCalls).toBe(callsAfterFirstPass + 1);
     expect(limit()).toBe(450_000);
+    expect(modelSupportsVision("openai", "gpt-4.1")).toBe(false);
+    expect(getSdkOutputLimit("openai", "gpt-4.1")).toBeUndefined();
 });

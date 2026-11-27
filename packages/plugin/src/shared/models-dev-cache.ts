@@ -317,13 +317,18 @@ function setCachedModelMetadata(
     if (rawLimit === undefined && !allowPartial) return;
 
     const values = [model?.capabilities, model?.modalities, model?.input, model?.attachment];
-    const vision =
-        allowPartial && values.every((value) => value == null)
-            ? undefined
-            : values.some((value) => {
-                  const capabilities = JSON.stringify(value ?? "").toLowerCase();
-                  return capabilities.includes("image") || capabilities.includes("vision");
-              });
+    const capabilityInput =
+        getHarness() === "opencode2"
+            ? (model?.capabilities as { input?: unknown } | undefined)?.input
+            : undefined;
+    const vision = Array.isArray(capabilityInput)
+        ? capabilityInput.includes("image")
+        : allowPartial && values.every((value) => value == null)
+          ? undefined
+          : values.some((value) => {
+                const capabilities = JSON.stringify(value ?? "").toLowerCase();
+                return capabilities.includes("image") || capabilities.includes("vision");
+            });
     const value: CachedModelMetadata = {
         // Keep a sane raw fallback for old persisted-cache readers. Runtime
         // resolution below uses context/input/output so user overrides stay live.
@@ -346,25 +351,48 @@ function setCachedModelMetadata(
     }
 }
 
-function mergeUsageModelMetadata(updates: Map<string, CachedModelMetadata>): void {
+function mergeUsageModelMetadata(
+    updates: Map<string, CachedModelMetadata>,
+    draftOnlyModelKey?: string,
+): void {
     loadPersistedApiCacheOnce();
     const merged = new Map(apiCache);
+    const refreshed = new Set<string>();
     for (const [key, incoming] of updates) {
         const previous = merged.get(key);
-        const contextLimit = incoming.contextLimit ?? previous?.contextLimit;
-        const inputLimit = incoming.inputLimit ?? previous?.inputLimit;
-        const limit = contextLimit ?? inputLimit ?? previous?.limit;
+        const draftOnly = key === draftOnlyModelKey;
+        // A listed row normally replaces all its limits. If neither context nor
+        // input passes the sanity check, keep the old entry. Losing it would
+        // expose the generic 200K default instead of the last sane window.
+        if (!draftOnly && incoming.limit === undefined) continue;
+        const contextLimit =
+            incoming.contextLimit ?? (draftOnly ? previous?.contextLimit : undefined);
+        const inputLimit = incoming.inputLimit ?? (draftOnly ? previous?.inputLimit : undefined);
+        const limit = contextLimit ?? inputLimit ?? (draftOnly ? previous?.limit : undefined);
         if (limit === undefined) continue;
         merged.set(key, {
             limit,
             contextLimit,
             inputLimit,
-            outputLimit: incoming.outputLimit ?? previous?.outputLimit,
+            outputLimit: incoming.outputLimit ?? (draftOnly ? previous?.outputLimit : undefined),
             vision: incoming.vision ?? previous?.vision,
         });
-        if (incoming.limit !== undefined) v2DraftModelLimits.delete(key);
+        if (incoming.limit !== undefined) refreshed.add(key);
     }
+    clearRefreshedV2DraftModelLimits(refreshed, merged);
     apiCache = merged;
+}
+
+function clearRefreshedV2DraftModelLimits(
+    refreshed: ReadonlySet<string>,
+    merged: ReadonlyMap<string, CachedModelMetadata>,
+): void {
+    for (const key of v2DraftModelLimits.keys()) {
+        const tag = key.lastIndexOf(":");
+        const usesRefreshedBase =
+            !merged.has(key) && tag > key.indexOf("/") + 1 && refreshed.has(key.slice(0, tag));
+        if (refreshed.has(key) || usesRefreshedBase) v2DraftModelLimits.delete(key);
+    }
 }
 
 /**
@@ -381,18 +409,28 @@ function mergeUsageModelMetadata(updates: Map<string, CachedModelMetadata>): voi
  * a few times so the cache warms instead of leaving the session on the 128k
  * default until the next restart. A successful load (any providers) stops early.
  *
- * A full catalog replaces the previous snapshot. When OpenCode 2 records
- * usage, its update can add known models and fields, but missing rows and
- * fields are not evidence that the host removed them.
+ * A full catalog replaces the previous snapshot. When OpenCode 2 reads the
+ * list while recording usage, merge mode keeps unlisted models and replaces
+ * the limits for listed models. Only a row synthesized from the request
+ * because its model was not listed retains omitted limits field by field.
  */
 export async function refreshModelLimitsFromApi(
     client: OpencodeClientLike,
-    options?: { retries?: number; retryDelayMs?: number; mode?: "merge" | "replace" },
+    options?: {
+        retries?: number;
+        retryDelayMs?: number;
+        mode?: "merge" | "replace";
+        draftOnlyModelKey?: string;
+    },
 ): Promise<void> {
     const attempts = Math.max(1, (options?.retries ?? 0) + 1);
     const delayMs = options?.retryDelayMs ?? 1000;
     for (let attempt = 1; attempt <= attempts; attempt++) {
-        const ok = await refreshModelLimitsOnce(client, options?.mode === "merge");
+        const ok = await refreshModelLimitsOnce(
+            client,
+            options?.mode === "merge",
+            options?.draftOnlyModelKey,
+        );
         if (ok) return;
         if (attempt < attempts) {
             await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -436,7 +474,11 @@ export function resetAuthRewarmLatchForTest(): void {
 }
 
 /** Single SDK fetch + cache update. Returns true when providers were loaded. */
-async function refreshModelLimitsOnce(client: OpencodeClientLike, merge = false): Promise<boolean> {
+async function refreshModelLimitsOnce(
+    client: OpencodeClientLike,
+    merge = false,
+    draftOnlyModelKey?: string,
+): Promise<boolean> {
     try {
         const result = await client.config.providers();
         const data = (result as { data?: { providers?: Array<unknown> } }).data;
@@ -469,7 +511,7 @@ async function refreshModelLimitsOnce(client: OpencodeClientLike, merge = false)
 
         const previousSize = apiCache?.size ?? null;
         if (merge) {
-            mergeUsageModelMetadata(map);
+            mergeUsageModelMetadata(map, draftOnlyModelKey);
         } else {
             apiCache = map;
             v2DraftModelLimits.clear();

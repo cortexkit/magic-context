@@ -28,6 +28,7 @@ export const MIN_MURAL_CUED_MEMORIES = 15;
 export const MIN_MURAL_COVERAGE = 0.5;
 
 const visionSkipsLogged = new Set<string>();
+const MAX_VISION_SKIP_LOG_KEYS = 4096;
 
 // Resolve the pool on every refresh, but retain at most sixteen exact render inputs
 // per database. Weak ownership releases all PNGs when a database is discarded.
@@ -260,6 +261,10 @@ export function resolveMuralWire(
             const key = JSON.stringify([sessionId, modelKey]);
             if (!visionSkipsLogged.has(key)) {
                 visionSkipsLogged.add(key);
+                if (visionSkipsLogged.size > MAX_VISION_SKIP_LOG_KEYS) {
+                    const oldest = visionSkipsLogged.values().next().value;
+                    if (oldest !== undefined) visionSkipsLogged.delete(oldest);
+                }
                 sessionLog(sessionId, `[mural] skipped: model ${modelKey} does not accept images`);
             }
         }

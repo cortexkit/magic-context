@@ -9,6 +9,7 @@ import {
     getSdkOutputLimit,
     modelSupportsVision,
     refreshModelLimitsFromApi,
+    useV2DraftModelLimits,
 } from "../../shared/models-dev-cache";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import {
@@ -141,23 +142,24 @@ describe("OpenCode 2 usage limit refresh", () => {
         return warmModelLimitCacheFromCatalog(catalogContext(rows), { retries: 0 });
     }
 
-    function update(
-        limit: { context: number; input?: number; output?: number },
-        capabilities?: { input: string[] },
-    ) {
-        const usageUpdate = { retries: 0, mode: "merge" as const };
+    function update(rows: Array<Record<string, unknown>>, draftOnlyModelKey?: string) {
+        const usageUpdate = { retries: 0, mode: "merge" as const, draftOnlyModelKey };
         return refreshModelLimitsFromApi(
             {
                 config: {
                     providers: async () => ({
                         data: {
-                            providers: [{ id: "p", models: { vision: { limit, capabilities } } }],
+                            providers: catalogProvidersPayload(rows),
                         },
                     }),
                 },
             },
             usageUpdate,
         );
+    }
+
+    function draftUpdate(limit: { context: number; input?: number; output?: number }) {
+        return update([{ id: "vision", providerID: "p", limit }], "p/vision");
     }
 
     const disk = () => JSON.parse(readFileSync(file, "utf8"));
@@ -186,7 +188,7 @@ describe("OpenCode 2 usage limit refresh", () => {
 
     test("keeps other models' limits and experimental aliases after a usage update", async () => {
         await warm(visionModel, secondModel);
-        await update({ context: 200_000 });
+        await draftUpdate({ context: 200_000 });
 
         expect(getSdkContextLimit("q", "other", undefined, { reservation: "none" })).toBe(180_000);
         expect(getSdkOutputLimit("q", "other")).toBe(10_000);
@@ -199,7 +201,7 @@ describe("OpenCode 2 usage limit refresh", () => {
 
     test("updates supplied limits without downgrading the selected model's metadata", async () => {
         await warm(visionModel);
-        await update({ context: 190_000, output: 20_000 });
+        await draftUpdate({ context: 190_000, output: 20_000 });
 
         expect(disk()["p/vision"]).toEqual({
             limit: 190_000,
@@ -224,7 +226,7 @@ describe("OpenCode 2 usage limit refresh", () => {
         await warm(visionModel, secondModel);
         expect(disk()["p/vision"]).toMatchObject({ contextLimit: 200_000, vision: true });
         expect(disk()["p/removed"]).toBeUndefined();
-        await update({ context: 190_000 });
+        await draftUpdate({ context: 190_000 });
         clearModelsDevCache();
 
         expect(modelSupportsVision("p", "vision")).toBe(true);
@@ -242,9 +244,138 @@ describe("OpenCode 2 usage limit refresh", () => {
         expect(modelSupportsVision("p", "vision")).toBe(false);
         expect(getSdkContextLimit("p", "vision")).toBe(190_000);
 
-        await update({ context: 200_000 }, { input: ["text", "image"] });
+        await update([{ ...visionModel, limit: { context: 200_000 } }]);
         expect(disk()["p/vision"]).toMatchObject({ contextLimit: 200_000, vision: true });
-        await update({ context: 210_000 }, { input: ["text"] });
+        await update([
+            { ...visionModel, limit: { context: 210_000 }, capabilities: { input: ["text"] } },
+        ]);
         expect(disk()["p/vision"]).toMatchObject({ contextLimit: 210_000, vision: false });
+    });
+
+    test("a usage merge seeds untouched models from disk before its first write", async () => {
+        writeFileSync(
+            file,
+            JSON.stringify({
+                "q/other": {
+                    limit: 180_000,
+                    contextLimit: 180_000,
+                    outputLimit: 10_000,
+                    vision: true,
+                },
+            }),
+        );
+
+        await draftUpdate({ context: 190_000 });
+
+        expect(disk()["q/other"]).toEqual({
+            limit: 180_000,
+            contextLimit: 180_000,
+            outputLimit: 10_000,
+            vision: true,
+        });
+    });
+
+    test("a usage catalog adds its newly listed experimental-mode alias", async () => {
+        await warm(secondModel);
+        await update([visionModel]);
+
+        expect(disk()["p/vision-fast"]).toEqual(disk()["p/vision"]);
+        expect(getSdkContextLimit("p", "vision-fast")).toBe(170_000);
+    });
+
+    test("a synthetic draft preserves a cached output reserve when it omits output", async () => {
+        await warm(visionModel);
+        await draftUpdate({ context: 220_000 });
+
+        expect(disk()["p/vision"].outputLimit).toBe(30_000);
+    });
+
+    test("a listed limit clears an input cap omitted by the host", async () => {
+        await warm({ ...visionModel, limit: { context: 400_000, input: 272_000, output: 32_000 } });
+        await update([{ ...visionModel, limit: { context: 1_050_000, output: 32_000 } }]);
+
+        expect(getSdkContextLimit("p", "vision")).toBe(1_018_000);
+        expect(disk()["p/vision"].inputLimit).toBeUndefined();
+    });
+
+    test("a listed limit drops the stale reserve when the host sets output to zero", async () => {
+        await warm({ ...visionModel, limit: { context: 200_000, output: 8192 } });
+        await update([{ ...visionModel, limit: { context: 200_000, output: 0 } }]);
+
+        expect(getSdkContextLimit("p", "vision")).toBe(200_000);
+        expect(disk()["p/vision"].outputLimit).toBeUndefined();
+    });
+
+    test("project-specific lists replace a model's limits without dropping unlisted models", async () => {
+        await warm(secondModel);
+        await update([
+            { ...visionModel, limit: { context: 400_000, input: 272_000, output: 32_000 } },
+        ]);
+        const listedWindow = () => getSdkContextLimit("p", "vision");
+        expect(listedWindow()).toBe(272_000);
+
+        for (const [context, output, usable] of [
+            [400_000, 32_000, 368_000],
+            [100_000, 8_000, 92_000],
+            [300_000, 8_000, 292_000],
+        ] as const) {
+            await update([{ ...visionModel, limit: { context, output } }]);
+            expect(listedWindow()).toBe(usable);
+        }
+        expect(getSdkOutputLimit("q", "other")).toBe(10_000);
+    });
+
+    test("a listed row without a sane window anchor leaves the last sane window intact", async () => {
+        await warm({ ...visionModel, limit: { context: 64_000, output: 4096 } });
+        await update([{ ...visionModel, limit: { context: 16_000, output: 8192 } }]);
+
+        expect(getSdkContextLimit("p", "vision")).toBe(59_904);
+        expect(disk()["p/vision"].outputLimit).toBe(4096);
+    });
+
+    test("refreshing a base model clears the exact and tag-fallback draft overlays", async () => {
+        await warm({ id: "m", providerID: "custom", limit: { context: 80_000 } });
+        for (const id of ["m", "m:tag"]) {
+            expect(useV2DraftModelLimits("custom", id, { context: 80_000, output: 8000 })).toBe(
+                true,
+            );
+            expect(getSdkContextLimit("custom", id)).toBe(72_000);
+        }
+
+        await update([{ id: "m", providerID: "custom", limit: { context: 40_000, output: 8000 } }]);
+
+        expect(getSdkContextLimit("custom", "m")).toBe(32_000);
+        expect(getSdkContextLimit("custom", "m:tag")).toBe(32_000);
+    });
+
+    test("a base update keeps draft overlays unrelated to its exact key or tag fallback", async () => {
+        await warm(
+            { id: "m", providerID: "custom", limit: { context: 80_000 } },
+            { id: "m:native", providerID: "custom", limit: { context: 80_000 } },
+        );
+        for (const id of ["a", "m:native"]) {
+            expect(useV2DraftModelLimits("custom", id, { context: 80_000, output: 8000 })).toBe(
+                true,
+            );
+        }
+
+        await update([{ id: "m", providerID: "custom", limit: { context: 40_000, output: 8000 } }]);
+
+        expect(getSdkContextLimit("custom", "a")).toBe(72_000);
+        expect(getSdkContextLimit("custom", "m:native")).toBe(72_000);
+    });
+
+    test("only input capabilities decide image support for an OpenCode 2 model row", async () => {
+        const textToImage = {
+            ...visionModel,
+            capabilities: { input: ["text"], output: ["image"] },
+        };
+        await warm(textToImage);
+        expect(modelSupportsVision("p", "vision")).toBe(false);
+
+        await update([visionModel]);
+        expect(modelSupportsVision("p", "vision")).toBe(true);
+        await update([textToImage]);
+        expect(modelSupportsVision("p", "vision")).toBe(false);
     });
 });

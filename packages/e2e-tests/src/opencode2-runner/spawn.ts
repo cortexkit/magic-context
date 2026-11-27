@@ -293,6 +293,7 @@ export interface OpenCode2SpawnOptions {
 	probeStandalone?: boolean;
 	defaultModelID?: string;
     visionModel?: boolean;
+	modelCapabilities?: Record<string, { input: string[]; output?: string[] }>;
 	additionalModelIDs?: string[];
 	/** The host's `variants` list for every configured model (`[{ id: "high" }]`), so a
 	 * session can switch its reasoning variant; OpenCode 2.3 renders that switch as a system
@@ -465,6 +466,9 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 									...(options.modelVariants ? { variants: options.modelVariants } : {}),
 									...(options.modelCompaction ? { compaction: options.modelCompaction } : {}),
 	                                ...(options.visionModel ? { modalities: { input: ["text", "image"], output: ["text"] } } : {}),
+									...(options.modelCapabilities?.[id]
+										? { capabilities: options.modelCapabilities[id] }
+										: {}),
 									limit: {
 										// 2.0.5 required() is unchanged, but 16k minus a 32k output
 										// makes the first-request ceiling negative. Ordinary turns

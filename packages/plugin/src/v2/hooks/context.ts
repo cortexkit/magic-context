@@ -1679,6 +1679,11 @@ export async function registerContext(context: V2Context) {
                                 provider,
                             ]),
                         );
+                        const listedModels = providers.get(draft.model.providerID)?.models;
+                        const draftOnlyModelKey =
+                            listedModels && Object.hasOwn(listedModels, draft.model.id)
+                                ? undefined
+                                : draftModelKey;
                         for (const model of catalogModels(catalog, draft.model)) {
                             rawLimits.set(`${model.providerID}/${model.id}`, model.limit);
                             const provider = providers.get(model.providerID) ?? {
@@ -1708,7 +1713,7 @@ export async function registerContext(context: V2Context) {
                                     }),
                                 },
                             },
-                            { mode: "merge" },
+                            { mode: "merge", draftOnlyModelKey },
                         );
                         queriedModels.add(draftModelKey);
                     }
