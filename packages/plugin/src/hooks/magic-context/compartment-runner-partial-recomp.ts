@@ -163,8 +163,7 @@ export async function executePartialRecompInternal(
             return [
                 "## Magic Recomp — Failed",
                 "",
-                "An unfinished full recomp is already staged for this session.",
-                "Finish it by running `/ctx-recomp` without arguments before starting a partial recomp.",
+                `A full rebuild is paused at message ${existingStaging.lastEndMessage}. Run \`/ctx-recomp\` without arguments to continue it. A partial recomp can start when it completes or is discarded.`,
             ].join("\n");
         }
 

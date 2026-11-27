@@ -392,6 +392,9 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             boundarySnapshot.protectedTailStart,
             rawMessageCount + 1,
         );
+        if (!existingStaging && protectedTailStart === 1) {
+            return "## Magic Recomp — Skipped\n\nNothing to rebuild yet: every message is still in the recent part that is kept raw.";
+        }
         // Intentional: session.get failure is non-fatal — we fall back to deps.directory.
         // OpenCode 2 hands the runner no SDK client, so the lookup is skipped there.
         const parentSessionResponse = await client?.session
@@ -460,7 +463,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             heading: "Complete" | "Partial" = "Partial",
             failure: UserFacingFailureKey = "recomp_unavailable",
             sentence?: string,
-            repeatsWithSameInput = false,
+            deterministicStop = false,
         ): Promise<string | null> {
             if (passCount === 0 || candidateCompartments.length === 0) return null;
 
@@ -482,7 +485,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             const promoted = promoteRecompStaging(db, sessionId, leaseHolderId, {
                 allowCarry: heading === "Complete",
                 discardIfShort:
-                    repeatsWithSameInput &&
+                    deterministicStop &&
                     passAttempt === 1 &&
                     !hadModelFailureOrBudgetReduction &&
                     resumed &&
@@ -502,6 +505,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                         "Your current history is unchanged.",
                     ].join("\n");
                 }
+                const continueFrom = `Run /ctx-recomp again to continue from message ${lastCompartmentEnd + 1}.`;
                 return [
                     RECOMP_PAUSED_HEADING,
                     "",
@@ -509,7 +513,9 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                         ? `Messages 1-${lastCompartmentEnd} of ${totalMessages} are rebuilt and kept for the next run. ${detail}`
                         : `Rebuilt messages 1-${lastCompartmentEnd} of ${totalMessages}, then stopped. ${detail}`,
                     "Your current history is unchanged.",
-                    `Run /ctx-recomp again to continue from message ${lastCompartmentEnd + 1}.`,
+                    deterministicStop
+                        ? `${continueFrom} If it stops at the same place again, the unfinished rebuild is discarded and your history stays as it is.`
+                        : continueFrom,
                 ].join("\n");
             }
             if (promoted === "lease-lost") return PUBLISH_LEASE_LOST;
@@ -599,14 +605,18 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 });
             }
 
+            const rebuilt = promoted.compartments.length - promoted.carriedCount;
+            const rebuiltThrough = `Rebuilt ${rebuilt} history block${rebuilt === 1 ? "" : "s"} through message ${lastCompartmentEnd}.`;
             if (promoted.carriedCount > 0) {
-                const rebuilt = promoted.compartments.length - promoted.carriedCount;
                 return [
                     "## Magic Recomp — Complete",
                     "",
-                    `Rebuilt ${rebuilt} history block${rebuilt === 1 ? "" : "s"} through message ${lastCompartmentEnd}.`,
+                    rebuiltThrough,
                     `Kept ${promoted.carriedCount} existing history block${promoted.carriedCount === 1 ? "" : "s"} through message ${publishedEnd}.`,
                 ].join("\n");
+            }
+            if (heading === "Complete") {
+                return `## Magic Recomp — Complete\n\n${rebuiltThrough} Messages ${offset} to ${protectedTailStart - 1} have nothing to summarize and stay as they are.`;
             }
 
             sessionLog(

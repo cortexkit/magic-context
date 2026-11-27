@@ -511,9 +511,9 @@ describe("full recomp staging", () => {
         const refusal = await withMessages(sessionId, 60, () =>
             runManagedRecomp(context(db, range), sessionId, { range: { start: 1, end: 10 } }),
         );
-        expect(refusal).toContain("An unfinished full recomp is already staged for this session.");
-        expect(refusal).toContain("Finish it by running `/ctx-recomp` without arguments");
-        expect(refusal).not.toContain("cancel");
+        expect(refusal).toBe(
+            "## Magic Recomp — Failed\n\nA full rebuild is paused at message 18. Run `/ctx-recomp` without arguments to continue it. A partial recomp can start when it completes or is discarded.",
+        );
         expect(range.requestedStarts).toEqual([]);
         expect(getRecompStaging(db, sessionId)).toEqual(staged);
 
@@ -602,6 +602,42 @@ describe("full recomp staging", () => {
             Array.from({ length: 6 }, (_, i) => ({ message_ordinal: 41 + i, depth: 2 })),
         );
         expect(markerEnds).toEqual([46]);
+    });
+
+    it("explains what remains raw when completion reaches an empty chunk beyond live coverage", async () => {
+        appendCompartments(db, sessionId, [oldSummary(1, 40, 0)]);
+        const ex = executorCoveringRequestedRange((start, end) =>
+            Math.min(end, start === 1 ? 20 : 40),
+        );
+        const ctx = context(db, ex);
+        const message = await withMessages(
+            sessionId,
+            60,
+            () => runManagedRecomp(ctx, sessionId),
+            [],
+            41,
+        );
+        expect(message).toBe(
+            "## Magic Recomp — Complete\n\nRebuilt 2 history blocks through message 40. Messages 41 to 55 have nothing to summarize and stay as they are.",
+        );
+        expect(ctx.liveSessionState.recompProgressBySession.get(sessionId)?.phase).toBe("done");
+        expect(getCompartments(db, sessionId).at(-1)?.endMessage).toBe(40);
+        expect(getRecompStaging(db, sessionId)).toBeNull();
+    });
+
+    it("reports a protected-tail skip without claiming to have lost a lease", async () => {
+        const ex = executorCoveringRequestedRange();
+        const ctx = context(db, ex);
+        const reason =
+            "Nothing to rebuild yet: every message is still in the recent part that is kept raw.";
+        const message = await withMessages(sessionId, 5, () => runManagedRecomp(ctx, sessionId));
+        expect(message).toBe(`## Magic Recomp — Skipped\n\n${reason}`);
+        expect(ctx.liveSessionState.recompProgressBySession.get(sessionId)).toMatchObject({
+            phase: "skipped",
+            message: reason,
+        });
+        expect(ex.requestedStarts).toEqual([]);
+        expect(getCompartments(db, sessionId)).toEqual([]);
     });
 
     it("does not carry any of an empty tail if one live row has no endpoint ID", async () => {
@@ -857,17 +893,22 @@ describe("full recomp staging", () => {
                   })
                 : undefined;
         try {
-            const run = () =>
-                withMessages(sessionId, 60, () => runManagedRecomp(context(db, ex), sessionId));
+            const ctx = context(db, ex);
+            const run = () => withMessages(sessionId, 60, () => runManagedRecomp(ctx, sessionId));
             const reason = {
                 "empty chunk":
                     "Raw history 19-55 could not be turned into a valid historian chunk. (MC-R01)",
                 "unsafe chunk": "The next chunk could not be represented safely. (MC-R01)",
                 "no progress": "Recomp made no forward progress after messages 19-55. (MC-R01)",
             }[exit];
+            const continues =
+                "Run /ctx-recomp again to continue from message 19. If it stops at the same place again, the unfinished rebuild is discarded and your history stays as it is.";
             expect(await run()).toBe(
-                `## Magic Recomp — Paused\n\nRebuilt messages 1-18 of 55, then stopped. ${reason}\nYour current history is unchanged.\nRun /ctx-recomp again to continue from message 19.`,
+                `## Magic Recomp — Paused\n\nRebuilt messages 1-18 of 55, then stopped. ${reason}\nYour current history is unchanged.\n${continues}`,
             );
+            const paused = ctx.liveSessionState.recompProgressBySession.get(sessionId);
+            expect(paused?.phase).toBe("failed");
+            expect(pausedRecompReason(paused?.message)).toEndWith(continues);
             expect(getRecompStaging(db, sessionId)?.lastEndMessage).toBe(18);
             failedAttempts = 0;
             const result = await run();
@@ -875,6 +916,9 @@ describe("full recomp staging", () => {
                 `## Magic Recomp — Failed\n\nThe rebuild could not get past message 19. ${reason}\nThe unfinished rebuild was discarded.\nYour current history is unchanged.`,
             );
             expect(result).not.toContain("again");
+            const discarded = ctx.liveSessionState.recompProgressBySession.get(sessionId);
+            expect(discarded?.phase).toBe("failed");
+            expect(pausedRecompReason(discarded?.message)).toBeNull();
             expect(getRecompStaging(db, sessionId)).toBeNull();
             expect(getCompartments(db, sessionId)).toEqual(before);
         } finally {
@@ -1035,7 +1079,9 @@ describe("full recomp staging", () => {
         const result = await withMessages(sessionId, 60, () =>
             executeContextRecompWithResult(buildRecompDeps(context(db, executor), sessionId)),
         );
-        expect(result.message).toStartWith("## Magic Recomp — Skipped");
+        expect(result.message).toBe(
+            "## Magic Recomp — Skipped\n\nAnother process acquired the compartment-state lease before recomp could publish. No state was written.",
+        );
         expect(result.published).toBe(false);
         expect(getRecompStaging(db, sessionId)?.lastEndMessage).toBe(early ? 18 : 55);
         expect(getCompartments(db, sessionId)).toEqual(liveBefore);

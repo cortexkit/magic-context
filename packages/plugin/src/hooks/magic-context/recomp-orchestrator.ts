@@ -84,10 +84,8 @@ export function isRecompFailure(message: string): boolean {
     return /—\s*(Failed|Skipped|Paused)/.test(message);
 }
 
-/** A SKIP (vs a true failure): the run no-op'd because the compartment-state
- *  lease was busy (incremental historian comparting the tail, or another process
- *  mutating state). Transient — retrying in a moment succeeds. Matches the
- *  "— Skipped" heading AND the suffix-less lease/already-running no-op text. */
+/** A skip is a neutral no-op: history is not eligible yet, the lease is busy,
+ *  or a run is already active. Match the heading and older heading-less statuses. */
 export function isRecompSkip(message: string): boolean {
     return /—\s*Skipped|already mutating compartment state|already running/i.test(message);
 }
