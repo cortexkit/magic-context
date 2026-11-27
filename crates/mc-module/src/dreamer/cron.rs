@@ -98,7 +98,7 @@ impl Cron {
             })
     }
 
-    fn matches(&self, at: &chrono::DateTime<Local>) -> bool {
+    fn matches<T: TimeZone>(&self, at: &chrono::DateTime<T>) -> bool {
         let day = self.days.contains(&at.day());
         let weekday = self.weekdays.contains(&at.weekday().num_days_from_sunday());
         let day_matches = if self.either_day {
@@ -117,6 +117,10 @@ impl Cron {
 /// names, in local time. `None` for an invalid expression, an empty one (a
 /// task switched off), or one that names no real date (`0 0 31 2 *`).
 pub fn next_due(expression: &str, after: i64) -> Option<i64> {
+    next_due_in(&Local, expression, after)
+}
+
+fn next_due_in<T: TimeZone>(zone: &T, expression: &str, after: i64) -> Option<i64> {
     if expression.trim().is_empty() {
         return None;
     }
@@ -127,11 +131,11 @@ pub fn next_due(expression: &str, after: i64) -> Option<i64> {
         .checked_add(MINUTE)?;
     let end = after.saturating_add(SEARCH);
     while cursor <= end {
-        let at = Local.timestamp_millis_opt(cursor).single()?;
+        let at = zone.timestamp_millis_opt(cursor).single()?;
         // Both real instants of a repeated wall time match the fields.
         // Use the earlier instant regardless of the order of the offsets.
         if cron.matches(&at)
-            && !matches!(Local.from_local_datetime(&at.naive_local()),
+            && !matches!(zone.from_local_datetime(&at.naive_local()),
                 LocalResult::Ambiguous(a, b) if cursor > a.timestamp_millis().min(b.timestamp_millis()))
         {
             return Some(cursor);
