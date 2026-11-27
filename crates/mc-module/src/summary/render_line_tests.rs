@@ -585,12 +585,24 @@ fn a_later_render_counts_only_what_no_earlier_one_counted() {
         chars(text)
     };
     let mut known = vec![super::line::PieceCounts::default(); comps.len()];
-    let first = render_history_counted(&comps, 30_000.0, count, &mut known);
+    let first = render_history_counted(
+        &comps,
+        30_000.0,
+        count,
+        &mut known,
+        super::line::Options::default(),
+    );
     let cold = pieces.replace(0);
-    let second = render_history_counted(&comps, 30_000.0, count, &mut known);
+    let second = render_history_counted(
+        &comps,
+        30_000.0,
+        count,
+        &mut known,
+        super::line::Options::default(),
+    );
     let warm = pieces.get();
     assert_eq!((first.text, first.items), (second.text, second.items));
-    assert!(cold > comps.len(), "{cold} counts");
+    assert!(cold > 100, "{cold} counts");
     // Only the 16 heading pairs the joint is measured on, each heading on
     // its own.
     assert!(warm <= 32, "{warm} counts");
@@ -677,4 +689,44 @@ fn a_revert_forgets_the_counts_of_the_summaries_it_removed() {
     let clone = summaries.clone();
     clone.counts().retain(|_| false);
     assert_eq!(summaries.counts().len(), 0);
+}
+
+/// The rendered bytes and items are the same whether each sum stops once it
+/// is over the budget or adds up every piece, over sessions in several
+/// scripts and budgets from one token to more than everything costs.
+#[test]
+fn stopping_the_sums_early_renders_the_same_bytes() {
+    let all = super::line::Options {
+        stop_early: false,
+        ..Default::default()
+    };
+    let check = |comps: &[DecayRenderCompartment], count: &dyn Fn(&str) -> usize, at: &str| {
+        let full: usize = comps
+            .iter()
+            .map(|c| count(&render_compartment_at_tier(c, 1)) + 2)
+            .sum();
+        for budget in [1, 50, 400, 3_000, 15_000, 60_000, full, full * 2] {
+            let early = render_history(comps, budget as f64, count);
+            let every = render_history_with(comps, budget as f64, count, all);
+            assert_eq!(early.text, every.text, "{at} at {budget}");
+            assert_eq!(early.items, every.items, "{at} at {budget}");
+            assert_eq!(early.body_tokens, every.body_tokens, "{at} at {budget}");
+        }
+    };
+    for (script, count) in [
+        ("latin", 1),
+        ("cjk", 30),
+        ("newest 400 cjk", 600),
+        ("oldest cjk, newest 800 code", 4_000),
+    ] {
+        let comps = scripted_session(script, count, 11);
+        check(&comps, &chars, &format!("{script}, {count}"));
+    }
+    let counter = claude();
+    let exact = |text: &str| counter.count(text) as usize;
+    check(
+        &scripted_session("oldest cjk, newest 800 code", 900, 12),
+        &exact,
+        "exact, 900",
+    );
 }

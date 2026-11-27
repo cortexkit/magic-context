@@ -602,50 +602,37 @@ fn line_fold_time() {
             };
             super::head::fold_with_counts(&inputs, &Default::default(), None, counts)
         };
-        for script in ["latin", "cjk", "newest 400 cjk", "sample rows latin"] {
-            let rows = super::render_line_tests::scripted_session(script, 3_800, 1127);
-            let summaries = stored(&rows);
-            for budget in [30_000u64, 98_000] {
-                let first = best_of_3(&mut || {
-                    let counts = HistoryCounts::default();
-                    timed(&mut || {
-                        fold(&summaries, budget, &counts);
-                    })
-                });
-                let counts = HistoryCounts::default();
-                let cold = fold(&summaries, budget, &counts);
-                let warm = best_of_3(&mut || {
-                    timed(&mut || {
-                        let again = fold(&summaries, budget, &counts);
-                        assert_eq!(again.m0, cold.m0);
-                    })
-                });
-                let curve = best_of_3(&mut || {
-                    timed(&mut || {
-                        fold_history(&rows, budget as f64, counter, false);
-                    })
-                });
-                println!(
-                    "FOLD_TIME {name}, {script}, 3800 at {budget}: first fold {first:.0} ms, later fold {warm:.0} ms; the curve's history alone {curve:.0} ms"
-                );
-            }
-        }
         for count in [500, 3_800] {
-            let summaries = stored(&super::render_line_tests::scripted_session(
-                "latin", count, 1127,
-            ));
-            for budget in [30_000u64, 98_000] {
-                let first = best_of_3(&mut || {
+            for script in ["latin", "cjk", "newest 400 cjk", "sample rows latin"] {
+                let rows = super::render_line_tests::scripted_session(script, count, 1127);
+                let summaries = stored(&rows);
+                for budget in [30_000u64, 98_000] {
+                    let first = best_of_3(&mut || {
+                        let counts = HistoryCounts::default();
+                        timed(&mut || {
+                            fold(&summaries, budget, &counts);
+                        })
+                    });
                     let counts = HistoryCounts::default();
-                    timed(&mut || {
-                        fold(&summaries, budget, &counts);
-                    })
-                });
-                println!("FIRST_FOLD {name}, latin, {count} at {budget}: {first:.0} ms");
+                    let cold = fold(&summaries, budget, &counts);
+                    let warm = best_of_3(&mut || {
+                        timed(&mut || {
+                            let again = fold(&summaries, budget, &counts);
+                            assert_eq!(again.m0, cold.m0);
+                        })
+                    });
+                    let curve = best_of_3(&mut || {
+                        timed(&mut || {
+                            fold_history(&rows, budget as f64, counter, false);
+                        })
+                    });
+                    println!(
+                        "FOLD_TIME {name}, {script}, {count} at {budget}: first fold {first:.0} ms, later fold {warm:.0} ms; the curve's history alone {curve:.0} ms"
+                    );
+                }
             }
         }
     }
-
     let counter = Counter::for_model(Some(DEFAULT_MODEL));
     let estimate = |text: &str| counter.count(text) as usize;
     for count in [3_800, 1_000, 200] {

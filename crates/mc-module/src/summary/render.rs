@@ -449,6 +449,25 @@ pub(crate) fn render_history(
         history_budget_tokens,
         estimate_tokens,
         &mut known,
+        Options::default(),
+    )
+}
+
+/// [`render_history`] with the line's switches set by a test.
+#[cfg(test)]
+pub(crate) fn render_history_with(
+    compartments: &[DecayRenderCompartment],
+    history_budget_tokens: f64,
+    estimate_tokens: impl Fn(&str) -> usize,
+    options: Options,
+) -> RenderedHistory {
+    let mut known = vec![PieceCounts::default(); compartments.len()];
+    render_history_counted(
+        compartments,
+        history_budget_tokens,
+        estimate_tokens,
+        &mut known,
+        options,
     )
 }
 
@@ -459,6 +478,7 @@ pub(crate) fn render_history_counted(
     history_budget_tokens: f64,
     estimate_tokens: impl Fn(&str) -> usize,
     known: &mut [PieceCounts],
+    options: Options,
 ) -> RenderedHistory {
     let indices: Vec<usize> = compartments
         .iter()
@@ -468,7 +488,14 @@ pub(crate) fn render_history_counted(
         .collect();
     let rows: Vec<&DecayRenderCompartment> = indices.iter().map(|&i| &compartments[i]).collect();
     let mut counts: Vec<PieceCounts> = indices.iter().map(|&i| known[i]).collect();
-    let rendered = render_rows(&rows, &indices, history_budget_tokens, estimate_tokens, &mut counts);
+    let rendered = render_rows(
+        &rows,
+        &indices,
+        history_budget_tokens,
+        estimate_tokens,
+        &mut counts,
+        options,
+    );
     for (&i, counted) in indices.iter().zip(counts) {
         known[i] = counted;
     }
@@ -483,6 +510,7 @@ fn render_rows(
     history_budget_tokens: f64,
     estimate_tokens: impl Fn(&str) -> usize,
     known: &mut [PieceCounts],
+    options: Options,
 ) -> RenderedHistory {
     let summaries: Vec<Summary> = rows
         .iter()
@@ -522,7 +550,7 @@ fn render_rows(
     let mut target = budget;
     let mut body_tokens = Vec::new();
     loop {
-        let mut plan = line::plan(&summaries, target, &mut costs, Options::default());
+        let mut plan = line::plan(&summaries, target, &mut costs, options);
         let (mut text, mut items) = join_plan(&plan, rows, indices, &mut costs);
         let tokens = count(&text);
         body_tokens.push(tokens);

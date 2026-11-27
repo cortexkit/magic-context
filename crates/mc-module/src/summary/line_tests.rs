@@ -169,6 +169,7 @@ fn the_line_matches_the_lab_on_a_real_sessions_shape() {
     let options = Options {
         reference_scale: false,
         day_headers: false,
+        ..Options::default()
     };
     for expected in &fixture.expected {
         let plan = plan(&summaries, expected.budget, &mut table, options);
@@ -462,6 +463,7 @@ fn the_floor_takes_the_highest_scores_first_and_stops_at_five_percent() {
     let options = Options {
         reference_scale: false,
         day_headers: false,
+        ..Options::default()
     };
     let plan = plan(&summaries, budget, &mut table, options);
     let stretch = plan.stretch.unwrap();
@@ -538,4 +540,135 @@ fn titles_of_one_day_group_over_hidden_summaries_and_break_at_other_forms_and_da
         day_groups(&summaries, &forms),
         vec![vec![0, 1, 3], vec![5, 6]]
     );
+}
+
+/// Costs that count how many pieces were asked for.
+struct Asked<'t> {
+    table: &'t mut Table,
+    asked: usize,
+}
+
+impl Costs for Asked<'_> {
+    fn piece(&mut self, index: usize, form: u8) -> u64 {
+        self.asked += 1;
+        self.table.piece(index, form)
+    }
+    fn group_line(&mut self, index: usize) -> u64 {
+        self.asked += 1;
+        self.table.group_line(index)
+    }
+    fn group_header(&mut self, members: &[usize]) -> u64 {
+        self.table.group_header(members)
+    }
+}
+
+/// Stopping each sum once it is over the budget chooses exactly what adding
+/// up every piece chooses, including where an old summary's cost decides:
+/// the floor's titles, the step down from the oldest end, and showing
+/// everything in full when all of it fits. Budgets run from one token to
+/// more than everything costs; sessions with and without summaries the
+/// floor can bring back, with and without the reference scale and day
+/// headings.
+#[test]
+fn stopping_the_sums_early_changes_no_choice() {
+    let mut random = Random::new(4_000);
+    let (mut fewer, mut early_total, mut all_total) = (0, 0, 0);
+    for &count in &[1, 2, 7, 49, 50, 51, 300, 1_200, 4_000] {
+        for round in 0..2 {
+            let (mut session, mut table) = Generated::new(&mut random, count);
+            if round == 1 {
+                // No stored score the floor could bring back.
+                session.scores.iter_mut().for_each(|score| *score = score.min(85.0));
+            }
+            let summaries = session.summaries();
+            let full: u64 = table.forms.iter().map(|forms| forms[0]).sum();
+            let budgets = [
+                1, 10, 100, 1_000, 5_000, 30_000, 98_000, full - 1, full, full * 10,
+            ];
+            for budget in budgets.map(|budget| budget as f64) {
+                for reference_scale in [true, false] {
+                    for day_headers in [true, false] {
+                        let early = Options {
+                            reference_scale,
+                            day_headers,
+                            stop_early: true,
+                        };
+                        let all = Options {
+                            stop_early: false,
+                            ..early
+                        };
+                        let mut asked = Asked {
+                            table: &mut table,
+                            asked: 0,
+                        };
+                        let with = plan(&summaries, budget, &mut asked, early);
+                        let early_asked = asked.asked;
+                        asked.asked = 0;
+                        let without = plan(&summaries, budget, &mut asked, all);
+                        assert_eq!(with, without, "{count} (round {round}) at {budget}, {early:?}");
+                        assert!(early_asked <= asked.asked);
+                        fewer += usize::from(early_asked < asked.asked);
+                        early_total += early_asked;
+                        all_total += asked.asked;
+                    }
+                }
+            }
+        }
+    }
+    assert!(fewer > 0 && early_total < all_total, "{early_total} against {all_total}");
+}
+
+#[test]
+fn stopping_the_sums_early_changes_nothing_on_the_lab_session() {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        score: f64,
+        date: String,
+        costs: [u64; 5],
+    }
+    #[derive(serde::Deserialize)]
+    struct Fixture {
+        rows: Vec<Row>,
+    }
+    let fixture: Fixture =
+        serde_json::from_str(include_str!("../../testdata/history-line-shape.json")).unwrap();
+    let summaries: Vec<Summary> = fixture
+        .rows
+        .iter()
+        .map(|row| Summary {
+            score: row.score,
+            scored: true,
+            day: Some(&row.date),
+        })
+        .collect();
+    let mut table = Table {
+        forms: fixture.rows.iter().map(|row| row.costs).collect(),
+        lines: fixture.rows.iter().map(|row| row.costs[4].saturating_sub(4)).collect(),
+        header: 12,
+    };
+    let full: u64 = table.forms.iter().map(|forms| forms[0]).sum();
+    for budget in [
+        1, 500, 5_000, 15_000, 30_000, 60_000, 98_000, 150_000, full, full + 1,
+    ] {
+        for options in [
+            Options::default(),
+            Options {
+                reference_scale: false,
+                day_headers: false,
+                ..Options::default()
+            },
+        ] {
+            let with = plan(&summaries, budget as f64, &mut table, options);
+            let without = plan(
+                &summaries,
+                budget as f64,
+                &mut table,
+                Options {
+                    stop_early: false,
+                    ..options
+                },
+            );
+            assert_eq!(with, without, "at {budget}, {options:?}");
+        }
+    }
 }

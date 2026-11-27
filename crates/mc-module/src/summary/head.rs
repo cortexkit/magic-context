@@ -485,7 +485,13 @@ pub(crate) fn fold_with_counts(
         inputs.history_local_budget_tokens as f64,
         |budget| {
             let rendered =
-                render_history_counted(&summaries, budget, estimate, &mut known.borrow_mut());
+                render_history_counted(
+                &summaries,
+                budget,
+                estimate,
+                &mut known.borrow_mut(),
+                super::line::Options::default(),
+            );
             *rendered_items.borrow_mut() = rendered.items;
             rendered.text
         },

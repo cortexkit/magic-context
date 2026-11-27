@@ -114,13 +114,17 @@ fn joints_cost(forms: &[u8], groups: &[Vec<usize>], costs: &mut impl Costs) -> u
 }
 
 /// Switches the tests use to compare with the reference calculation in
-/// `testdata/history-line-shape.json`.
+/// `testdata/history-line-shape.json`, and to check that stopping a sum
+/// early never changes a choice.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Options {
     /// Map scores onto the reference scale (for sessions with enough scores).
     pub reference_scale: bool,
     /// Group titles of the same day under one heading.
     pub day_headers: bool,
+    /// Stop adding up pieces, newest first, once the sum is over the budget
+    /// ([`cost_within`]). Off, every piece is counted.
+    pub stop_early: bool,
 }
 
 impl Default for Options {
@@ -128,6 +132,18 @@ impl Default for Options {
         Self {
             reference_scale: true,
             day_headers: true,
+            stop_early: true,
+        }
+    }
+}
+
+impl Options {
+    /// How far a sum of pieces needs to go to tell whether they fit `budget`.
+    fn limit(self, budget: f64) -> f64 {
+        if self.stop_early {
+            budget
+        } else {
+            f64::INFINITY
         }
     }
 }
@@ -275,13 +291,21 @@ fn search(
     options: Options,
 ) -> (Option<f64>, Vec<u8>, u64, Vec<Vec<usize>>) {
     let count = summaries.len();
-    let joints = (costs.joint() * count.saturating_sub(1) as f64).ceil() as u64;
-    let full = (0..count).map(|index| costs.piece(index, FULL)).sum::<u64>() + joints;
+    let limit = options.limit(budget);
+    // Newest first, stopping once over: whether everything fits in full
+    // does not need the full count of every old summary.
+    let mut full = (costs.joint() * count.saturating_sub(1) as f64).ceil() as u64;
+    for index in (0..count).rev() {
+        if full as f64 > limit {
+            break;
+        }
+        full += costs.piece(index, FULL);
+    }
     if full as f64 <= budget {
         return (None, vec![FULL; count], full, Vec::new());
     }
     let mut fits = |stretch: f64| {
-        forms_at(summaries, scores, stretch, budget, costs, options).2 as f64 <= budget
+        forms_at(summaries, scores, stretch, budget, costs, options, limit).2 as f64 <= budget
     };
     let stretch = if fits(STRETCH_MAX) {
         STRETCH_MAX
@@ -297,7 +321,8 @@ fn search(
         }
         low
     };
-    let (forms, groups, total) = forms_at(summaries, scores, stretch, budget, costs, options);
+    let (forms, groups, total) =
+        forms_at(summaries, scores, stretch, budget, costs, options, limit);
     (Some(stretch), forms, total, groups)
 }
 
@@ -315,10 +340,11 @@ fn step_down(
     costs: &mut impl Costs,
     options: Options,
 ) -> (Vec<u8>, Vec<Vec<usize>>, u64) {
+    let limit = options.limit(budget);
     for index in 0..forms.len() {
         while forms[index] < NOT_SHOWN {
             forms[index] += 1;
-            let (groups, total) = cost_of(summaries, &forms, costs, options);
+            let (groups, total) = cost_within(summaries, &forms, costs, options, limit);
             if total as f64 <= budget {
                 return (forms, groups, total);
             }
@@ -328,7 +354,8 @@ fn step_down(
     (forms, groups, total)
 }
 
-/// The forms, day groups and total cost at one stretch factor.
+/// The forms, day groups and total cost at one stretch factor, the total
+/// summed only until it is over `limit` ([`cost_within`]).
 fn forms_at(
     summaries: &[Summary],
     scores: &[f64],
@@ -336,9 +363,10 @@ fn forms_at(
     budget: f64,
     costs: &mut impl Costs,
     options: Options,
+    limit: f64,
 ) -> (Vec<u8>, Vec<Vec<usize>>, u64) {
     let forms = forms_on_line(scores, stretch, budget, costs);
-    let (groups, total) = cost_of(summaries, &forms, costs, options);
+    let (groups, total) = cost_within(summaries, &forms, costs, options, limit);
     (forms, groups, total)
 }
 
@@ -387,27 +415,46 @@ pub(crate) fn cost_of(
     costs: &mut impl Costs,
     options: Options,
 ) -> (Vec<Vec<usize>>, u64) {
-    let count = forms.len();
+    cost_within(summaries, forms, costs, options, f64::INFINITY)
+}
+
+/// [`cost_of`], but the sum stops, newest piece first, once it is over
+/// `limit`: the caller then only needs to know that it is over, and the old
+/// pieces it did not reach (often the longest, at a wide stretch) are never
+/// counted. Every part is at least zero, so a sum that fits is exact.
+fn cost_within(
+    summaries: &[Summary],
+    forms: &[u8],
+    costs: &mut impl Costs,
+    options: Options,
+    limit: f64,
+) -> (Vec<Vec<usize>>, u64) {
     let groups = if options.day_headers {
         day_groups(summaries, forms)
     } else {
         Vec::new()
     };
-    let mut grouped = vec![false; count];
-    let mut total = 0;
+    // Each day heading is added with its newest title.
+    let mut group_of = vec![None; forms.len()];
     for group in &groups {
-        total += costs.group_header(group);
         for &index in group {
-            grouped[index] = true;
-            total += costs.group_line(index);
+            group_of[index] = Some(group);
         }
     }
-    for (index, &form) in forms.iter().enumerate() {
-        if form < NOT_SHOWN && !grouped[index] {
-            total += costs.piece(index, form);
+    let mut total = joints_cost(forms, &groups, costs);
+    for (index, &form) in forms.iter().enumerate().rev() {
+        if total as f64 > limit {
+            break;
+        }
+        match group_of[index] {
+            _ if form >= NOT_SHOWN => {}
+            Some(group) if group.last() == Some(&index) => {
+                total += costs.group_header(group) + costs.group_line(index);
+            }
+            Some(_) => total += costs.group_line(index),
+            None => total += costs.piece(index, form),
         }
     }
-    total += joints_cost(forms, &groups, costs);
     (groups, total)
 }
 
