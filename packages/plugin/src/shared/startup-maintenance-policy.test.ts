@@ -44,7 +44,8 @@ test.each([
     );
     const statements = source.statements.map((statement) => statement.getText(source));
     // Inspect statements, not comments: a commented-out policy must fail this guard.
-    expect(statements[0]).toBe(
+    expect(statements[0]).toBe("delete process.env.OPENCODE_DB;");
+    expect(statements[1]).toBe(
         'await import(new URL("../test-preload.ts", import.meta.url).href);',
     );
     expect(statements.at(-1)).toBe("__setScheduleStartupMaintenanceOnOpenForTests(false);");
@@ -52,7 +53,7 @@ test.each([
         packageName === "plugin"
             ? "./features/magic-context/storage-db"
             : "@magic-context/core/features/magic-context/storage-db";
-    expect(statements[1]).toMatch(
+    expect(statements[2]).toMatch(
         new RegExp(
             `const \\{ __setScheduleStartupMaintenanceOnOpenForTests \\} = await import\\(\\s*"${storageModule}"\\s*\\);`,
         ),
@@ -63,6 +64,7 @@ test("CLI uses the unit policy while end-to-end tests retain the shared isolatio
     expect(preloads("cli")).toEqual(["../plugin/src/test-preload.ts"]);
     expect(preloads("e2e-tests")).toEqual(["../plugin/test-preload.ts"]);
     const isolation = readFileSync(join(root, "packages/plugin/test-preload.ts"), "utf8");
+    expect(isolation).not.toContain("delete process.env.OPENCODE_DB");
     expect(isolation).not.toContain("__setScheduleStartupMaintenanceOnOpenForTests");
     expect(isolation).not.toContain("src/test-preload");
 });

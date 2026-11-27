@@ -1,5 +1,7 @@
 // Keep the shared storage/config isolation used by end-to-end tests, then apply
 // the unit-only policy before any fixture can open managed storage.
+// An inherited OpenCode DB path takes precedence over the fixtures' XDG roots.
+delete process.env.OPENCODE_DB;
 await import(new URL("../test-preload.ts", import.meta.url).href);
 const { __setScheduleStartupMaintenanceOnOpenForTests } = await import(
     "./features/magic-context/storage-db"

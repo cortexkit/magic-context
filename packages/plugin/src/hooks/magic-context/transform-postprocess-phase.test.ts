@@ -140,6 +140,7 @@ import {
 const SESSION_ID = "ses-postprocess-drift";
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalOpenCodeDb = process.env.OPENCODE_DB;
 let db: Database;
 
 function createOpenCodeDbWithoutMessages(prefix: string): void {
@@ -147,7 +148,8 @@ function createOpenCodeDbWithoutMessages(prefix: string): void {
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     mkdirSync(join(dir, "opencode"), { recursive: true });
-    const opencodeDb = new Database(join(dir, "opencode", "opencode.db"));
+    const dbPath = join(dir, "opencode", "opencode.db");
+    const opencodeDb = new Database(dbPath);
     // Create the fixture in WAL mode like OpenCode. Schema writes create the
     // -wal/-shm files; without them, macOS SQLite can reject a readonly worker's
     // first read after a late switch from rollback journaling to WAL.
@@ -159,6 +161,7 @@ function createOpenCodeDbWithoutMessages(prefix: string): void {
         "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
     );
     opencodeDb.close();
+    process.env.OPENCODE_DB = dbPath;
 }
 
 /** Wait, starting nothing, for marker discovery that an earlier pass started in
@@ -173,6 +176,8 @@ afterEach(() => {
     if (db) db.close();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
+    if (originalOpenCodeDb === undefined) delete process.env.OPENCODE_DB;
+    else process.env.OPENCODE_DB = originalOpenCodeDb;
     for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
     tempDirs.length = 0;
 });
