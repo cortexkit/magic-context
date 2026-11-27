@@ -1241,6 +1241,7 @@ export class NativeFoldReplay {
         draft: SessionContext,
         native: readonly V2Message[],
         boundary?: { id: string; summary: string },
+        restoredFirstRow?: string,
     ): Promise<void> {
         // Capture is optional and runs after a servable transform. Cache trouble
         // cannot undo that transform or turn a usable request into an interruption.
@@ -1253,6 +1254,13 @@ export class NativeFoldReplay {
             try {
                 if (this.options.protocol === 3) {
                     replay = await this.floorState(draft.sessionID, reader, boundary, draft);
+                    if (!replay && restoredFirstRow) {
+                        const first = reader.page(draft.sessionID, { limit: 1 }).rows[0];
+                        // The managed restore already handed the transform every
+                        // stored row. Recheck that the source still starts there.
+                        if (first?.id === restoredFirstRow)
+                            replay = { floor: floorFor(first, "start"), controls: [] };
+                    }
                     if (!replay)
                         throw new NativeReplayUnavailable("No usable host replay boundary");
                     // Match stored instruction-update system messages, including

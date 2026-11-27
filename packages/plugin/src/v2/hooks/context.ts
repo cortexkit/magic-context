@@ -617,22 +617,29 @@ export function checkHistoryBoundary(
 
 function newBaselineStartAfter(
     db: Database,
-    reader: Pick<V2StoreReader, "sequenceForId">,
+    reader: Pick<V2StoreReader, "earliestSequence" | "sequenceForId">,
     sessionID: string,
     cached: { id: string | null; hasBytes: number } | null,
     compactionOff: boolean,
-): string | undefined {
-    if (cached?.id != null || cached?.hasBytes) return undefined;
+): string | null | undefined {
+    if (cached?.id != null) return undefined;
     // The managed hook resolves the session mode before restoring history. An
     // unknown mode cannot prove that this pass will render the summary head.
     const isSubagent = storedSubagentMode(db, sessionID);
     if (isSubagent === undefined || !rendersCompartmentHistory(isSubagent, compactionOff))
         return undefined;
+    // A frozen null boundary covers nothing. Give the transform all the rows;
+    // only a refresh that actually renders new history may then trim them.
+    if (cached?.hasBytes)
+        return reader.earliestSequence(sessionID) === undefined ? undefined : null;
     const newest = db
         .prepare(
             "SELECT end_message_id AS id, rebase_status AS status FROM compartments WHERE session_id = ? ORDER BY sequence DESC LIMIT 1",
         )
         .get(sessionID) as { id: string | null; status: string } | null;
+    // No summary at all is different from a summary with no usable end ID.
+    // Only the former proves that the new history head will cover no rows.
+    if (!newest && reader.earliestSequence(sessionID) !== undefined) return null;
     if (
         newest?.id &&
         newest.status !== "unresolved" &&
@@ -2570,6 +2577,7 @@ export async function registerContext(context: V2Context) {
         cut: NonNullable<ReturnType<V2StoreReader["latestCompaction"]>>;
         incoming: V2Message;
         canRebuild?: true;
+        onStartAtFirstRow?: (id: string) => void;
     }): Promise<V2Message[]> => {
         const { db, reader, draft, cut } = args;
         // Rust mode restores against the boundary the module itself published and
@@ -2632,6 +2640,14 @@ export async function registerContext(context: V2Context) {
                 reader.sequenceForId(draft.sessionID, boundaryID) ??
                 (reader.earliestSequence(draft.sessionID) ?? 0) - 1,
         );
+        if (nativeFloor === undefined && newStart === null) {
+            const first = reader.page(draft.sessionID, { limit: 1 }).rows[0];
+            if (first?.seq === floor + 1) args.onStartAtFirstRow?.(first.id);
+            sessionLog(
+                draft.sessionID,
+                `v2 restore: no rendered history boundary; starting at stored row seq=${floor + 1}`,
+            );
+        }
         // A compartment can end inside the floor row and leave later blocks of
         // it unsummarized; the shared transform keeps such a row raw, so it is
         // restored with the rows after it, as before the checkpoint. Rust mode
@@ -3296,6 +3312,7 @@ export async function registerContext(context: V2Context) {
             // The head Magic Context recorded for a checkpoint that stores the note.
             let recordedHead: string | undefined;
             let upgradeCheckpointSequence: number | undefined;
+            let restoredFirstRow: string | undefined;
             try {
                 syntheticIDs = await readSyntheticProvenance(reader, draft.messages);
                 const cut = reader.latestCompaction(draft.sessionID);
@@ -3497,6 +3514,9 @@ export async function registerContext(context: V2Context) {
                             cut: localCut,
                             incoming,
                             canRebuild: true,
+                            onStartAtFirstRow: (id) => {
+                                restoredFirstRow = id;
+                            },
                         })),
                     );
                 }
@@ -3699,6 +3719,7 @@ export async function registerContext(context: V2Context) {
                         boundary?.id && state?.cachedM0Bytes
                             ? { id: boundary.id, summary: state.cachedM0Bytes.toString("utf8") }
                             : undefined,
+                        restoredFirstRow,
                     );
                 } catch (error) {
                     nativeFoldReplay?.invalidate(draft.sessionID, true);

@@ -1,7 +1,8 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { clearCachedM0M1 } from "../../features/magic-context/storage-meta-shared";
-import type { AdmissionV3 } from "../fold/native-replay-v3";
+import { NativeFoldReplay } from "../fold/native-replay";
+import type { AdmissionV3, CapturedReplayV3 } from "../fold/native-replay-v3";
 import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
 import { HEAD_IDS } from "./payload";
 import type { SessionContext } from "./types";
@@ -139,6 +140,58 @@ test("a rebuilt summary recovers an older checkpoint even though the reverted re
         expect(next.bytes).toBe(first.bytes);
         expect(next.logs.join("\n")).not.toMatch(/history boundary repair:|HARD.*executed=true/);
     } finally {
+        await f.cleanup();
+    }
+});
+
+test("an older checkpoint restores from the first stored row after every summary is retired", async () => {
+    const { f, pass, receiptsUnchanged, stored } = await revertedCheckpoint();
+    try {
+        // The committed-revert cleanup has removed all summaries and their cache.
+        f.db.prepare("DELETE FROM compartments WHERE session_id = ?").run(f.session);
+        clearCachedM0M1(f.db, f.session);
+        await receiptsUnchanged();
+
+        const first = await pass();
+        expect(rawIDs(first.draft)).toEqual(stored(-1));
+        expect(first.bytes).not.toContain("Review history");
+        const captured = (await f.hostStorage.get(`native-fold-state/v3/${f.session}`)) as {
+            payload: string;
+        };
+        expect((JSON.parse(captured.payload) as CapturedReplayV3).replay.floor).toMatchObject({
+            kind: "start",
+            id: stored(-1)[0],
+        });
+        await f.restart();
+        const next = await pass();
+        expect(rawIDs(next.draft)).toEqual(stored(-1));
+        expect(next.bytes).toBe(first.bytes);
+        expect(next.logs.join("\n")).not.toContain("starting at stored row");
+        await f.nativeFold(3, 2, "", "manual");
+        expect(rawIDs((await f.pass()).draft)).toEqual(stored(-1));
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test("a null cached boundary restores all rows even when the first-row capture failed", async () => {
+    const { f, pass, receiptsUnchanged, stored } = await revertedCheckpoint();
+    const capture = spyOn(NativeFoldReplay.prototype, "capture").mockRejectedValueOnce(
+        new Error("capture store unavailable"),
+    );
+    try {
+        f.db.prepare("DELETE FROM compartments WHERE session_id = ?").run(f.session);
+        clearCachedM0M1(f.db, f.session);
+        const first = await pass();
+        expect(rawIDs(first.draft)).toEqual(stored(-1));
+        await receiptsUnchanged();
+        await f.restart();
+        const next = await pass();
+        expect(rawIDs(next.draft)).toEqual(stored(-1));
+        expect(next.bytes).toBe(first.bytes);
+        expect(next.logs.join("\n")).toContain("starting at stored row");
+    } finally {
+        capture.mockRestore();
         await f.cleanup();
     }
 });

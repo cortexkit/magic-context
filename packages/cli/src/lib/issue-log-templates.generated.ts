@@ -1432,6 +1432,7 @@ const TEMPLATE_DATA = [
 "historian publish stage: stage=validate status=started elapsed=0.0ms \x01",
 "protected token floor snapshot: floor=\x01 provenance=derived usableSoft=\x01",
 "v2 response boundary unavailable; no system delivery acknowledgement \x01",
+"v2 restore: no rendered history boundary; starting at stored row seq=\x01",
 "v2 storage notice step refused: the settled turn boundary is unknown \x01",
 "WARN: [auto-update-checker] Could not coordinate via timestamp file: \x01",
 "WARN: [auto-update-checker] Could not record updater pin provenance: \x01",

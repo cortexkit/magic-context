@@ -256,8 +256,6 @@ for (const [origin, offset] of [
 for (const [index, blocked] of (
     [
         "cached boundary id",
-        "cached baseline bytes",
-        "no summaries",
         "missing newest end",
         "an unresolved newest summary",
         "unknown session mode",
@@ -281,14 +279,6 @@ for (const [index, blocked] of (
                             "UPDATE session_meta SET cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
                         )
                         .run(newest.id, f.session);
-                    break;
-                case "cached baseline bytes":
-                    f.db
-                        .prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?")
-                        .run(Buffer.from("frozen baseline"), f.session);
-                    break;
-                case "no summaries":
-                    f.db.prepare("DELETE FROM compartments WHERE session_id = ?").run(f.session);
                     break;
                 case "missing newest end":
                     deleteRow(f, newest.id);
