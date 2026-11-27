@@ -620,6 +620,9 @@ forEachHost(import.meta.url, null, (host) => {
 				reportFlipRequests(run, marker, "restored");
 			expect(restored).toHaveLength(2);
 			for (const body of restored) expect(sendsCtxReduce(body)).toBe(true);
+			// Checked once before the changes and once after them, so a store
+			// opened only during a tool change is seen too.
+			run.assertIsolation("flip-end");
 
 			// One rebuild at each change and none between: within each stretch
 			// every request only appends to the one before it, and the first
