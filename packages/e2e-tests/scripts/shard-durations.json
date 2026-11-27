@@ -65,6 +65,7 @@
       "tests/todo-synthesis.test.ts": 23
     },
     "opencode": {
+      "tests/dreamer-budget-finalize-oc1.test.ts": 19,
       "tests/fork-over-window-oc1.test.ts": 40,
       "tests/issue-538-engine-wall.test.ts": 125,
       "tests/adv-real-or-absent-bytes.test.ts": 23.2,

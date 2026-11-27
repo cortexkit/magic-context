@@ -3,6 +3,14 @@
     "header": "CI push workflows run the manifest-derived TypeScript suites and Rust hermetic suite through scripts/run-rust-hermetic-e2e.sh; tag releases run the same Rust invocation. Direct CI commands are recorded by runs_in; files that do not run in CI carry an exclusion reason. Cargo.lock pins the Rust dependency versions and git revisions. CI mc-module daemon tests and push/release builders use the locked subconscious source to build ck-subc; the scheduled CI builder intentionally probes default-branch HEAD as drift, while test shards consume its prebuilt artifact.",
     "entries": [
         {
+            "path": "tests/dreamer-budget-finalize-oc1.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 1 verify-broad refuses tools on finalize, banks only the completed partial manifest above the per-child hard token limit, and stops after two refusals without banking false verdicts. PID lsof verifies private stores.",
+            "contract_refs": ["DREAMER-TIMEOUTS"],
+            "hosts": ["opencode"]
+        },
+        {
             "path": "tests/opencode2/issue-889-model-switch.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
