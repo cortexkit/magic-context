@@ -39,12 +39,16 @@ use subc_client_rs::config::{
     ConfigState, ConfigView,
 };
 use subc_config::Layer;
+use tokio::time::Instant as AsyncInstant;
 
 use super::{Loader, SettingsSource, Tiers, UserTier};
 
 /// How long the first run's settings resolution waits for the daemon's
 /// first answer before it serves the defaults.
 pub const FIRST_STATE_WAIT: Duration = Duration::from_secs(5);
+
+/// Leave time to build and send the answer before the caller's 3 s deadline.
+const CATALOG_PROJECT_WAIT: Duration = Duration::from_secs(2);
 
 /// The file in ck-mc's data folder that holds the last applied view.
 pub const VIEW_FILE: &str = "settings-view.json";
@@ -87,10 +91,18 @@ impl State {
     }
 }
 
+enum ProjectState {
+    /// The first catalog to find the project missing starts its fallback clock.
+    Waiting {
+        fallback_at: AsyncInstant,
+    },
+    View(Tiers),
+}
+
 /// The user tier's source under managed settings.
 pub struct Managed {
     state: Mutex<State>,
-    projects: Mutex<HashMap<String, Tiers>>,
+    projects: Mutex<HashMap<String, ProjectState>>,
     projects_unsupported: AtomicBool,
     projects_advertised: AtomicBool,
     // Health probes cannot wait for settings resolution or view delivery.
@@ -280,17 +292,28 @@ impl Managed {
         if self.projects_unsupported.load(Ordering::Relaxed) {
             return None;
         }
-        self.projects
+        match self
+            .projects
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(id)
-            .cloned()
+        {
+            Some(ProjectState::View(tiers)) => Some(tiers.clone()),
+            _ => None,
+        }
     }
 
-    fn first_state_deadline(&self) -> Instant {
-        match &mut *self.lock() {
-            State::Waiting { since } => *since.get_or_insert_with(Instant::now) + FIRST_STATE_WAIT,
-            _ => Instant::now() + FIRST_STATE_WAIT,
+    fn project_fallback_deadline(&self, id: &str, now: AsyncInstant) -> Option<AsyncInstant> {
+        match self
+            .projects
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(id.to_owned())
+            .or_insert_with(|| ProjectState::Waiting {
+                fallback_at: now + FIRST_STATE_WAIT,
+            }) {
+            ProjectState::View(_) => None,
+            ProjectState::Waiting { fallback_at } => Some(*fallback_at),
         }
     }
 
@@ -322,7 +345,7 @@ impl Managed {
         self.projects
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id.to_owned(), tiers);
+            .insert(id.to_owned(), ProjectState::View(tiers));
         self.project_changed.notify_waiters();
         Ok(())
     }
@@ -601,22 +624,31 @@ impl Loader {
         false
     }
 
-    /// A runner can ask for a project's tool catalog before it sets the
-    /// session up, or without ever setting one up. Wait for the project's
-    /// settings within the same first-answer budget a session setup uses, and
-    /// let SDK callbacks run while waiting. A missing or refused view still falls back to the user.
+    /// Tell the catalog whether it can answer, keeping a cold request within
+    /// the caller's budget. Unanswered projects still fall back after the
+    /// first-answer budget, shared across every request for the project.
     pub(crate) async fn await_catalog_project_config(
         &self,
         handle: &subc_client_rs::ModuleHandle,
         id: &str,
-    ) {
+    ) -> bool {
         let Some(managed) = self.managed.as_ref().filter(|managed| managed.wait) else {
-            return;
+            return true;
         };
-        if managed.project_tiers(id).is_some() || !self.refresh_project_config(handle, id) {
-            return;
+        if !self.project_settings_available() || !handle.daemon_supports("config.gate") {
+            return true;
         }
-        let deadline = managed.first_state_deadline();
+        let now = AsyncInstant::now();
+        let Some(fallback_at) = managed.project_fallback_deadline(id, now) else {
+            return true;
+        };
+        // Keep asking on later calls even after the fallback, so a late view
+        // can replace it. Being unable to queue a refresh isn't a known view.
+        self.refresh_project_config(handle, id);
+        if now >= fallback_at {
+            return true;
+        }
+        let request_deadline = now + CATALOG_PROJECT_WAIT;
         let wait = async {
             loop {
                 // Register before checking the cache so a delivery between
@@ -630,7 +662,10 @@ impl Loader {
                 changed.await;
             }
         };
-        let _ = tokio::time::timeout_at(deadline.into(), wait).await;
+        tokio::time::timeout_at(request_deadline.min(fallback_at), wait)
+            .await
+            .is_ok()
+            || fallback_at <= request_deadline
     }
 
     fn project_settings_available(&self) -> bool {

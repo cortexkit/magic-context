@@ -481,7 +481,16 @@ impl Loader {
         project_root: Option<&Path>,
         project_id: Option<&str>,
     ) -> crate::catalog::CatalogConfig {
-        let tiers = self.tiers(project_root, project_id);
+        let tiers = self.tiers_with_user(project_root, project_id, || {
+            if project_id.is_some() {
+                // After the project wait, don't start a second wait for the
+                // user tier. This fallback can still offer a tool the missing
+                // project settings would disable.
+                self.user_tier_now()
+            } else {
+                self.user_tier()
+            }
+        });
         catalog_config(
             tiers.user.as_ref().map(UserTier::value),
             &tiers.overlays.iter().flatten().collect::<Vec<_>>(),
@@ -489,18 +498,27 @@ impl Loader {
         )
     }
 
-    fn tiers(&self, project_root: Option<&Path>, _project_id: Option<&str>) -> Tiers {
+    fn tiers(&self, project_root: Option<&Path>, project_id: Option<&str>) -> Tiers {
+        self.tiers_with_user(project_root, project_id, || self.user_tier())
+    }
+
+    fn tiers_with_user(
+        &self,
+        project_root: Option<&Path>,
+        _project_id: Option<&str>,
+        user_tier: impl FnOnce() -> Option<UserTier>,
+    ) -> Tiers {
         #[cfg(feature = "managed-settings")]
         if let Some(managed) = &self.managed {
             return _project_id
                 .and_then(|id| managed.project_tiers(id))
                 .unwrap_or_else(|| Tiers {
-                    user: self.user_tier(),
+                    user: user_tier(),
                     overlays: [None, None],
                 });
         }
         Tiers {
-            user: self.user_tier(),
+            user: user_tier(),
             overlays: [
                 None,
                 project_root

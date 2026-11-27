@@ -2121,7 +2121,13 @@ impl Handler {
                 if let (Some(handle), Some(id), Some(loader)) =
                     (_handle, project, self.module.config().loader())
                 {
-                    loader.await_catalog_project_config(handle, id).await;
+                    if !loader.await_catalog_project_config(handle, id).await {
+                        return Some(Err(Refusal::new(
+                            "provider_unavailable",
+                            "The project's settings have not been read yet; retry tool.catalog.",
+                            None,
+                        )));
+                    }
                 }
                 self.module
                     .catalog_for_project(root, project, &call.arguments)

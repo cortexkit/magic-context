@@ -43,6 +43,9 @@
 // unsafe is otherwise rejected throughout the crate.
 #![cfg_attr(not(windows), forbid(unsafe_code))]
 #![cfg_attr(windows, deny(unsafe_code))]
+// The dreamer lab tests spawn a deeply nested future. Proving that it is Send
+// can exceed the compiler's default recursion limit. This only affects compilation.
+#![cfg_attr(test, recursion_limit = "256")]
 
 pub mod agent_data;
 pub mod app_read;
