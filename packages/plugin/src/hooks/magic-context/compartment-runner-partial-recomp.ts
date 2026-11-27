@@ -153,6 +153,7 @@ export async function executePartialRecompInternal(
     }
     const leaseHolderId = holderId;
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
+    let wroteStaging = false;
 
     try {
         // ── Snap to compartment boundaries ─────────────────────────────────
@@ -249,6 +250,7 @@ export async function executePartialRecompInternal(
             // Save initial staging (prior only, pass_number 0) so a crash right after
             // this point still leaves discoverable staging with the correct range.
             saveRecompStagingPass(db, sessionId, 0, candidateCompartments, stagedFacts);
+            wroteStaging = true;
             setRecompPartialRange(db, sessionId, { start: snapStart, end: snapEnd });
         }
 
@@ -321,6 +323,7 @@ export async function executePartialRecompInternal(
             // Save a final staging pass containing prior + new + tail. Promote
             // replaces the real tables atomically with this set.
             saveRecompStagingPass(db, sessionId, passCount + 1, merged, stagedFacts);
+            wroteStaging = true;
             const promoted = promoteRecompStagingWithM0Mutation(db, sessionId, leaseHolderId);
             if (!promoted) {
                 log("[magic-context] partial recomp promote returned null");
@@ -527,6 +530,7 @@ export async function executePartialRecompInternal(
             passAttempt = 1;
 
             saveRecompStagingPass(db, sessionId, passCount, candidateCompartments, stagedFacts);
+            wroteStaging = true;
 
             const nextOffset =
                 (validatedPass.compartments?.[validatedPass.compartments.length - 1]?.endMessage ??
@@ -559,16 +563,13 @@ export async function executePartialRecompInternal(
         return `## Magic Recomp — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
     } finally {
         updateSessionMeta(db, sessionId, { compartmentInProgress: false });
-        // Best-effort cleanup: if staging is somehow left over without a matching
-        // range marker, clear it. Normal success already cleared via promoteFinal.
-        const leftoverStaging = getRecompStaging(db, sessionId);
-        const leftoverRange = getRecompPartialRange(db, sessionId);
-        if (leftoverStaging && leftoverRange) {
-            // Intentional: staging intentionally kept on failure paths above so the
-            // user can re-run with the same args and resume. Do NOT clear here.
-        } else if (leftoverStaging && !leftoverRange) {
-            // Unexpected: staging without range marker in a partial-recomp context.
-            // Clear to avoid a future full recomp resuming into partial state.
+        // An unmarked prefix may belong to a paused full rebuild. Only clean up
+        // unmarked staging this range run actually wrote.
+        if (
+            wroteStaging &&
+            getRecompStaging(db, sessionId) &&
+            !getRecompPartialRange(db, sessionId)
+        ) {
             log(
                 `[magic-context] partial recomp cleanup: clearing orphaned staging without range marker for session ${sessionId}`,
             );

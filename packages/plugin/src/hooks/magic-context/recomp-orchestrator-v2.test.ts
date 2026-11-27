@@ -397,6 +397,33 @@ describe("full recomp staging", () => {
         ).toEqual([]);
     });
 
+    it("leaves a paused full prefix for the next full run when a range rebuild refuses it", async () => {
+        appendCompartments(db, sessionId, [oldSummary(1, 46, 0)]);
+        const stopped = executorCoveringRequestedRange((start) => (start === 1 ? 18 : null));
+        expect(
+            await withMessages(sessionId, 60, () =>
+                runManagedRecomp(context(db, stopped), sessionId),
+            ),
+        ).toStartWith("## Magic Recomp — Paused");
+        const staged = getRecompStaging(db, sessionId);
+        expect(staged?.lastEndMessage).toBe(18);
+
+        const range = executorCoveringRequestedRange();
+        const refusal = await withMessages(sessionId, 60, () =>
+            runManagedRecomp(context(db, range), sessionId, { range: { start: 1, end: 10 } }),
+        );
+        expect(refusal).toContain("An unfinished full recomp is already staged for this session.");
+        expect(range.requestedStarts).toEqual([]);
+        expect(getRecompStaging(db, sessionId)).toEqual(staged);
+
+        const resumed = executorCoveringRequestedRange();
+        const complete = await withMessages(sessionId, 60, () =>
+            runManagedRecomp(context(db, resumed), sessionId),
+        );
+        expect(complete).toContain("Resumed from previous interrupted run.");
+        expect(resumed.requestedStarts).toEqual([19]);
+    });
+
     it.each([
         "window",
         "empty chunk",
