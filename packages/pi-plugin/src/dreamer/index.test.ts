@@ -304,8 +304,8 @@ describe("Pi dreamer wiring", () => {
 							finished = true;
 						},
 					);
-					// Start spending the attempt budget only after the child's initial
-					// protocol events have reached the stream parser.
+					// Advance the virtual clock toward the attempt's timeout only after the
+					// child's initial protocol events have reached the stream parser.
 					await Promise.race([primaryOutput.promise, settled]);
 					await flushChild();
 					expect(finished).toBe(false);

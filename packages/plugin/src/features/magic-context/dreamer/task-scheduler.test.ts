@@ -85,7 +85,7 @@ describe("task-scheduler — manual lease wait", () => {
         await flush();
         expect(finished).toBe(false);
         expect(executed).toBe(0);
-        // Release only after the initial admission found the domain busy.
+        // Release the lease only after the run's first try to take it has found it held.
         releaseLease(db, otherHolder, leaseKey);
         jest.advanceTimersByTime(1_999);
         await flush();
