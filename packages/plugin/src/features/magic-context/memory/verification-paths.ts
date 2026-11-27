@@ -158,6 +158,15 @@ export async function readGitFileChangeTimesSince(
     return times;
 }
 
+/**
+ * Every tracked file, with the files of checked-out submodules listed under their
+ * superproject paths (`app/src/thing.ts`, not just the gitlink `app`). Without
+ * the recursion a memory about submodule code could never be mapped (#973).
+ * `--recurse-submodules` cannot be combined with `--error-unmatch`, so the
+ * per-path query below stays as it was and falls back to this listing.
+ */
+const TRACKED_FILES_ARGS = ["ls-files", "--recurse-submodules", "-z", "--full-name"] as const;
+
 async function gitTrackedPath(gitRoot: string, repoRelativePath: string): Promise<string | null> {
     const stdout = await runGit(gitRoot, [
         "ls-files",
@@ -167,8 +176,7 @@ async function gitTrackedPath(gitRoot: string, repoRelativePath: string): Promis
         "--",
         repoRelativePath,
     ]);
-    const fallbackStdout =
-        stdout === null ? await runGit(gitRoot, ["ls-files", "-z", "--full-name"]) : null;
+    const fallbackStdout = stdout === null ? await runGit(gitRoot, TRACKED_FILES_ARGS) : null;
     if (stdout === null && fallbackStdout === null) return null;
     const matches = (stdout ?? fallbackStdout ?? "").split("\0").filter(Boolean);
     if (matches.length === 0) return null;
@@ -260,7 +268,7 @@ export async function normalizeVerificationFiles(args: {
             if (!trackedPaths) {
                 let trackedOutput: string | null = null;
                 try {
-                    trackedOutput = await runGit(gitRoot, ["ls-files", "-z", "--full-name"]);
+                    trackedOutput = await runGit(gitRoot, TRACKED_FILES_ARGS);
                 } catch {
                     // The bulk inventory is optional. A slow or oversized inventory
                     // must not prevent the original per-path lookup from succeeding.

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isolatedTestGitEnv } from "../../../shared/test-git-env";
@@ -47,7 +47,7 @@ test("normalizing fifty exact tracked files uses one repository lookup and one t
         expect(result.warnings).toEqual([]);
         expect(calls).toEqual([
             ["rev-parse", "--show-toplevel"],
-            ["ls-files", "-z", "--full-name"],
+            ["ls-files", "--recurse-submodules", "-z", "--full-name"],
         ]);
     } finally {
         __resetVerificationPathsForTests();
@@ -78,11 +78,59 @@ test("an optional inventory failure falls back to the original path lookup and b
         ]);
         expect(calls).toEqual([
             ["rev-parse", "--show-toplevel"],
-            ["ls-files", "-z", "--full-name"],
+            ["ls-files", "--recurse-submodules", "-z", "--full-name"],
             ["ls-files", "-z", "--full-name", "--error-unmatch", "--", "file.ts"],
         ]);
     } finally {
         __resetVerificationPathsForTests();
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test("a file inside a git submodule is a tracked verification path", async () => {
+    const dir = createTestTempDirFromPath(join(tmpdir(), "verification-paths-submodule-"));
+    const sub = join(dir, "sub");
+    const parent = join(dir, "parent");
+    const git = (cwd: string, ...args: string[]) =>
+        execFileSync(
+            "git",
+            [
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "protocol.file.allow=always",
+                ...args,
+            ],
+            // Caller Git settings (hooks, signing, repository paths) must not reach
+            // the fixture's commits.
+            { cwd, env: isolatedTestGitEnv(), encoding: "utf8", timeout: 10000, windowsHide: true },
+        );
+    try {
+        mkdirSync(join(sub, "src"), { recursive: true });
+        writeFileSync(join(sub, "src", "thing.ts"), "export const thing = 1;\n");
+        git(sub, "init", "-q");
+        git(sub, "add", ".");
+        git(sub, "commit", "-q", "-m", "sub");
+        mkdirSync(parent);
+        writeFileSync(join(parent, "root.ts"), "root\n");
+        git(parent, "init", "-q");
+        git(parent, "add", ".");
+        git(parent, "commit", "-q", "-m", "root");
+        git(parent, "submodule", "add", "-q", sub, "app");
+
+        // The parent repo lists only the gitlink `app`, so this path used to be
+        // dropped as "not a tracked git file" and the memory went unmapped (#973).
+        const result = await normalizeVerificationFiles({
+            cwd: parent,
+            files: ["app/src/thing.ts", "root.ts"],
+        });
+        expect(result.files).toEqual(["app/src/thing.ts", "root.ts"]);
+        expect(result.warnings).toEqual([]);
+    } finally {
         rmSync(dir, { recursive: true, force: true });
     }
 });
