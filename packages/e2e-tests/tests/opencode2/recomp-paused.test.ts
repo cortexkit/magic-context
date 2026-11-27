@@ -6,6 +6,7 @@ import { closeDatabase } from "../../../plugin/src/features/magic-context/storag
 import { Database } from "../../../plugin/src/shared/sqlite";
 import { V2StoreReader } from "../../../plugin/src/v2/store-reader";
 import type { MockProvider } from "../../src/mock-provider/server";
+import { stageNoiseTailFixture } from "../../src/recomp-noise-fixture";
 import {
     isolation,
     inspectOpenFiles,
@@ -151,7 +152,7 @@ async function buildSession(
     mock.addMatcher((body) =>
         body.model === "mock-model"
             ? {
-                text: `RECOMP-WIRE-ASSISTANT-${++assistantReply}#`,
+                  text: `RECOMP-WIRE-ASSISTANT-${++assistantReply}#`,
                   usage: { input_tokens: 100, output_tokens: 10 },
               }
             : null,
@@ -423,3 +424,139 @@ test("a stopped recomp preserves the next request after a manual checkpoint, the
         await scenario.host.stop();
     }
 }, 600_000);
+
+test("carries an aligned noise tail without changing the full provider body", async () => {
+    const fixture = isolation();
+    const logPath = join(fixture.root, "recomp-noise.log");
+    fixture.env.MAGIC_CONTEXT_LOG_PATH = logPath;
+    const host = await spawnOpencode2({
+        existingIsolation: fixture,
+        modelContextLimit: WINDOW,
+        modelOutputLimit: 1_024,
+        compactionAuto: false,
+        magicContextConfig: MAGIC_CONTEXT_CONFIG,
+        historianModel: HISTORIAN_MODEL,
+    });
+    const client = clientFor(host);
+    const session = await client.session.create({
+        title: "Recomp noise tail",
+        location: { directory: host.cwd },
+        model: { providerID: "openai", id: "mock-model" },
+    });
+    const scenario: Scenario = {
+        fixture,
+        host,
+        client,
+        mock: host.mock,
+        mockBaseURL: host.mockBaseURL,
+        sessionId: session.id,
+        logPath,
+    };
+    const hostDb = hostDbPath(host);
+    const context = contextDbPath(host);
+    const marker = "RECOMP-NOISE-WIRE-PROBE";
+    const capture = async () => {
+        if (!scenario.host.pid) throw new Error("host pid missing");
+        const paths = [
+            ...new Set(inspectOpenFiles(scenario.host.pid, scenario.host.root, scenario.host.env)),
+        ].filter((path) => /\.db(?:-wal|-shm)?$/.test(path));
+        expect(paths).toContain(hostDb);
+        expect(paths).toContain(context);
+        expect(paths.every((path) => path.startsWith(`${fixture.root}/`))).toBe(true);
+        console.log(`lsof -p ${scenario.host.pid}: ${JSON.stringify(paths)}`);
+        const from = host.mock.requests().length;
+        await turn(scenario.client, session.id, marker);
+        const requests = servedFor(scenario, marker, from).filter(
+            (request) => request.body.model === "mock-model",
+        );
+        expect(requests).toHaveLength(1);
+        expect(requests[0]?.rawBody).toBeString();
+        return requests[0]!.rawBody;
+    };
+    try {
+        await waitForPluginActive(client, host.cwd);
+        host.mock.setDefault({
+            text: "Ledger recorded.",
+            usage: { input_tokens: 100, output_tokens: 10 },
+        });
+        for (let i = 0; i < 5; i++) await turn(client, session.id, `Noise fixture ledger ${i}`);
+        await scenario.host.stopHost();
+        closeDatabase();
+        const reader = new V2StoreReader(hostDb);
+        let rawIds: string[];
+        try {
+            rawIds = reader
+                .messageOrdinalPage(session.id, null, 100)
+                .filter((row) => row.contributesOrdinal)
+                .map((row) => row.id);
+        } finally {
+            reader.close();
+        }
+        const sqlite = new Database(hostDb, { fileMustExist: true });
+        try {
+            const lastAssistant = rawIds.at(-1);
+            const changed = sqlite
+                .prepare(`UPDATE session_message SET data=json_set(data,'$.content',json('[]')), time_updated=time_updated+1
+                WHERE id = ? AND type = 'assistant'`)
+                .run(lastAssistant);
+            expect(changed.changes).toBe(1);
+            // Newer hosts keep assistant content in a separate part table.
+            if (sqlite.prepare("SELECT 1 FROM sqlite_master WHERE name = 'session_part'").get()) {
+                sqlite.prepare("DELETE FROM session_part WHERE message_id = ?").run(lastAssistant);
+            }
+        } finally {
+            sqlite.close();
+        }
+        const seed = stageNoiseTailFixture(context, session.id, rawIds, true);
+        const files = [hostDb, context];
+        for (const path of files) {
+            const db = new Database(path, { fileMustExist: true });
+            try {
+                db.prepare("VACUUM INTO ?").run(`${path}.noise-control`);
+            } finally {
+                db.close();
+            }
+        }
+        await restart(scenario);
+        const expected = await capture();
+        await scenario.host.stopHost();
+        closeDatabase();
+        for (const path of files) {
+            for (const suffix of ["-wal", "-shm"]) rmSync(`${path}${suffix}`, { force: true });
+            copyFileSync(`${path}.noise-control`, path);
+        }
+        await restart(scenario);
+        const from = host.mock.requests().length;
+        await scenario.client.session.command({
+            sessionID: session.id,
+            name: "ctx-recomp",
+            text: "",
+        });
+        const log = await waitForLog(logPath, "recomp finished");
+        const outcome = log.split("\n").find((line) => line.includes("recomp finished"));
+        console.log(outcome);
+        expect(outcome).toContain("recomp finished (published=true): ## Magic Recomp — Complete");
+        expect(outcome).toContain(
+            `Kept 1 existing history block through message ${seed.tail.endMessage}.`,
+        );
+        expect(
+            host.mock
+                .requests()
+                .slice(from)
+                .filter((request) => request.body.model === HISTORIAN_MODEL.id),
+        ).toEqual([]);
+        expect(
+            readRows(
+                context,
+                "SELECT end_message_id AS endId, episode_type AS kind FROM compartments WHERE session_id = ? ORDER BY sequence",
+                session.id,
+            ),
+        ).toEqual([
+            { endId: seed.prefix.endMessageId, kind: null },
+            { endId: seed.tail.endMessageId, kind: "filtered-noise" },
+        ]);
+        expect(await capture()).toBe(expected);
+    } finally {
+        await scenario.host.stop();
+    }
+}, 300_000);

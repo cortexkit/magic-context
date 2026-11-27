@@ -4,11 +4,13 @@ import { expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { readRawSessionMessageIdOrdinalsFromDb } from "../../plugin/src/hooks/magic-context/read-session-raw";
 import { MagicContextRpcClient } from "../../plugin/src/shared/rpc-client";
 import { TestHarness } from "../src/harness";
 import { buildMockHistorianPayload, findHistorianOrdinalRange } from "../src/mock-historian";
 import { PiTestHarness } from "../src/pi-harness";
 import { childEnv, resolvePiHostInvocation } from "../src/pi-runner/spawn";
+import { stageNoiseTailFixture } from "../src/recomp-noise-fixture";
 import { forEachHost } from "../src/scenario-hosts";
 import { openTestDb } from "../src/test-db";
 
@@ -230,4 +232,111 @@ forEachHost(import.meta.url, "recomp pause and resume", (host) => {
             await h.dispose();
         }
     }, 300_000);
+
+    if (host === "opencode")
+        it("carries an aligned noise tail without changing the full provider body", async () => {
+            const h = await TestHarness.create({
+                magicContextConfig: { memory: { enabled: false }, dreamer: { disable: true } },
+                historianMockModel: { id: historianModel, contextLimit: 200_000 },
+                openCodeConfigExtra: {
+                    agent: { title: { disable: true }, summary: { disable: true } },
+                },
+                mockDefault: ordinaryReply,
+            });
+            try {
+                const seed = async (staged: boolean) => {
+                    const session = await h.createSession();
+                    for (let i = 0; i < 5; i++)
+                        await h.sendPrompt(session, `Noise fixture ledger ${i}`);
+                    const raw = openTestDb(join(h.dataDir, "opencode", "opencode.db"), {
+                        create: false,
+                    });
+                    let rawIds: string[];
+                    try {
+                        rawIds = [
+                            ...readRawSessionMessageIdOrdinalsFromDb(raw as never, session).keys(),
+                        ];
+                        const last = rawIds.at(-1);
+                        if (!last) throw new Error("Missing assistant fixture row");
+                        const result = raw
+                            .prepare(`UPDATE part SET data=json_set(data,'$.text','')
+                        WHERE message_id = ? AND json_extract(data,'$.type') = 'text'`)
+                            .run(last);
+                        expect(result.changes).toBeGreaterThan(0);
+                    } finally {
+                        raw.close();
+                    }
+                    return {
+                        session,
+                        ...stageNoiseTailFixture(h.contextDbPath(), session, rawIds, staged),
+                    };
+                };
+                const control = await seed(false);
+                const rebuilt = await seed(true);
+                await h.restart();
+                assertIsolated(h);
+                const capture = async (session: string) => {
+                    const from = h.mock.requests().length;
+                    await h.sendPrompt(session, probe);
+                    const requests = h.mock
+                        .requests()
+                        .slice(from)
+                        .filter(
+                            ({ body }) =>
+                                body.model !== historianModel &&
+                                JSON.stringify(body).includes(probe),
+                        );
+                    expect(requests).toHaveLength(1);
+                    expect(requests[0]?.rawBody).toBeString();
+                    return requests[0]!.rawBody;
+                };
+                const expected = await capture(control.session);
+                const from = h.mock.requests().length;
+                const rpc = new MagicContextRpcClient(
+                    join(h.dataDir, "cortexkit", "magic-context"),
+                    h.workdir,
+                );
+                expect((await rpc.call("recomp", { sessionId: rebuilt.session })).ok).toBe(true);
+                const outcome = await h.waitFor(
+                    () => {
+                        const path = join(h.dataDir, "cortexkit", "magic-context-e2e.log");
+                        return readFileSync(path, "utf8")
+                            .split("\n")
+                            .find(
+                                (line) =>
+                                    line.includes(rebuilt.session) &&
+                                    line.includes("recomp finished"),
+                            );
+                    },
+                    { label: "recomp with aligned noise tail" },
+                );
+                console.log(outcome);
+                expect(outcome).toContain(
+                    "recomp finished (published=true): ## Magic Recomp — Complete",
+                );
+                expect(outcome).toContain(
+                    `Kept 1 existing history block through message ${rebuilt.tail.endMessage}.`,
+                );
+                expect(
+                    h.mock
+                        .requests()
+                        .slice(from)
+                        .filter(({ body }) => body.model === historianModel),
+                ).toEqual([]);
+                expect(
+                    h
+                        .contextDb()
+                        .prepare(
+                            "SELECT end_message_id AS endId, episode_type AS kind FROM compartments WHERE session_id = ? ORDER BY sequence",
+                        )
+                        .all(rebuilt.session),
+                ).toEqual([
+                    { endId: rebuilt.prefix.endMessageId, kind: null },
+                    { endId: rebuilt.tail.endMessageId, kind: "filtered-noise" },
+                ]);
+                expect(await capture(rebuilt.session)).toBe(expected);
+            } finally {
+                await h.dispose();
+            }
+        }, 300_000);
 });
