@@ -66,10 +66,11 @@ for (const arm of [
 				baseUrl: host.url,
 				headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` },
 			});
-			const session = await client.session.create({
+			const createSession = () => client.session.create({
 				location: { directory: host.cwd },
 				model: { providerID: "openai", id: "mock-model" },
 			});
+			const session = await createSession();
 			await waitForPluginActive(client, host.cwd);
 			const turn = async (text: string) => {
 				await client.session.prompt({ sessionID: session.id, text });
@@ -87,11 +88,30 @@ for (const arm of [
 				await turn("AFTER-CHECKPOINT");
 			}
 			for (const k of [1, 2, 3]) await turn(`COVERED-${k} ${"older history ".repeat(40)}`);
+			// The host records changed instructions when it starts a turn. Probe in
+			// the same directory and prime the old instructions before the edit, so
+			// checking for the update doesn't add rows to the session under test.
+			const probe = await createSession();
+			const probeTurn = async (signal: AbortSignal) => {
+				await client.session.prompt({ sessionID: probe.id, text: "Check project instructions." }, { signal });
+				await client.session.wait({ sessionID: probe.id }, { signal });
+			};
+			await probeTurn(AbortSignal.timeout(30_000));
 			writeFileSync(
 				join(fixture.cwd, "AGENTS.md"),
 				"Rule one: be brief.\nRule two: INSTRUCTION-ROW.\n",
 			);
-			await Bun.sleep(500);
+			const signal = AbortSignal.timeout(15_000);
+			try {
+				for (;;) {
+					await probeTurn(signal);
+					const { data } = await client.message.list({ sessionID: probe.id, type: "system" }, { signal });
+					if (data.some((row) => row.type === "system" && row.text.includes("INSTRUCTION-ROW"))) break;
+				}
+			} catch (cause) {
+				if (!signal.aborted) throw cause;
+				throw new Error("OpenCode did not record the AGENTS.md update in the probe session", { cause });
+			}
 			for (const k of [1, 2, 3, 4, 5, 6]) await turn(`TAIL-${k} ${"recent history ".repeat(40)}`);
 
 			const reader = new V2StoreReader(
