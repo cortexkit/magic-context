@@ -735,10 +735,43 @@ const SidebarContent = props => {
     const current = s();
     return current?.compaction_enabled === false ? compactionOffSidebarRows(current) : [];
   });
-  const contextSnapshot = () => {
+  const dreamerLabel = createMemo(() => {
+    const progress = s()?.dreamerProgress;
+    if (!progress) return;
+    return `Dreamer ${progress.task}: ${progress.processed}/${progress.total} processed`;
+  });
+  const contextSummary = createMemo(() => {
     const current = s();
-    return current && current.inputTokens > 0 && current.contextLimit > 0 ? current : undefined;
-  };
+    if (!current || !(current.inputTokens > 0 && current.contextLimit > 0)) return;
+    const tokens = `${compactTokens(current.inputTokens)} / ${compactTokens(current.contextLimit)}`;
+    if (current.compaction_enabled === false) {
+      return {
+        tokens,
+        native: nativeCompactionContextLabel(current)
+      };
+    }
+    const usage = current.usagePercentage?.toFixed(1);
+    const threshold = current.executeThreshold == null ? undefined : `${formatThresholdPercent(current.executeThreshold)}%${current.executeThresholdClamped ? "*" : ""}`;
+    return {
+      tokens,
+      usage,
+      threshold
+    };
+  }, undefined, {
+    equals: (a, b) => a?.tokens === b?.tokens && a?.native === b?.native && a?.usage === b?.usage && a?.threshold === b?.threshold
+  });
+  const hygieneSummary = createMemo(() => {
+    const current = s();
+    if (!current || !(current.inputTokens > 0)) return;
+    const hygiene = current.tailHygiene;
+    if (!hygiene) return;
+    return {
+      value: hygieneValue(hygiene),
+      warning: !hygiene.evaluable
+    };
+  }, undefined, {
+    equals: (a, b) => a?.value === b?.value && a?.warning === b?.warning
+  });
   const totalInputTokensLabel = () => {
     const tokens = s()?.totalInputTokens;
     return tokens == null ? undefined : compactTokens(tokens);
@@ -839,25 +872,15 @@ const SidebarContent = props => {
     _$insert(_el$25, _$createComponent(Show, {
       keyed: true,
       get when() {
-        return s()?.dreamerProgress;
+        return dreamerLabel();
       },
-      children: progress => (() => {
+      children: label => (() => {
         var _el$41 = _$createElement("box"),
-          _el$42 = _$createElement("text"),
-          _el$43 = _$createTextNode(`Dreamer `),
-          _el$44 = _$createTextNode(`: `),
-          _el$45 = _$createTextNode(`/`),
-          _el$46 = _$createTextNode(` processed`);
+          _el$42 = _$createElement("text");
         _$insertNode(_el$41, _el$42);
         _$setProp(_el$41, "marginTop", 1);
         _$setProp(_el$41, "width", "100%");
-        _$insertNode(_el$42, _el$43);
-        _$insertNode(_el$42, _el$44);
-        _$insertNode(_el$42, _el$45);
-        _$insertNode(_el$42, _el$46);
-        _$insert(_el$42, () => progress.task, _el$44);
-        _$insert(_el$42, () => progress.processed, _el$45);
-        _$insert(_el$42, () => progress.total, _el$46);
+        _$insert(_el$42, label);
         _$effect(_$p => _$setProp(_el$42, "fg", props.theme.warning, _$p));
         return _el$41;
       })()
@@ -865,57 +888,53 @@ const SidebarContent = props => {
     _$insert(_el$25, (() => {
       var _c$3 = _$memo(() => (s()?.inputTokens ?? 0) > 0);
       return () => _c$3() && (() => {
-        var _el$47 = _$createElement("box");
-        _$setProp(_el$47, "flexDirection", "column");
-        _$insert(_el$47, _$createComponent(Show, {
+        var _el$43 = _$createElement("box");
+        _$setProp(_el$43, "flexDirection", "column");
+        _$insert(_el$43, _$createComponent(Show, {
           keyed: true,
           get when() {
-            return contextSnapshot();
+            return contextSummary();
           },
-          children: current => {
-            const usage = current.usagePercentage?.toFixed(1);
-            const threshold = current.executeThreshold == null ? undefined : formatThresholdPercent(current.executeThreshold);
-            return (() => {
-              var _el$48 = _$createElement("box"),
-                _el$49 = _$createElement("text"),
-                _el$50 = _$createTextNode(` / `);
-              _$insertNode(_el$48, _el$49);
-              _$setProp(_el$48, "width", "100%");
-              _$setProp(_el$48, "flexDirection", "row");
-              _$setProp(_el$48, "justifyContent", "space-between");
-              _$insert(_el$48, (() => {
-                var _c$6 = _$memo(() => current.compaction_enabled === false);
-                return () => _c$6() ? (() => {
-                  var _el$51 = _$createElement("text"),
-                    _el$52 = _$createElement("b");
-                  _$insertNode(_el$51, _el$52);
-                  _$insert(_el$52, () => nativeCompactionContextLabel(current));
-                  _$effect(_$p => _$setProp(_el$51, "fg", contextSummaryColor(), _$p));
-                  return _el$51;
-                })() : (() => {
-                  var _el$53 = _$createElement("text");
-                  _$insert(_el$53, usage != null && (() => {
-                    var _el$54 = _$createElement("b"),
-                      _el$55 = _$createTextNode(`%`);
-                    _$insertNode(_el$54, _el$55);
-                    _$insert(_el$54, usage, _el$55);
-                    return _el$54;
-                  })(), null);
-                  _$insert(_el$53, usage != null && threshold != null ? " / " : "", null);
-                  _$insert(_el$53, () => threshold != null ? `${threshold}%${current.executeThresholdClamped ? "*" : ""}` : "", null);
-                  _$effect(_$p => _$setProp(_el$53, "fg", contextSummaryColor(), _$p));
-                  return _el$53;
-                })();
-              })(), _el$49);
-              _$insertNode(_el$49, _el$50);
-              _$insert(_el$49, () => compactTokens(current.inputTokens), _el$50);
-              _$insert(_el$49, () => compactTokens(current.contextLimit), null);
-              _$effect(_$p => _$setProp(_el$49, "fg", contextSummaryColor(), _$p));
-              return _el$48;
-            })();
-          }
+          children: summary => (() => {
+            var _el$44 = _$createElement("box"),
+              _el$45 = _$createElement("text");
+            _$insertNode(_el$44, _el$45);
+            _$setProp(_el$44, "width", "100%");
+            _$setProp(_el$44, "flexDirection", "row");
+            _$setProp(_el$44, "justifyContent", "space-between");
+            _$insert(_el$44, (() => {
+              var _c$6 = _$memo(() => summary.native != null);
+              return () => _c$6() ? (() => {
+                var _el$46 = _$createElement("text"),
+                  _el$47 = _$createElement("b");
+                _$insertNode(_el$46, _el$47);
+                _$insert(_el$47, () => summary.native);
+                _$effect(_$p => _$setProp(_el$46, "fg", contextSummaryColor(), _$p));
+                return _el$46;
+              })() : (() => {
+                var _el$48 = _$createElement("text");
+                _$insert(_el$48, (() => {
+                  var _c$7 = _$memo(() => summary.usage != null);
+                  return () => _c$7() && (() => {
+                    var _el$49 = _$createElement("b"),
+                      _el$50 = _$createTextNode(`%`);
+                    _$insertNode(_el$49, _el$50);
+                    _$insert(_el$49, () => summary.usage, _el$50);
+                    return _el$49;
+                  })();
+                })(), null);
+                _$insert(_el$48, () => summary.usage != null && summary.threshold != null ? " / " : "", null);
+                _$insert(_el$48, () => summary.threshold ?? "", null);
+                _$effect(_$p => _$setProp(_el$48, "fg", contextSummaryColor(), _$p));
+                return _el$48;
+              })();
+            })(), _el$45);
+            _$insert(_el$45, () => summary.tokens);
+            _$effect(_$p => _$setProp(_el$45, "fg", contextSummaryColor(), _$p));
+            return _el$44;
+          })()
         }), null);
-        _$insert(_el$47, _$createComponent(TokenBreakdown, {
+        _$insert(_el$43, _$createComponent(TokenBreakdown, {
           get theme() {
             return props.theme;
           },
@@ -926,10 +945,10 @@ const SidebarContent = props => {
             return collapsed();
           }
         }), null);
-        _$insert(_el$47, _$createComponent(Show, {
+        _$insert(_el$43, _$createComponent(Show, {
           keyed: true,
           get when() {
-            return s()?.tailHygiene;
+            return hygieneSummary();
           },
           children: hygiene => _$createComponent(StatRow, {
             get theme() {
@@ -937,26 +956,26 @@ const SidebarContent = props => {
             },
             label: "Hygiene",
             get value() {
-              return hygieneValue(hygiene);
+              return hygiene.value;
             },
             get warning() {
-              return !hygiene.evaluable;
+              return hygiene.warning;
             }
           })
         }), null);
-        _$effect(_$p => _$setProp(_el$47, "marginTop", collapsed() ? 0 : 1, _$p));
-        return _el$47;
+        _$effect(_$p => _$setProp(_el$43, "marginTop", collapsed() ? 0 : 1, _$p));
+        return _el$43;
       })();
     })(), null);
     _$insert(_el$25, (() => {
       var _c$4 = _$memo(() => !!collapsed());
       return () => _c$4() && (() => {
-        var _el$56 = _$createElement("box");
-        _$setProp(_el$56, "width", "100%");
-        _$setProp(_el$56, "flexDirection", "column");
-        _$insert(_el$56, (() => {
-          var _c$7 = _$memo(() => !!compactionOff());
-          return () => _c$7() ? nativeRows().map(row => _$createComponent(StatRow, {
+        var _el$51 = _$createElement("box");
+        _$setProp(_el$51, "width", "100%");
+        _$setProp(_el$51, "flexDirection", "column");
+        _$insert(_el$51, (() => {
+          var _c$8 = _$memo(() => !!compactionOff());
+          return () => _c$8() ? nativeRows().map(row => _$createComponent(StatRow, {
             get theme() {
               return props.theme;
             },
@@ -973,114 +992,114 @@ const SidebarContent = props => {
               return row.label !== "Memories";
             }
           })) : [(() => {
-            var _el$57 = _$createElement("box"),
-              _el$58 = _$createElement("text");
-            _$insertNode(_el$57, _el$58);
-            _$setProp(_el$57, "width", "100%");
-            _$setProp(_el$57, "flexDirection", "row");
-            _$setProp(_el$57, "justifyContent", "space-between");
-            _$insertNode(_el$58, _$createTextNode(`Historian`));
-            _$insert(_el$57, (() => {
-              var _c$8 = _$memo(() => !!s()?.historianRunning);
-              return () => _c$8() ? (() => {
-                var _el$71 = _$createElement("text");
-                _$insertNode(_el$71, _$createTextNode(`comparting ⟳`));
-                _$effect(_$p => _$setProp(_el$71, "fg", props.theme.warning, _$p));
-                return _el$71;
+            var _el$52 = _$createElement("box"),
+              _el$53 = _$createElement("text");
+            _$insertNode(_el$52, _el$53);
+            _$setProp(_el$52, "width", "100%");
+            _$setProp(_el$52, "flexDirection", "row");
+            _$setProp(_el$52, "justifyContent", "space-between");
+            _$insertNode(_el$53, _$createTextNode(`Historian`));
+            _$insert(_el$52, (() => {
+              var _c$9 = _$memo(() => !!s()?.historianRunning);
+              return () => _c$9() ? (() => {
+                var _el$66 = _$createElement("text");
+                _$insertNode(_el$66, _$createTextNode(`comparting ⟳`));
+                _$effect(_$p => _$setProp(_el$66, "fg", props.theme.warning, _$p));
+                return _el$66;
               })() : (() => {
-                var _el$73 = _$createElement("text");
-                _$insertNode(_el$73, _$createTextNode(`idle`));
-                _$effect(_$p => _$setProp(_el$73, "fg", props.theme.textMuted, _$p));
-                return _el$73;
+                var _el$68 = _$createElement("text");
+                _$insertNode(_el$68, _$createTextNode(`idle`));
+                _$effect(_$p => _$setProp(_el$68, "fg", props.theme.textMuted, _$p));
+                return _el$68;
               })();
             })(), null);
-            _$effect(_$p => _$setProp(_el$58, "fg", props.theme.textMuted, _$p));
-            return _el$57;
+            _$effect(_$p => _$setProp(_el$53, "fg", props.theme.textMuted, _$p));
+            return _el$52;
           })(), _$createComponent(Show, {
             get when() {
               return s()?.dreamerProgress;
             },
             children: progress => (() => {
-              var _el$75 = _$createElement("box"),
-                _el$76 = _$createElement("text"),
-                _el$78 = _$createElement("text"),
-                _el$79 = _$createTextNode(` `),
-                _el$80 = _$createTextNode(`/`);
-              _$insertNode(_el$75, _el$76);
-              _$insertNode(_el$75, _el$78);
-              _$setProp(_el$75, "width", "100%");
-              _$setProp(_el$75, "flexDirection", "row");
-              _$setProp(_el$75, "justifyContent", "space-between");
-              _$insertNode(_el$76, _$createTextNode(`Dreamer`));
-              _$insertNode(_el$78, _el$79);
-              _$insertNode(_el$78, _el$80);
-              _$insert(_el$78, () => progress().task, _el$79);
-              _$insert(_el$78, () => progress().processed, _el$80);
-              _$insert(_el$78, () => progress().total, null);
+              var _el$70 = _$createElement("box"),
+                _el$71 = _$createElement("text"),
+                _el$73 = _$createElement("text"),
+                _el$74 = _$createTextNode(` `),
+                _el$75 = _$createTextNode(`/`);
+              _$insertNode(_el$70, _el$71);
+              _$insertNode(_el$70, _el$73);
+              _$setProp(_el$70, "width", "100%");
+              _$setProp(_el$70, "flexDirection", "row");
+              _$setProp(_el$70, "justifyContent", "space-between");
+              _$insertNode(_el$71, _$createTextNode(`Dreamer`));
+              _$insertNode(_el$73, _el$74);
+              _$insertNode(_el$73, _el$75);
+              _$insert(_el$73, () => progress().task, _el$74);
+              _$insert(_el$73, () => progress().processed, _el$75);
+              _$insert(_el$73, () => progress().total, null);
               _$effect(_p$ => {
                 var _v$19 = props.theme.textMuted,
                   _v$20 = props.theme.warning;
-                _v$19 !== _p$.e && (_p$.e = _$setProp(_el$76, "fg", _v$19, _p$.e));
-                _v$20 !== _p$.t && (_p$.t = _$setProp(_el$78, "fg", _v$20, _p$.t));
+                _v$19 !== _p$.e && (_p$.e = _$setProp(_el$71, "fg", _v$19, _p$.e));
+                _v$20 !== _p$.t && (_p$.t = _$setProp(_el$73, "fg", _v$20, _p$.t));
                 return _p$;
               }, {
                 e: undefined,
                 t: undefined
               });
-              return _el$75;
+              return _el$70;
             })()
           }), (() => {
-            var _el$60 = _$createElement("box"),
-              _el$61 = _$createElement("text"),
-              _el$63 = _$createElement("text");
-            _$insertNode(_el$60, _el$61);
-            _$insertNode(_el$60, _el$63);
-            _$setProp(_el$60, "width", "100%");
-            _$setProp(_el$60, "flexDirection", "row");
-            _$setProp(_el$60, "justifyContent", "space-between");
-            _$insertNode(_el$61, _$createTextNode(`Memories`));
-            _$insert(_el$63, collapsedMemoryValue);
+            var _el$55 = _$createElement("box"),
+              _el$56 = _$createElement("text"),
+              _el$58 = _$createElement("text");
+            _$insertNode(_el$55, _el$56);
+            _$insertNode(_el$55, _el$58);
+            _$setProp(_el$55, "width", "100%");
+            _$setProp(_el$55, "flexDirection", "row");
+            _$setProp(_el$55, "justifyContent", "space-between");
+            _$insertNode(_el$56, _$createTextNode(`Memories`));
+            _$insert(_el$58, collapsedMemoryValue);
             _$effect(_p$ => {
               var _v$15 = props.theme.textMuted,
                 _v$16 = props.theme.textMuted;
-              _v$15 !== _p$.e && (_p$.e = _$setProp(_el$61, "fg", _v$15, _p$.e));
-              _v$16 !== _p$.t && (_p$.t = _$setProp(_el$63, "fg", _v$16, _p$.t));
+              _v$15 !== _p$.e && (_p$.e = _$setProp(_el$56, "fg", _v$15, _p$.e));
+              _v$16 !== _p$.t && (_p$.t = _$setProp(_el$58, "fg", _v$16, _p$.t));
               return _p$;
             }, {
               e: undefined,
               t: undefined
             });
-            return _el$60;
+            return _el$55;
           })(), (() => {
-            var _el$64 = _$createElement("box"),
-              _el$65 = _$createElement("text"),
-              _el$67 = _$createElement("text"),
-              _el$68 = _$createTextNode(`C:`),
-              _el$69 = _$createTextNode(` Q:`),
-              _el$70 = _$createTextNode(` N:`);
-            _$insertNode(_el$64, _el$65);
-            _$insertNode(_el$64, _el$67);
-            _$setProp(_el$64, "width", "100%");
-            _$setProp(_el$64, "flexDirection", "row");
-            _$setProp(_el$64, "justifyContent", "space-between");
-            _$insertNode(_el$65, _$createTextNode(`Status`));
-            _$insertNode(_el$67, _el$68);
-            _$insertNode(_el$67, _el$69);
-            _$insertNode(_el$67, _el$70);
-            _$insert(_el$67, () => s()?.compartmentCount ?? 0, _el$69);
-            _$insert(_el$67, () => s()?.pendingOpsCount ?? 0, _el$70);
-            _$insert(_el$67, () => s()?.sessionNoteCount ?? 0, null);
+            var _el$59 = _$createElement("box"),
+              _el$60 = _$createElement("text"),
+              _el$62 = _$createElement("text"),
+              _el$63 = _$createTextNode(`C:`),
+              _el$64 = _$createTextNode(` Q:`),
+              _el$65 = _$createTextNode(` N:`);
+            _$insertNode(_el$59, _el$60);
+            _$insertNode(_el$59, _el$62);
+            _$setProp(_el$59, "width", "100%");
+            _$setProp(_el$59, "flexDirection", "row");
+            _$setProp(_el$59, "justifyContent", "space-between");
+            _$insertNode(_el$60, _$createTextNode(`Status`));
+            _$insertNode(_el$62, _el$63);
+            _$insertNode(_el$62, _el$64);
+            _$insertNode(_el$62, _el$65);
+            _$insert(_el$62, () => s()?.compartmentCount ?? 0, _el$64);
+            _$insert(_el$62, () => s()?.pendingOpsCount ?? 0, _el$65);
+            _$insert(_el$62, () => s()?.sessionNoteCount ?? 0, null);
             _$effect(_p$ => {
               var _v$17 = props.theme.textMuted,
                 _v$18 = props.theme.textMuted;
-              _v$17 !== _p$.e && (_p$.e = _$setProp(_el$65, "fg", _v$17, _p$.e));
-              _v$18 !== _p$.t && (_p$.t = _$setProp(_el$67, "fg", _v$18, _p$.t));
+              _v$17 !== _p$.e && (_p$.e = _$setProp(_el$60, "fg", _v$17, _p$.e));
+              _v$18 !== _p$.t && (_p$.t = _$setProp(_el$62, "fg", _v$18, _p$.t));
               return _p$;
             }, {
               e: undefined,
               t: undefined
             });
-            return _el$64;
+            return _el$59;
           })(), _$createComponent(Show, {
             get when() {
               return s()?.recompProgress;
@@ -1095,38 +1114,38 @@ const SidebarContent = props => {
             })
           })];
         })());
-        return _el$56;
+        return _el$51;
       })();
     })(), null);
     _$insert(_el$25, (() => {
       var _c$5 = _$memo(() => !!!collapsed());
       return () => _c$5() && [_$memo(() => _$memo(() => !!(!compactionOff() && sections().historian))() && [(() => {
-        var _el$81 = _$createElement("box"),
-          _el$82 = _$createElement("text"),
-          _el$83 = _$createElement("b");
-        _$insertNode(_el$81, _el$82);
-        _$setProp(_el$81, "width", "100%");
-        _$setProp(_el$81, "marginTop", 1);
-        _$setProp(_el$81, "flexDirection", "row");
-        _$setProp(_el$81, "justifyContent", "space-between");
-        _$insertNode(_el$82, _el$83);
-        _$insertNode(_el$83, _$createTextNode(`Historian`));
-        _$insert(_el$81, (() => {
-          var _c$9 = _$memo(() => !!s()?.historianRunning);
-          return () => _c$9() ? (() => {
-            var _el$85 = _$createElement("text");
-            _$insertNode(_el$85, _$createTextNode(`comparting ⟳`));
-            _$effect(_$p => _$setProp(_el$85, "fg", props.theme.warning, _$p));
-            return _el$85;
+        var _el$76 = _$createElement("box"),
+          _el$77 = _$createElement("text"),
+          _el$78 = _$createElement("b");
+        _$insertNode(_el$76, _el$77);
+        _$setProp(_el$76, "width", "100%");
+        _$setProp(_el$76, "marginTop", 1);
+        _$setProp(_el$76, "flexDirection", "row");
+        _$setProp(_el$76, "justifyContent", "space-between");
+        _$insertNode(_el$77, _el$78);
+        _$insertNode(_el$78, _$createTextNode(`Historian`));
+        _$insert(_el$76, (() => {
+          var _c$0 = _$memo(() => !!s()?.historianRunning);
+          return () => _c$0() ? (() => {
+            var _el$80 = _$createElement("text");
+            _$insertNode(_el$80, _$createTextNode(`comparting ⟳`));
+            _$effect(_$p => _$setProp(_el$80, "fg", props.theme.warning, _$p));
+            return _el$80;
           })() : (() => {
-            var _el$87 = _$createElement("text");
-            _$insertNode(_el$87, _$createTextNode(`idle`));
-            _$effect(_$p => _$setProp(_el$87, "fg", props.theme.textMuted, _$p));
-            return _el$87;
+            var _el$82 = _$createElement("text");
+            _$insertNode(_el$82, _$createTextNode(`idle`));
+            _$effect(_$p => _$setProp(_el$82, "fg", props.theme.textMuted, _$p));
+            return _el$82;
           })();
         })(), null);
-        _$effect(_$p => _$setProp(_el$82, "fg", props.theme.text, _$p));
-        return _el$81;
+        _$effect(_$p => _$setProp(_el$77, "fg", props.theme.text, _$p));
+        return _el$76;
       })(), _$createComponent(StatRow, {
         get theme() {
           return props.theme;
