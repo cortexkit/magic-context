@@ -5,6 +5,7 @@ function harnessReturning(data: unknown): TestHarness {
   return Object.assign(Object.create(TestHarness.prototype), {
     clientInstance: { session: { prompt: async () => ({ data }) } },
     opencodeInstance: { stdout: () => "", stderr: () => "" },
+    spawnOptions: {},
     expectMagicContext: false,
   });
 }
