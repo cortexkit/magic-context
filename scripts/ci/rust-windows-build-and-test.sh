@@ -30,6 +30,10 @@ record() {
     printf '+ %s\n' "$*" > "$output"
     rc=0
     "$@" >> "$output" 2>&1 || rc=$?
+    if [[ $label == probe-* && $rc == 0 ]] && ! grep -Eq '^running 1 test[[:space:]]*$' "$output"; then
+        printf 'Expected exactly one test for %s.\n' "$label" >> "$output"
+        rc=125
+    fi
     outcome=passed
     if (( rc != 0 )); then outcome=failed; fi
     # A command killed for another reason can also exit 137. Check timeout's
@@ -57,8 +61,28 @@ toolchain() {
     fi
 }
 
+probe() {
+    local label=$1 limit=$2 test=$3
+    record "probe-$label" bounded "$limit" cargo test --locked -p mc-module --lib "$test" -- --exact --nocapture
+}
+
+test_module_binary() {
+    local label=$1 limit=$2 selection=$3 mode
+    shift 3
+    for mode in default live; do
+        local features=()
+        if [[ $mode == live ]]; then features=("${live[@]}"); fi
+        record "module-$mode-test-$label" bounded "$limit" cargo test --locked -p mc-module \
+            "${features[@]}" "$selection" "$@" --no-fail-fast -- --nocapture
+    done
+}
+
 record toolchain toolchain
 if (( status != 0 )); then exit "$status"; fi
+record fixture-eol bounded 2m git ls-files --eol -- \
+    crates/mc-module/testdata/mc-app-read-samples-v5/SHA256SUMS \
+    crates/mc-module/testdata/role-lease-v1.5/ \
+    crates/mc-module/assets/catalog_tools_only.txt
 
 # Keep the installed toolchain and Cargo cache, but give the binaries only
 # disposable data and config directories (including Windows fallbacks).
@@ -77,8 +101,30 @@ record module-default-build bounded 18m cargo build --locked -p mc-module
 record module-live-build bounded 18m cargo build --locked -p mc-module "${live[@]}"
 record module-default-test-compile bounded 20m cargo test --locked -p mc-module --no-run
 record module-live-test-compile bounded 20m cargo test --locked -p mc-module "${live[@]}" --no-run
-record module-default-test bounded 45m cargo test --locked -p mc-module --no-fail-fast
-record module-live-test bounded 45m cargo test --locked -p mc-module "${live[@]}" --no-fail-fast
+
+probe crash-resume 5m move_in::tests::crash_resume_at_every_transaction_boundary
+probe child-workdir 3m child_scopes::tests::a_relative_folder_or_no_daemon_is_refused_by_name
+probe lab-frozen-path 3m dreamer::lab::tests::spec_refuses_live_path_hardlink_and_checkout_escape
+probe legacy-dir-key 3m legacy_projects::key::tests::a_folder_outside_any_checkout_keeps_the_plugins_directory_key
+probe app-read-pin 3m app_read::tests::samples_v5_remain_pinned
+probe catalog-pin 3m catalog::tests::text_revision_is_the_one_config_json_records
+probe lease-pin 3m dreamer::lease::tests::the_copied_samples_match_their_published_digests
+probe git-export 3m dreamer::branches::tests::a_copy_holds_one_commit_reads_its_history_up_to_there_and_is_deleted_when_dropped
+probe lab-git 3m dreamer::lab::git::review_tests::lab_git_allows_five_commands_without_running_textconv
+probe project-publication 3m context_db::tests::a_publish_records_the_sessions_project_only_when_it_has_one
+probe primer-publication 3m context_db::tests::a_runs_events_and_primer_candidate_land_with_its_summaries
+
+# Run the same test targets as cargo test, but let the next executable start
+# even if one times out. Collect results for both feature sets before moving
+# to the next target.
+test_module_binary lib 45m --lib
+test_module_binary bin 3m --bin ck-mc
+for test_file in crates/mc-module/tests/*.rs; do
+    test_name=${test_file##*/}
+    test_name=${test_name%.rs}
+    test_module_binary "integration-$test_name" 5m --test "$test_name"
+done
+test_module_binary doc 5m --doc
 
 for package in mc-mock-runner mc-tokenizer; do
     record "$package-build" bounded 8m cargo build --locked -p "$package"
