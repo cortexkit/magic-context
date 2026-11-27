@@ -11,6 +11,7 @@ import {
     saveRecompStagingPass,
     setRecompPartialRange,
 } from "../../features/magic-context/compartment-storage";
+import { incrementCompressionDepth } from "../../features/magic-context/compression-depth-storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
 import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
@@ -510,14 +511,28 @@ describe("full recomp staging", () => {
                 endBlockIndex: 2,
             },
         ]);
+        incrementCompressionDepth(db, sessionId, 1, 46);
+        incrementCompressionDepth(db, sessionId, 1, 46);
         const carried = getCompartments(db, sessionId).at(-1)!;
         const executor = executorCoveringRequestedRange((start, end) =>
             Math.min(end, start === 1 ? 20 : 40),
         );
+        const markerEnds: number[] = [];
+        const deps = buildRecompDeps(context(db, executor), sessionId);
         const result = await withMessages(
             sessionId,
             60,
-            () => executeContextRecompWithResult(buildRecompDeps(context(db, executor), sessionId)),
+            () =>
+                executeContextRecompWithResult({
+                    ...deps,
+                    compactionMarkerStrategy: {
+                        ...deps.compactionMarkerStrategy,
+                        publish: (_db, _sessionId, end) => {
+                            markerEnds.push(end);
+                            return true;
+                        },
+                    },
+                }),
             [],
             41,
         );
@@ -547,6 +562,13 @@ describe("full recomp staging", () => {
         const raw = Array.from({ length: 14 }, (_, i) => i + 47);
         expect([...represented, ...raw]).toEqual(Array.from({ length: 60 }, (_, i) => i + 1));
         expect(getRecompStaging(db, sessionId)).toBeNull();
+        const depth = db
+            .prepare("SELECT message_ordinal, depth FROM compression_depth WHERE session_id = ? ORDER BY message_ordinal")
+            .all(sessionId);
+        expect(depth).toEqual(
+            Array.from({ length: 6 }, (_, i) => ({ message_ordinal: 41 + i, depth: 2 })),
+        );
+        expect(markerEnds).toEqual([46]);
     });
 
     it("does not carry any of an empty tail if one live row has no endpoint ID", async () => {
@@ -571,6 +593,76 @@ describe("full recomp staging", () => {
         expect(await run()).toContain("The unfinished rebuild was discarded.");
         expect(live()).toEqual(before);
         expect(getRecompStaging(db, sessionId)).toBeNull();
+    });
+
+    it.each([
+        ["retired end id", { ...oldSummary(41, 46, 1), endMessageId: "retired-46" }],
+        ["retired start id", { ...oldSummary(41, 46, 1), startMessageId: "retired-41" }],
+        ["gap at 41", oldSummary(42, 46, 1)],
+        ["overlap at 40", oldSummary(40, 46, 1)],
+    ] as const)("does not carry an empty tail with a %s", async (_case, tail) => {
+        appendCompartments(db, sessionId, [oldSummary(1, 40, 0), tail]);
+        const before = getCompartments(db, sessionId);
+        const ex = executorCoveringRequestedRange((start) => (start === 1 ? 40 : null));
+        const run = () =>
+            withMessages(sessionId, 60, () => runManagedRecomp(context(db, ex), sessionId), [], 41);
+
+        expect(await run()).toStartWith("## Magic Recomp — Paused");
+        expect(getCompartments(db, sessionId)).toEqual(before);
+        expect(getRecompStaging(db, sessionId)?.lastEndMessage).toBe(40);
+        expect(await run()).toContain("The unfinished rebuild was discarded.");
+        expect(getCompartments(db, sessionId)).toEqual(before);
+        expect(getRecompStaging(db, sessionId)).toBeNull();
+        expect(ex.requestedStarts).toEqual([1]);
+    });
+
+    it("discards a resumed empty tail if a revert retired the live carry ids but not the staged ids", async () => {
+        appendCompartments(db, sessionId, [oldSummary(1, 40, 0), oldSummary(41, 46, 1)]);
+        saveRecompStagingPass(db, sessionId, 1, [
+            { ...oldSummary(1, 40, 0), title: "Rebuilt", p1: "Rebuilt 1-40." },
+        ], []);
+        const before = getCompartments(db, sessionId);
+        const ex = executorCoveringRequestedRange();
+        const result = await withMessages(
+            sessionId, 60, () => runManagedRecomp(context(db, ex), sessionId),
+            [41, 42, 43, 44, 45, 46], 41,
+        );
+        expect(result).toContain("The unfinished rebuild was discarded.");
+        expect(getCompartments(db, sessionId)).toEqual(before);
+        expect(getRecompStaging(db, sessionId)).toBeNull();
+        expect(ex.requestedStarts).toEqual([]);
+    });
+
+    it("pauses on a model failure at an aligned live boundary rather than carrying the live tail", async () => {
+        appendCompartments(db, sessionId, [oldSummary(1, 40, 0), oldSummary(41, 46, 1)]);
+        const before = getCompartments(db, sessionId);
+        const ex = executorCoveringRequestedRange((start) => (start === 1 ? 40 : null));
+        const result = await withMessages(sessionId, 60, () =>
+            runManagedRecomp(context(db, ex), sessionId),
+        );
+        expect(result).toStartWith("## Magic Recomp — Paused");
+        expect(getCompartments(db, sessionId)).toEqual(before);
+        expect(getRecompStaging(db, sessionId)?.lastEndMessage).toBe(40);
+        expect(ex.requestedStarts).toContain(41);
+    });
+
+    it("keeps a new pass after a resumed run stops, then discards on a repeat without progress", async () => {
+        appendCompartments(db, sessionId, [oldSummary(1, 46, 0)]);
+        saveRecompStagingPass(db, sessionId, 1, [rebuiltPrefix], []);
+        const before = getCompartments(db, sessionId);
+        const ex = executorCoveringRequestedRange((start) => (start === 19 ? 30 : null));
+        const run = () =>
+            withMessages(sessionId, 60, () => runManagedRecomp(context(db, ex), sessionId), [], 31);
+        const first = await run();
+        expect(first).toStartWith("## Magic Recomp — Paused");
+        expect(first).toContain("Messages 1-30 of 55 are rebuilt and kept for the next run.");
+        expect(getRecompStaging(db, sessionId)?.lastEndMessage).toBe(30);
+        expect(getCompartments(db, sessionId)).toEqual(before);
+
+        expect(await run()).toContain("The unfinished rebuild was discarded.");
+        expect(getRecompStaging(db, sessionId)).toBeNull();
+        expect(getCompartments(db, sessionId)).toEqual(before);
+        expect(ex.requestedStarts).toEqual([19]);
     });
 
     it("does not replace the resolved furthest end with an out-of-order newest sequence", async () => {
