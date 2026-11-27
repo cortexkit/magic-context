@@ -318,12 +318,26 @@ pub(crate) struct RenderedHistory {
     /// replay harness read it; a fold needs the text and the items.
     #[cfg_attr(not(test), allow(dead_code))]
     pub plan: line::Plan,
+    /// The joined body's real tokens after each plan: more than one when
+    /// the blank lines between pieces took the first body over the budget
+    /// and the forms were chosen again. Read by tests and the harness.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub body_tokens: Vec<u64>,
 }
+
+/// How many times the forms are chosen at most for one render.
+const BODY_PLANS: usize = 3;
 
 /// Render the history block for `history_budget_tokens` (no `<session-history>`
 /// wrapper — callers add their own framing), counting each piece with
 /// `estimate_tokens`. A budget of zero or less means the window is unknown
 /// ([`line::HISTORY_BUDGET_WHEN_WINDOW_UNKNOWN`]).
+///
+/// The line fits the pieces, and the joints between them as measured on a
+/// few headings, to the budget. Joined text can count a little differently,
+/// so the joined body is counted for real, and while it is over the budget
+/// (at most [`BODY_PLANS`] plans), the forms are chosen again with pieces
+/// that much smaller, from the same counts.
 pub(crate) fn render_history(
     compartments: &[DecayRenderCompartment],
     history_budget_tokens: f64,
@@ -357,13 +371,60 @@ pub(crate) fn render_history(
         },
         count,
     );
-    let plan = line::plan(
-        &summaries,
-        history_budget_tokens,
-        &mut costs,
-        Options::default(),
-    );
 
+    let budget = line::effective_budget(history_budget_tokens);
+    // What a blank line between two pieces adds, measured on the newest
+    // summaries' headings, so the first plan already leaves room for it.
+    let pairs = rows.len().saturating_sub(1).min(16);
+    if pairs > 0 {
+        let added: i64 = (rows.len() - 1 - pairs..rows.len() - 1)
+            .map(|i| {
+                let (a, b) = (
+                    compartment_heading(rows[i]),
+                    compartment_heading(rows[i + 1]),
+                );
+                count(&format!("{a}\n\n{b}")) as i64 - count(&a) as i64 - count(&b) as i64
+            })
+            .sum();
+        costs.set_joint((added as f64 / pairs as f64).max(0.0));
+    }
+    let mut target = budget;
+    let mut body_tokens = Vec::new();
+    loop {
+        let plan = line::plan(&summaries, target, &mut costs, Options::default());
+        let (text, items) = join_plan(&plan, &rows, &indices, &mut costs);
+        let tokens = count(&text);
+        body_tokens.push(tokens);
+        let over = tokens as f64 - budget;
+        if over <= 0.0 || body_tokens.len() == BODY_PLANS {
+            if over > 0.0 {
+                tracing::warn!(
+                    budget,
+                    tokens,
+                    "ck-mc: history body still over its budget after {BODY_PLANS} plans"
+                );
+            }
+            return RenderedHistory {
+                text,
+                items,
+                plan,
+                body_tokens,
+            };
+        }
+        // The new plan's pieces must come out `over` below this plan's, not
+        // only below this target: a plan's pieces usually fall short of
+        // its target, and the excess beyond them stays about the same.
+        target = (target.min(plan.total as f64) - over).max(1.0);
+    }
+}
+
+/// The body for `plan`, and its items ([`RenderedHistory::items`]).
+fn join_plan<C: Costs>(
+    plan: &line::Plan,
+    rows: &[&DecayRenderCompartment],
+    indices: &[usize],
+    costs: &mut C,
+) -> (String, Vec<(usize, u8, u64)>) {
     let mut group_of = vec![None; rows.len()];
     for (number, group) in plan.groups.iter().enumerate() {
         for &member in group {
@@ -382,7 +443,7 @@ pub(crate) fn render_history(
                 if group[0] != i {
                     continue;
                 }
-                let mut section = group_header(&rows, group);
+                let mut section = group_header(rows, group);
                 let mut header_tokens = costs.group_header(group);
                 for &member in group {
                     section.push('\n');
@@ -399,11 +460,7 @@ pub(crate) fn render_history(
             }
         }
     }
-    RenderedHistory {
-        text: sections.join("\n\n"),
-        items,
-        plan,
-    }
+    (sections.join("\n\n"), items)
 }
 
 /// Render the history body (no `<session-history>` wrapper — callers add

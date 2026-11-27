@@ -32,11 +32,13 @@ pub(crate) const TITLE: u8 = 5;
 pub(crate) const NOT_SHOWN: u8 = 6;
 
 /// The budget a fold uses when it is given none (zero or less). That happens
-/// when the model's window is unknown, so the history block still has to stay
-/// a reasonable size: without a limit the line's own shape renders about
-/// 98,000 tokens on a session with thousands of summaries. 20,000 is about
-/// what the earlier decay curve rendered in that case.
-pub(crate) const HISTORY_BUDGET_WHEN_WINDOW_UNKNOWN: f64 = 20_000.0;
+/// when the model's window is unknown, so it is not "no limit": the history
+/// block still has to stay a reasonable size, and the line's own shape,
+/// unstretched, renders about 98,000 tokens on a session with thousands of
+/// summaries. The earlier decay curve rendered about 25,000 tokens in that
+/// case (measured on generated sessions of 200 to 3,800 summaries), so this
+/// keeps such a session's history at the size it had.
+pub(crate) const HISTORY_BUDGET_WHEN_WINDOW_UNKNOWN: f64 = 25_000.0;
 
 /// The line's height at the newest summary.
 const START_HEIGHT: f64 = 6.0;
@@ -103,6 +105,18 @@ pub(crate) trait Costs {
         let _ = on;
         false
     }
+    /// What joining two pieces into the block adds to its count, per joint.
+    fn joint(&mut self) -> f64 {
+        0.0
+    }
+}
+
+/// What the joints between the shown pieces add: one fewer than the pieces,
+/// where a day heading and each line under it are pieces of their own.
+fn joints_cost(forms: &[u8], groups: &[Vec<usize>], costs: &mut impl Costs) -> u64 {
+    let shown = forms.iter().filter(|&&form| form < NOT_SHOWN).count();
+    let pieces = shown + groups.len();
+    (costs.joint() * pieces.saturating_sub(1) as f64).ceil() as u64
 }
 
 /// Switches the tests use to compare with the lab's calculation.
@@ -135,13 +149,19 @@ pub(crate) struct Plan {
     pub forms: Vec<u8>,
     /// Runs of titles that share one day heading, each oldest first.
     pub groups: Vec<Vec<usize>>,
-    /// The cost of every rendered piece together, headings included; the
-    /// blank lines between pieces are not counted.
+    /// The cost of every rendered piece together, headings and the joints
+    /// between pieces included.
     pub total: u64,
+    /// The joints' share of `total` ([`Costs::joint`]).
+    pub joints: u64,
     /// The budget the forms were chosen for, after the fallback for none.
     pub budget: f64,
     /// The scores the line compared, after the reference scale.
     pub scores: Vec<f64>,
+    /// When the search used estimates: the real total of the forms it
+    /// picked, before the check that runs the search again on real counts
+    /// when that total is over the budget.
+    pub estimated_pick_total: Option<u64>,
 }
 
 /// The budget a fold works with: `budget`, or the fallback when there is none.
@@ -244,17 +264,21 @@ pub(crate) fn plan(
     let estimates = costs.estimating(true);
     costs.estimating(false);
     let mut chosen = search(summaries, &scores, budget, costs, options, estimates);
+    let estimated_pick_total = estimates.then_some(chosen.2);
     if estimates && chosen.2 as f64 > budget {
         chosen = search(summaries, &scores, budget, costs, options, false);
     }
     let (stretch, forms, total, groups) = chosen;
+    let joints = joints_cost(&forms, &groups, costs);
     Plan {
         stretch,
         forms,
         groups,
         total,
+        joints,
         budget,
         scores,
+        estimated_pick_total,
     }
 }
 
@@ -269,7 +293,9 @@ fn search(
     estimates: bool,
 ) -> (Option<f64>, Vec<u8>, u64, Vec<Vec<usize>>) {
     let count = summaries.len();
-    let all_full = |costs: &mut dyn FnMut(usize) -> u64| (0..count).map(costs).sum::<u64>();
+    let joints = (costs.joint() * count.saturating_sub(1) as f64).ceil() as u64;
+    let all_full =
+        |costs: &mut dyn FnMut(usize) -> u64| (0..count).map(costs).sum::<u64>() + joints;
     // Whether everything fits in full; an estimate far over the budget
     // spares counting every full form.
     let over_in_full = estimates && {
@@ -372,6 +398,7 @@ fn forms_at(
             total += costs.piece(index, form);
         }
     }
+    total += joints_cost(&forms, &groups, costs);
     (forms, groups, total)
 }
 
@@ -439,6 +466,7 @@ pub(crate) struct CountedCosts<R, C> {
     /// Tokens per character for each form, measured on first use.
     ratios: Option<[f64; 5]>,
     estimating: bool,
+    joint: f64,
 }
 
 impl<R, C> CountedCosts<R, C>
@@ -457,7 +485,14 @@ where
             line_chars: vec![None; summaries],
             ratios: None,
             estimating: false,
+            joint: 0.0,
         }
+    }
+
+    /// Set what joining two pieces adds to the block's count
+    /// ([`Costs::joint`]).
+    pub(crate) fn set_joint(&mut self, joint: f64) {
+        self.joint = joint;
     }
 
     fn real_piece(&mut self, index: usize, form: u8) -> u64 {
@@ -537,5 +572,9 @@ where
     fn estimating(&mut self, on: bool) -> bool {
         self.estimating = on;
         true
+    }
+
+    fn joint(&mut self) -> f64 {
+        self.joint
     }
 }

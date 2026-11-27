@@ -501,6 +501,8 @@ fn titles_of_one_day_group_over_hidden_summaries_and_break_at_other_forms_and_da
 struct Noisy {
     table: Table,
     noise: f64,
+    /// Every estimate is also multiplied by this.
+    scale: f64,
     estimating: bool,
 }
 
@@ -511,7 +513,7 @@ impl Noisy {
         }
         let mut random = Random::new(index as u64 * 8 + u64::from(form));
         let wobble = random.between(0, 2_000) as f64 / 1_000.0 - 1.0;
-        (real as f64 * (1.0 + self.noise * wobble)).round() as u64
+        (real as f64 * (1.0 + self.noise * wobble) * self.scale).round() as u64
     }
 }
 
@@ -542,12 +544,22 @@ fn estimates_close_to_the_real_counts_choose_what_real_counts_choose() {
         let mut noisy = Noisy {
             table,
             noise: 0.03,
+            scale: 1.0,
             estimating: false,
         };
         for budget in [5_000.0, 30_000.0, 98_000.0] {
             let estimated = plan(&summaries, budget, &mut noisy, Options::default());
             let real = plan(&summaries, budget, &mut noisy.table, Options::default());
-            assert_eq!(estimated, real, "{count} at {budget}");
+            assert_eq!(real.estimated_pick_total, None);
+            assert_eq!(estimated.estimated_pick_total, Some(real.total));
+            assert_eq!(
+                Plan {
+                    estimated_pick_total: None,
+                    ..estimated
+                },
+                real,
+                "{count} at {budget}"
+            );
         }
     }
 }
@@ -560,6 +572,7 @@ fn estimates_far_off_still_give_forms_on_the_line_within_the_budget() {
     let mut noisy = Noisy {
         table,
         noise: 0.5,
+        scale: 1.0,
         estimating: false,
     };
     for budget in [5_000.0, 30_000.0, 98_000.0] {
@@ -573,5 +586,36 @@ fn estimates_far_off_still_give_forms_on_the_line_within_the_budget() {
                 "summary {index} at {form}, line {line}"
             );
         }
+    }
+}
+
+#[test]
+fn a_pick_over_the_budget_on_estimates_is_searched_again_on_real_counts() {
+    // Estimates at half the real counts make the search pick far too much;
+    // the real count of the pick catches it.
+    let mut random = Random::new(8);
+    let (session, table) = Generated::new(&mut random, 1_500);
+    let summaries = session.summaries();
+    let mut noisy = Noisy {
+        table,
+        noise: 0.0,
+        scale: 0.5,
+        estimating: false,
+    };
+    for budget in [5_000.0, 30_000.0, 98_000.0] {
+        let corrected = plan(&summaries, budget, &mut noisy, Options::default());
+        assert!(
+            corrected.estimated_pick_total.unwrap() as f64 > budget,
+            "at {budget}"
+        );
+        assert!(corrected.total as f64 <= budget);
+        let real = plan(&summaries, budget, &mut noisy.table, Options::default());
+        assert_eq!(
+            Plan {
+                estimated_pick_total: None,
+                ..corrected
+            },
+            real
+        );
     }
 }

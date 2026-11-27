@@ -134,7 +134,7 @@ fn the_items_add_up_to_the_blocks_pieces() {
     let comps = session(1_500, 30, mixed_score);
     let rendered = render_history(&comps, 12_000.0, chars);
     let tokens: u64 = rendered.items.iter().map(|item| item.2).sum();
-    assert_eq!(tokens, rendered.plan.total);
+    assert_eq!(tokens + rendered.plan.joints, rendered.plan.total);
     assert!(rendered.items.iter().all(|item| item.1 < NOT_SHOWN));
     // A title under a day heading counts its own line, and the first one
     // also the heading.
@@ -283,4 +283,49 @@ fn a_budget_of_zero_renders_as_for_an_unknown_window() {
     );
     assert_eq!(none.text, fallback.text);
     assert!(none.plan.total as f64 <= super::line::HISTORY_BUDGET_WHEN_WINDOW_UNKNOWN);
+}
+
+#[test]
+fn the_joined_body_is_held_to_the_budget_when_joining_takes_it_over() {
+    // A counter that charges three tokens for each blank line that follows
+    // a summary's body. Neither the pieces nor the joint measured between
+    // headings show it, so the first plan's body is over, and the forms are
+    // chosen again.
+    let count = |text: &str| {
+        let sections: Vec<&str> = text.split("\n\n").collect();
+        let after_body = sections
+            .windows(2)
+            .filter(|pair| {
+                pair[0]
+                    .lines()
+                    .last()
+                    .is_some_and(|line| !line.starts_with("## ") && !line.starts_with("- "))
+            })
+            .count();
+        chars(text) + 3 * after_body
+    };
+    let comps = session(2_000, 25, mixed_score);
+    let mut replanned = 0;
+    for budget in [5_000.0, 15_000.0, 30_000.0, 60_000.0, 98_000.0, 150_000.0] {
+        let rendered = render_history(&comps, budget, count);
+        assert!(
+            count(&rendered.text) as f64 <= budget,
+            "at {budget}: {:?}, plan total {} at {}",
+            rendered.body_tokens,
+            rendered.plan.total,
+            rendered.plan.budget
+        );
+        assert!(rendered.body_tokens.len() <= 3);
+        assert_eq!(
+            *rendered.body_tokens.last().unwrap(),
+            count(&rendered.text) as u64
+        );
+        if rendered.body_tokens.len() > 1 {
+            replanned += 1;
+            assert!(rendered.body_tokens[0] as f64 > budget);
+        }
+        // The same inputs give the same bytes, replans included.
+        assert_eq!(render_history(&comps, budget, count).text, rendered.text);
+    }
+    assert!(replanned > 0);
 }

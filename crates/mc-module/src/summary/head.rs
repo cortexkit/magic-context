@@ -421,8 +421,8 @@ impl Baseline {
 }
 
 /// The `<session-history>` block within `budget` local tokens. The render
-/// already fits the summaries' pieces to the budget, but the blank lines
-/// between them and the wrapper add a little, so a block more than 5% over
+/// already fits the joined summaries to the budget, but the wrapper adds a
+/// little, so a block more than 5% over
 /// is rendered again against a budget 15% tighter, at most three times (the
 /// plugin's `decayPressureMultiplier` loop in `materializeM0`). A budget of
 /// zero or less means the window is unknown and is replaced by

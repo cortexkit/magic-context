@@ -439,37 +439,71 @@ fn the_line_replay_reports_both_renderers_on_a_generated_store() {
 /// forms (about 250, 120, 55, 45 and 25 tokens), prose from a varied
 /// vocabulary, about 25 a day, and scores mostly between 15 and 89.
 fn realistic(count: usize, seed: u64) -> Vec<StoredCompartment> {
-    const WORDS: [&str; 24] = [
-        "the",
-        "reader",
-        "parser",
-        "kept",
-        "diagnostics",
-        "stable",
-        "while",
-        "summary_due",
-        "crates/mc-module/src/session.rs",
-        "traced",
-        "notice",
-        "through",
-        "regression",
-        "test",
-        "cargo",
-        "fold",
-        "baseline",
-        "budget",
-        "cache",
-        "prefix",
-        "rebuild",
-        "memory",
-        "and",
-        "of",
-    ];
+    realistic_in(count, seed, &LATIN)
+}
+
+const LATIN: [&str; 24] = [
+    "the",
+    "reader",
+    "parser",
+    "kept",
+    "diagnostics",
+    "stable",
+    "while",
+    "summary_due",
+    "crates/mc-module/src/session.rs",
+    "traced",
+    "notice",
+    "through",
+    "regression",
+    "test",
+    "cargo",
+    "fold",
+    "baseline",
+    "budget",
+    "cache",
+    "prefix",
+    "rebuild",
+    "memory",
+    "and",
+    "of",
+];
+
+/// Chinese, Japanese and Russian prose with a few code names, where a token
+/// holds far fewer characters than in English.
+const NON_LATIN: [&str; 24] = [
+    "解析器",
+    "读取了文件",
+    "并保持诊断稳定",
+    "缓存前缀",
+    "重建",
+    "の設定を確認した",
+    "テストを追加",
+    "メモリ",
+    "сводка",
+    "проверили",
+    "кэш",
+    "перестроение",
+    "бюджет",
+    "summary_due",
+    "session.rs",
+    "历史记录",
+    "折叠",
+    "基线",
+    "ストア",
+    "сообщение",
+    "和",
+    "の",
+    "и",
+    "在",
+];
+
+fn realistic_in(count: usize, seed: u64, vocabulary: &[&str; 24]) -> Vec<StoredCompartment> {
     let mut random = super::line_tests::Random::new(seed);
     let text = |random: &mut super::line_tests::Random, tokens: u64| {
         let words = random.between(tokens * 6 / 10, tokens * 14 / 10);
         (0..words)
-            .map(|_| WORDS[random.between(0, 23) as usize])
+            .map(|_| vocabulary[random.between(0, 23) as usize])
             .collect::<Vec<_>>()
             .join(" ")
     };
@@ -589,6 +623,146 @@ fn line_fold_time() {
                 plan.total,
                 budget - plan.total as f64,
                 plan.stretch
+            );
+        }
+    }
+}
+
+/// The six budgets the lab's fixture was checked at.
+const LAB_BUDGETS: [f64; 6] = [5_000.0, 15_000.0, 30_000.0, 60_000.0, 98_000.0, 150_000.0];
+
+/// How many texts a fold counts and how many characters they hold, with
+/// the curve or with the line.
+fn counting(
+    rows: &[DecayRenderCompartment],
+    budget: f64,
+    counter: Counter,
+    line: bool,
+) -> (usize, usize) {
+    let calls = std::cell::Cell::new((0usize, 0usize));
+    let estimate = |text: &str| {
+        let (n, chars) = calls.get();
+        calls.set((n + 1, chars + text.chars().count()));
+        counter.count(text) as usize
+    };
+    fit_history(
+        budget,
+        |budget| {
+            if line {
+                render_history(rows, budget, estimate).text
+            } else {
+                render_before_line::render(rows, budget, estimate).0
+            }
+        },
+        estimate,
+    );
+    calls.get()
+}
+
+/// The forms the search picks on estimates are counted for real, and a
+/// pick over the budget is searched again on real counts: on long Chinese,
+/// Japanese and Russian text, where a token holds the fewest characters,
+/// every lab budget ends within the budget, with either counter.
+#[test]
+fn the_estimated_search_ends_within_the_budget_on_non_latin_text() {
+    let rows: Vec<DecayRenderCompartment> = realistic_in(1_200, 3, &NON_LATIN)
+        .iter()
+        .map(DecayRenderCompartment::from)
+        .collect();
+    for counter in [
+        Counter::for_model(Some(DEFAULT_MODEL)),
+        Counter::estimated_for_model(Some(DEFAULT_MODEL)),
+    ] {
+        let estimate = |text: &str| counter.count(text) as usize;
+        for budget in LAB_BUDGETS {
+            let rendered = render_history(&rows, budget, estimate);
+            assert!(rendered.plan.estimated_pick_total.is_some());
+            assert!(
+                rendered.plan.total as f64 <= budget,
+                "{} at {budget}",
+                rendered.plan.total
+            );
+            let counted: u64 = rendered.items.iter().map(|item| item.2).sum();
+            assert_eq!(counted + rendered.plan.joints, rendered.plan.total);
+            // The joined body, blank lines included, is within the budget too.
+            assert!(counter.count(&rendered.text) as f64 <= budget);
+            assert_eq!(
+                *rendered.body_tokens.last().unwrap(),
+                counter.count(&rendered.text)
+            );
+        }
+    }
+}
+
+/// Two folds of the same stored summaries give the same bytes and the same
+/// attribution, each with its own counter and its own read of the store.
+#[test]
+fn two_folds_of_the_same_store_give_the_same_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, saved) = generated_store(dir.path(), &[("ses_large", 1_200)]);
+    let fold = || {
+        let (_, summaries) = read_sessions(&store, Some(&saved), &["ses_large".into()])
+            .unwrap()
+            .remove(0);
+        let classes = HashMap::new();
+        let inputs = super::head::Inputs {
+            counter: Counter::for_model(Some(DEFAULT_MODEL)),
+            summaries: &summaries,
+            docs: "",
+            rows: &[],
+            classes: &classes,
+            now_ms: 0,
+            gone: &[],
+            history_budget_tokens: 30_000,
+            history_local_budget_tokens: 30_000,
+            memory_budget_tokens: 0,
+            profile_budget_tokens: 0,
+        };
+        super::head::fold_with(&inputs, &Default::default(), None)
+    };
+    let (first, second) = (fold(), fold());
+    assert!(first.m0.contains(" summaries\n- "));
+    assert_eq!(first.m0, second.m0);
+    assert_eq!(first.summary_items, second.summary_items);
+}
+
+/// Where the estimates leave the search, for the six lab budgets, on the
+/// realistic session and on long non-Latin text: the real total of the pick
+/// against the budget before the check, after it, and the wrapped block.
+#[test]
+#[ignore = "a measurement; run with --release --ignored --nocapture"]
+fn line_estimate_overshoot() {
+    for (text, vocabulary) in [("Latin", &LATIN), ("non-Latin", &NON_LATIN)] {
+        let rows: Vec<DecayRenderCompartment> = realistic_in(3_800, 1127, vocabulary)
+            .iter()
+            .map(DecayRenderCompartment::from)
+            .collect();
+        for (name, counter) in [
+            ("exact Claude", Counter::for_model(Some(DEFAULT_MODEL))),
+            (
+                "estimator",
+                Counter::estimated_for_model(Some(DEFAULT_MODEL)),
+            ),
+        ] {
+            let estimate = |text: &str| counter.count(text) as usize;
+            for budget in LAB_BUDGETS {
+                let rendered = render_history(&rows, budget, estimate);
+                let plan = &rendered.plan;
+                let block = fold_history(&rows, budget, counter, true).block;
+                println!(
+                    "OVERSHOOT {text} {name} at {budget:.0}: pieces of the first pick before the check {:+}, after {:+}; body first {:+}, final {:+} after {} replans; wrapped block {:+}",
+                    plan.estimated_pick_total.unwrap() as i64 - plan.budget as i64,
+                    plan.total as i64 - plan.budget as i64,
+                    rendered.body_tokens[0] as i64 - budget as i64,
+                    *rendered.body_tokens.last().unwrap() as i64 - budget as i64,
+                    rendered.body_tokens.len() - 1,
+                    counter.count(&block) as i64 - budget as i64,
+                );
+            }
+            let (curve_calls, curve_chars) = counting(&rows, 98_000.0, counter, false);
+            let (line_calls, line_chars) = counting(&rows, 98_000.0, counter, true);
+            println!(
+                "COUNTED {text} {name} at 98000: the curve counts {curve_calls} texts of {curve_chars} characters, the line {line_calls} texts of {line_chars} characters"
             );
         }
     }
