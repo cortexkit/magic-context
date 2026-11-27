@@ -6,12 +6,23 @@ use super::*;
 /// `(input, key)` pairs the 0.49 plugin's `resolveProjectIdentity` printed
 /// for paths that don't exist, which is its `dir:` fallback of the resolved
 /// path (carried over from the 0.49 Rust module's tests).
+#[cfg(not(windows))]
 const DIRECTORY_GOLDEN: &[(&str, &str)] = &[
     ("/work/api", "dir:e02ef1f35c06"),
     ("/work/api/", "dir:e02ef1f35c06"),
     ("/work/./x/../api", "dir:e02ef1f35c06"),
     ("/tmp/n\u{e4}me dir", "dir:93e3ea277593"),
     ("/", "dir:6666cd76f969"),
+];
+
+// Windows `dir:` keys from Node's Win32 path resolution and UTF-8 MD5.
+#[cfg(windows)]
+const DIRECTORY_GOLDEN: &[(&str, &str)] = &[
+    (r"C:\work\api", "dir:7f55d5fe53ba"),
+    (r"C:\work\api\", "dir:7f55d5fe53ba"),
+    (r"C:\work\.\x\..\api", "dir:7f55d5fe53ba"),
+    (r"C:\tmp\näme dir", "dir:ae8c0f4fb42c"),
+    (r"C:\", "dir:2f158c4731d7"),
 ];
 
 /// The root commit of the fixed repository [`golden_repository`] builds,

@@ -365,6 +365,7 @@ mod review_tests {
         )
         .unwrap();
         raw(&["commit", "-qam", "after"]);
+        let checkout = repo.path().canonicalize().unwrap();
         for (command, refs, options) in [
             ("blame", vec![], vec![]),
             ("show", vec![], vec![]),
@@ -377,7 +378,7 @@ mod review_tests {
                 "options":options, "paths":["fixture.log"]
             }))
             .unwrap();
-            let output = request.read(repo.path()).await.unwrap();
+            let output = request.read(&checkout).await.unwrap();
             let expected = if command == "ls-files" {
                 "fixture.log"
             } else {
