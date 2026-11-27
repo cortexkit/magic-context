@@ -90,6 +90,7 @@ test("hidden runs on OpenCode 2 are removed without touching the user or their h
         },
     });
     let activeHost = host;
+    let releaseReply = () => {};
     const pluginLog = () => (existsSync(logPath) ? readFileSync(logPath, "utf8") : "");
     try {
         const client = OpenCode.make({
@@ -151,9 +152,24 @@ test("hidden runs on OpenCode 2 are removed without touching the user or their h
                 return false;
             }
         };
-        host.mock.setDefault({ text: "late reply", delayMs: 5000, usage: { input_tokens: 10, output_tokens: 2 } });
+        const untilRemoved = new Promise<void>((resolve) => {
+            releaseReply = resolve;
+        });
+        host.mock.setDefault({
+            text: "late reply",
+            until: untilRemoved,
+            usage: { input_tokens: 10, output_tokens: 2 },
+        });
         writeFileSync(join(host.cwd, "native-remove-start"), "start");
-        await eventually(() => host.mock.requests().some((request) => JSON.stringify(request.body).includes("running remove probe")) ? true : undefined, "running child's provider request");
+        const removedRequest = await eventually(
+            () =>
+                host.mock
+                    .requests()
+                    .find((request) =>
+                        JSON.stringify(request.body).includes("running remove probe"),
+                    ),
+            "running child's provider request",
+        );
         writeFileSync(join(host.cwd, "native-remove-now"), "remove");
         const removal = await eventually(() => {
             const path = join(host.cwd, "native-remove-done.json");
@@ -162,6 +178,8 @@ test("hidden runs on OpenCode 2 are removed without touching the user or their h
         expect(removal.error).toBeUndefined();
         expect(await exists(removal.id)).toBe(false);
         expect(removal.missingError).toMatch(/not.*found/i);
+        expect(removedRequest.responseCompletedAt).toBeUndefined();
+        releaseReply();
         const probed = (role: string): ProbedSession[] => {
             const path = join(host.cwd, "native-probe-sessions.jsonl");
             if (!existsSync(path)) return [];
@@ -318,13 +336,21 @@ test("hidden runs on OpenCode 2 are removed without touching the user or their h
         if (cliVersion === "2.3.0" || cliVersion === "2.4.2") {
             // Kill an in-flight historian, preserving isolated context.db, opencode2.db and the mock.
             host.mock.reset();
-            host.mock.setDefault({ text: "interrupted historian", delayMs: 60_000, usage: { input_tokens: 100, output_tokens: 10 } });
+            const untilHostStops = new Promise<void>((resolve) => {
+                releaseReply = resolve;
+            });
+            host.mock.setDefault({
+                text: "interrupted historian",
+                until: untilHostStops,
+                usage: { input_tokens: 100, output_tokens: 10 },
+            });
             const known = new Set(hiddenChildren.map((child) => child.sessionID));
             await client.session.command({ sessionID: user.id, name: "ctx-recomp", text: "" });
             const interrupted = await eventually(() => probed("historian").find((child) => !known.has(child.sessionID)), "an interrupted historian child");
             await eventually(() => host.mock.requests().length > 0 ? true : undefined, "the in-flight historian request");
             expect(withContextDb(host.env, (db) => db.prepare("SELECT value FROM schema_migrations_meta WHERE key = ?").get(`hidden_child:${interrupted.sessionID}`))).toBeTruthy();
             await host.stopHost();
+            releaseReply();
             rmSync(serviceRegistrationPath(fixture.env), { force: true });
             host.mock.reset();
             host.mock.setDefault({ text: "must not reach the provider", usage: { input_tokens: 10, output_tokens: 2 } });
@@ -376,6 +402,7 @@ test("hidden runs on OpenCode 2 are removed without touching the user or their h
         console.error(activeHost.stderr(), pluginLog().slice(-20_000));
         throw error;
     } finally {
+        releaseReply();
         await activeHost.stop();
         rmSync(bundleDir, { recursive: true, force: true });
     }
