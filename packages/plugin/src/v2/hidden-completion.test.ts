@@ -1100,6 +1100,7 @@ describe("OpenCode 2 hidden child completion", () => {
                 {
                     task: "map-memories",
                     status: "empty",
+                    error: expect.stringContaining("length-capped at 97 tokens"),
                     inputTokens: 404,
                     outputTokens: 97,
                     cacheReadTokens: 21,

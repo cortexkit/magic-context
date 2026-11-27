@@ -239,6 +239,9 @@ function isLengthCapped(row: StoreRow): boolean {
     return row.data.finish === "length" || row.data.finish === "max_tokens";
 }
 
+// Match the instruction verbatim as observed on OpenCode 2.1.0–2.4.2. If the
+// host changes it, scanning the continuation chain stops and usage counts every repeat.
+// That reports more usage, never less.
 const OUTPUT_LIMIT_CONTINUATION_TEXT =
     "Your last response hit the output token limit (stop reason: length). Do not apologize, recap, or repeat yourself. Break the remaining work into smaller pieces.";
 
@@ -468,6 +471,7 @@ async function awaitAssistantRow(
             if (
                 outcome === "failed" &&
                 newAssistant &&
+                isLengthCapped(newAssistant) &&
                 error &&
                 typeof error === "object" &&
                 "type" in error &&
@@ -1087,8 +1091,9 @@ export async function createV2HiddenCompletionExecutor(
                 const cappedChainStart = outputLimit
                     ? outputLimitChainStart(attemptRows, row.seq)
                     : row.seq;
-                // Earlier tool steps and the returned reply count in the report.
-                // The local budget above also charges the host's repeats.
+                // Report every earlier real step and the returned reply. In a continuation chain
+                // this is the host's last repeat, whose input is larger because it includes the
+                // earlier replies and instructions. The local budget still charges every request.
                 const usageRows =
                     cappedChainStart < row.seq
                         ? steps.filter(
