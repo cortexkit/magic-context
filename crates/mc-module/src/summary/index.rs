@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::context_db::{ContextDb, StoredCompartment};
+use crate::summary::dates::NearestTimes;
 use crate::summary::render::HistoryCounts;
 
 /// What the session keeps of every summary: where it sits in the transcript
@@ -72,6 +73,9 @@ pub struct Summaries {
     /// The token counts of the history pieces the session's folds counted,
     /// shared with every clone: they describe summaries, not one list.
     counts: Arc<HistoryCounts>,
+    /// The times the nearest-message rule found for the summaries' days,
+    /// shared the same way.
+    nearest_times: Arc<NearestTimes>,
 }
 
 impl Summaries {
@@ -84,6 +88,12 @@ impl Summaries {
         &self.counts
     }
 
+    /// What the session found of its summaries' days by the nearest timed
+    /// message.
+    pub(crate) fn nearest_times(&self) -> &NearestTimes {
+        &self.nearest_times
+    }
+
     /// Every summary's row, all held until [`Summaries::release_through`].
     pub(crate) fn replace(&mut self, list: Vec<StoredCompartment>) {
         self.index = Arc::new(list.iter().map(SummaryIndex::from).collect());
@@ -92,11 +102,13 @@ impl Summaries {
             .map(|row| (row.sequence, Arc::new(row)))
             .collect();
         let index = &self.index;
-        self.counts.retain(|sequence| {
+        let kept = |sequence: i64| {
             index
                 .binary_search_by_key(&sequence, |entry| entry.sequence)
                 .is_ok()
-        });
+        };
+        self.counts.retain(kept);
+        self.nearest_times.retain(kept);
         self.revision += 1;
     }
 
@@ -110,6 +122,7 @@ impl Summaries {
             // same sequence.
             let kept = self.index.last().map_or(i64::MIN, |entry| entry.sequence);
             self.counts.retain(|sequence| sequence <= kept);
+            self.nearest_times.retain(|sequence| sequence <= kept);
         }
         self.revision += 1;
     }

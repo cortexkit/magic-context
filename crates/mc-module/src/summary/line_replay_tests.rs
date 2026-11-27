@@ -265,10 +265,42 @@ fn date(
     let days: Vec<_> = rows
         .iter()
         .map(|row| {
-            match (
+            (
                 day(row.start_message, &row.start_message_id),
                 day(row.end_message, &row.end_message_id),
-            ) {
+            )
+        })
+        .collect();
+    // A boundary without a time takes the nearest timed message's, as a
+    // fold does; the saved times are read for the session's runner.
+    let runner: Option<String> = saved.and_then(|saved| {
+        saved
+            .query_row(
+                "SELECT runner FROM app_read_message_index WHERE harness = ?1 AND session = ?2 LIMIT 1",
+                [harness, session],
+                |row| row.get(0),
+            )
+            .ok()
+    });
+    let times = crate::summary::dates::StoredTimes {
+        saved: |near| {
+            let (saved, runner) = (saved?, runner.as_deref()?);
+            crate::summary::dates::saved_time_near(saved, (runner, harness, session), near)
+        },
+        searched: |near| crate::summary::dates::search_time_near(conn, harness, session, near),
+    };
+    let days: Vec<_> = rows
+        .iter()
+        .zip(days)
+        .map(|(row, (start, end))| {
+            let nearest = if start.is_none() || end.is_none() {
+                crate::summary::dates::summary_times(&times, row.start_message, row.end_message)
+            } else {
+                None
+            };
+            let start = start.or_else(|| crate::summary::dates::utc_day(nearest?.0));
+            let end = end.or_else(|| crate::summary::dates::utc_day(nearest?.1));
+            match (start, end) {
                 (Some(start), Some(end)) => (Some(start), Some(end)),
                 _ => (None, None),
             }

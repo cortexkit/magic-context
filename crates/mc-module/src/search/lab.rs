@@ -634,22 +634,11 @@ impl IndexedTimes {
         (first, &rest[..inside])
     }
 
+    /// The dates of a summary of messages `start..=end`, by the rule history
+    /// headings use ([`crate::summary::dates::summary_times`]).
     fn range(&self, start: i64, end: i64) -> Option<SummaryRange> {
-        let (first, inside) = self.inside(start, end);
-        if let (Some(first), Some(last)) = (inside.first(), inside.last()) {
-            return Some(SummaryRange {
-                start: first.1,
-                end: last.1,
-            });
-        }
-        // A gap in the text index still belongs to the session's timeline.
-        // Prefer the last timed message before it; use the next one if the gap
-        // starts before any indexed time.
-        let (_, time) = *self.0.get(first.saturating_sub(1))?;
-        Some(SummaryRange {
-            start: time,
-            end: time,
-        })
+        let (start, end) = crate::summary::dates::summary_times(self, start, end)?;
+        Some(SummaryRange { start, end })
     }
 
     fn matches(&self, start: i64, end: i64, bounds: Option<messages::DateRange>) -> bool {
@@ -659,6 +648,24 @@ impl IndexedTimes {
                     && range.end.timestamp_millis() >= bounds.from
             })
         })
+    }
+}
+
+impl crate::summary::dates::TimedMessages for IndexedTimes {
+    type Time = DateTime<Utc>;
+    fn first_in(&self, start: i64, end: i64) -> Option<DateTime<Utc>> {
+        self.inside(start, end).1.first().map(|(_, time)| *time)
+    }
+    fn last_in(&self, start: i64, end: i64) -> Option<DateTime<Utc>> {
+        self.inside(start, end).1.last().map(|(_, time)| *time)
+    }
+    fn last_before(&self, number: i64) -> Option<DateTime<Utc>> {
+        let first = self.0.partition_point(|(ordinal, _)| *ordinal < number);
+        first.checked_sub(1).map(|index| self.0[index].1)
+    }
+    fn first_after(&self, number: i64) -> Option<DateTime<Utc>> {
+        let after = self.0.partition_point(|(ordinal, _)| *ordinal <= number);
+        self.0.get(after).map(|(_, time)| *time)
     }
 }
 

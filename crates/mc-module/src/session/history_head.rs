@@ -353,8 +353,11 @@ impl Session {
     /// Each store is read once, for every time the places before it left
     /// unknown. When none knows a time, a fold passes the days `m[1]`
     /// showed (`shown`), and the row takes the day its own entry there
-    /// records, so dates `m[1]` showed stay in `m[0]`. A row with either
-    /// day still unknown keeps no date. Only a render that writes headings
+    /// records, so dates `m[1]` showed stay in `m[0]`. A day still unknown
+    /// comes from the nearest timed message among the saved times and the
+    /// search index ([`crate::summary::dates::summary_times`]): a boundary
+    /// message without text has no time of its own. A row with either day
+    /// still unknown keeps no date. Only a render that writes headings
     /// anew calls this: a fold, or `m[1]` showing a summary for the first
     /// time.
     pub(super) fn date_summaries(
@@ -414,7 +417,7 @@ impl Session {
                 .or_else(|| searched.get(&(number, mid.to_owned())).copied())
                 .and_then(crate::summary::dates::utc_day)
         };
-        let days: Vec<(Option<String>, Option<String>)> = rows
+        let mut days: Vec<(Option<String>, Option<String>)> = rows
             .iter()
             .map(|row| {
                 let recorded = shown
@@ -425,12 +428,64 @@ impl Session {
                     .or_else(|| recorded.map(|days| days.start.clone()));
                 let end = day(row.end_message, &row.end_message_id)
                     .or_else(|| recorded.map(|days| days.end.clone()));
-                match (start, end) {
-                    (Some(start), Some(end)) => (Some(start), Some(end)),
-                    _ => (None, None),
-                }
+                (start, end)
             })
             .collect();
+        // A boundary message with no time of its own: the nearest timed
+        // message ([`crate::summary::dates::summary_times`]), from the saved
+        // times and the search index, one indexed query at a time, kept for
+        // the session.
+        let undated: Vec<usize> = (0..rows.len())
+            .filter(|&i| days[i].0.is_none() || days[i].1.is_none())
+            .collect();
+        if !undated.is_empty() {
+            let nearest = self.summaries.nearest_times();
+            let mut resolve = |conn: Option<&rusqlite::Connection>| {
+                let times = crate::summary::dates::StoredTimes {
+                    saved: |near| {
+                        self.store
+                            .as_ref()
+                            .and_then(|store| store.message_time_near(&self.key, near))
+                    },
+                    searched: |near| {
+                        conn.and_then(|conn| {
+                            crate::summary::dates::search_time_near(
+                                conn,
+                                &self.key.harness,
+                                &self.key.session,
+                                near,
+                            )
+                        })
+                    },
+                };
+                for &i in &undated {
+                    let row = &rows[i];
+                    let range = (row.start_message, row.end_message);
+                    let found = nearest.get(row.sequence, range).or_else(|| {
+                        let found = crate::summary::dates::summary_times(&times, range.0, range.1)?;
+                        nearest.keep(row.sequence, range, found);
+                        Some(found)
+                    });
+                    if let Some((first, last)) = found {
+                        let (start, end) = &mut days[i];
+                        *start = start
+                            .take()
+                            .or_else(|| crate::summary::dates::utc_day(first));
+                        *end = end
+                            .take()
+                            .or_else(|| crate::summary::dates::utc_day(last));
+                    }
+                }
+            };
+            match &self.db {
+                Some(db) => db.with_connection(|conn| resolve(Some(conn))),
+                None => resolve(None),
+            }
+        }
+        let days = days.into_iter().map(|days| match days {
+            (Some(start), Some(end)) => (Some(start), Some(end)),
+            _ => (None, None),
+        });
         for (row, (start, end)) in rows.iter_mut().zip(days) {
             (row.start_date, row.end_date) = (start, end);
         }

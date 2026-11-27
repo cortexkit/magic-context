@@ -267,3 +267,212 @@ fn a_fold_keeps_the_days_m1_showed_for_the_same_summary() {
     assert!(m0.contains("## 13-16 · Work 4"), "{m0}");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Rows of the message search index: message `n` written at its time.
+fn search_rows(session: &Session, rows: &[(u64, u64)]) {
+    let values: Vec<String> = rows
+        .iter()
+        .map(|(n, at)| format!("('s1', {n}, {n}, {at})"))
+        .collect();
+    execute(
+        session,
+        &format!(
+            "INSERT INTO message_fts_rowid_map (session_id, message_ordinal, fts_rowid, message_time_ms) VALUES {};",
+            values.join(", ")
+        ),
+    );
+}
+
+/// No message keeps its own time: the index has none and nothing was saved.
+fn lose_times(session: &mut Session) {
+    let base = session.index.base();
+    session.index = crate::index::Index::starting_at(base);
+    session.index.extend((base..=60).map(|n| {
+        let mut entry = text(n, &format!("m{n}"));
+        entry.written_at = 0;
+        entry
+    }));
+    session.store = None;
+}
+
+/// A boundary message without a time of its own (no text in the search
+/// index) takes the nearest timed message's day: the first and last timed
+/// message inside the summary, else the nearest earlier, else the next
+/// later one. What a fold found this way is kept for the session.
+#[test]
+fn a_boundary_without_a_time_takes_the_nearest_timed_message() {
+    let dir = scratch("head-dates-nearest");
+    let (mut session, settings) = timed_head(&dir, |_| 0);
+    search_rows(
+        &session,
+        &[(2, time_of(2)), (3, time_of(3)), (10, time_of(10))],
+    );
+    build(&mut session, &settings).unwrap();
+    let m0 = shown(&session, head::M0_ID);
+    for heading in [
+        // Messages 2 and 3, inside.
+        "## 1-4 · 2026-03-01 · Work 1",
+        // None inside: message 3, the nearest earlier.
+        "## 5-8 · 2026-03-01 · Work 2",
+        // Message 10 alone.
+        "## 9-12 · 2026-03-04 · Work 3",
+    ] {
+        assert!(m0.contains(heading), "{heading}: {m0}");
+    }
+    assert_eq!(session.summaries.nearest_times().len(), 3);
+    // A later fold finds them kept, even when the index has lost them.
+    execute(&session, "DELETE FROM message_fts_rowid_map;");
+    let mut rows: Vec<crate::context_db::StoredCompartment> = (1..=3)
+        .map(|sequence| crate::context_db::StoredCompartment {
+            sequence,
+            start_message: sequence * 4 - 3,
+            end_message: sequence * 4,
+            start_message_id: format!("m{}", sequence * 4 - 3),
+            end_message_id: format!("m{}", sequence * 4),
+            ..Default::default()
+        })
+        .collect();
+    session.date_summaries(&mut rows, None);
+    let days: Vec<_> = rows
+        .iter()
+        .map(|row| (row.start_date.as_deref(), row.end_date.as_deref()))
+        .collect();
+    assert_eq!(
+        days,
+        [
+            (Some("2026-03-01"), Some("2026-03-01")),
+            (Some("2026-03-01"), Some("2026-03-01")),
+            (Some("2026-03-04"), Some("2026-03-04")),
+        ]
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+
+    // Before the session's first timed message: the next later one.
+    let dir = scratch("head-dates-next");
+    let (mut session, settings) = timed_head(&dir, |_| 0);
+    search_rows(&session, &[(6, time_of(6))]);
+    build(&mut session, &settings).unwrap();
+    let m0 = shown(&session, head::M0_ID);
+    for heading in [
+        "## 1-4 · 2026-03-02 · Work 1",
+        "## 5-8 · 2026-03-02 · Work 2",
+        "## 9-12 · 2026-03-02 · Work 3",
+    ] {
+        assert!(m0.contains(heading), "{heading}: {m0}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+
+    // No timed message anywhere: no date.
+    let dir = scratch("head-dates-none");
+    let (mut session, settings) = timed_head(&dir, |_| 0);
+    build(&mut session, &settings).unwrap();
+    let m0 = shown(&session, head::M0_ID);
+    assert!(m0.contains("## 1-4 · Work 1"), "{m0}");
+    assert_eq!(session.summaries.nearest_times().len(), 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A day `m[1]` recorded for a summary comes before the nearest timed
+/// message: it is the day the model was already shown. The same summary
+/// with no recorded day takes the nearest timed message's.
+#[test]
+fn a_recorded_day_comes_before_the_nearest_timed_message() {
+    let dir = scratch("head-dates-recorded-first");
+    let (mut session, settings) = timed_head(&dir, time_of);
+    build(&mut session, &settings).unwrap();
+    publish(&mut session, 4);
+    build(&mut session, &settings).unwrap();
+    assert!(shown(&session, head::M1_ID).contains("## 13-16 · 2026-03-05→06 · Work 4"));
+    lose_times(&mut session);
+    // Inside summary 4, a message of another day.
+    search_rows(&session, &[(14, DAY0 + 20 * 24 * 3_600_000)]);
+    session.fold_due = true;
+    build(&mut session, &settings).unwrap();
+    let m0 = shown(&session, head::M0_ID);
+    assert!(m0.contains("## 13-16 · 2026-03-05→06 · Work 4"), "{m0}");
+    // This fold's baseline records no `m[1]` days, so the next fold dates
+    // summary 4 by the message inside it.
+    assert_eq!(
+        session.baseline.as_ref().unwrap().newer_days,
+        Some(Default::default())
+    );
+    session.fold_due = true;
+    build(&mut session, &settings).unwrap();
+    let m0 = shown(&session, head::M0_ID);
+    assert!(m0.contains("## 13-16 · 2026-03-21 · Work 4"), "{m0}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Days the nearest timed message would give change no bytes until a fold:
+/// a head rendered while its summaries had no day keeps them undated on a
+/// rebuild that neither folds nor shows newer summaries.
+#[test]
+fn days_from_the_nearest_message_wait_for_a_fold() {
+    let dir = scratch("head-dates-nearest-wait");
+    let (mut session, settings) = timed_head(&dir, |_| 0);
+    build(&mut session, &settings).unwrap();
+    let served = head_ops(session.latest.as_ref().unwrap());
+    let m0 = shown(&session, head::M0_ID);
+    assert!(m0.contains("## 1-4 · Work 1"), "{m0}");
+    // Messages inside every summary gain times; no boundary does.
+    search_rows(
+        &session,
+        &[(2, time_of(2)), (6, time_of(6)), (10, time_of(10))],
+    );
+    session.queued.insert(("m40".into(), "p".into()));
+    let view = build(&mut session, &settings).expect("the drop lands");
+    assert_eq!(head_ops(&view), served);
+    session.fold_due = true;
+    build(&mut session, &settings).unwrap();
+    let m0 = shown(&session, head::M0_ID);
+    assert!(m0.contains("## 1-4 · 2026-03-01 · Work 1"), "{m0}");
+    assert!(m0.contains("## 5-8 · 2026-03-02 · Work 2"), "{m0}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// What dating costs a fold of 3,800 summaries when half of them have no
+/// time at either boundary message (only messages inside them do): the
+/// first fold after a start, which looks each of those up by the nearest
+/// timed message, and a later one, which finds them kept.
+#[test]
+#[ignore = "a measurement; run with --release --ignored --nocapture"]
+fn nearest_message_dating_time() {
+    let dir = scratch("head-dates-nearest-time");
+    let (session, _) = timed_head(&dir, |_| 0);
+    let count = 3_800u64;
+    let mut rows = Vec::new();
+    for sequence in 1..=count {
+        let (start, end) = (sequence * 4 - 3, sequence * 4);
+        rows.push((start + 1, time_of(start + 1)));
+        rows.push((start + 2, time_of(start + 2)));
+        if sequence % 2 == 0 {
+            rows.push((start, time_of(start)));
+            rows.push((end, time_of(end)));
+        }
+    }
+    for chunk in rows.chunks(2_000) {
+        search_rows(&session, chunk);
+    }
+    let summaries: Vec<crate::context_db::StoredCompartment> = (1..=count as i64)
+        .map(|sequence| crate::context_db::StoredCompartment {
+            sequence,
+            start_message: sequence * 4 - 3,
+            end_message: sequence * 4,
+            start_message_id: format!("m{}", sequence * 4 - 3),
+            end_message_id: format!("m{}", sequence * 4),
+            title: format!("Work {sequence}"),
+            ..Default::default()
+        })
+        .collect();
+    let timed = |label: &str| {
+        let mut dated = summaries.clone();
+        let started = std::time::Instant::now();
+        session.date_summaries(&mut dated, None);
+        let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+        let undated = dated.iter().filter(|row| row.start_date.is_none()).count();
+        println!("DATING {label}: {elapsed:.0} ms for {count} summaries, {undated} undated");
+    };
+    timed("first fold after a start");
+    timed("later fold");
+    std::fs::remove_dir_all(dir).unwrap();
+}

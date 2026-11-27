@@ -986,6 +986,20 @@ impl Store {
         read().unwrap_or_default()
     }
 
+    /// The timed message `near` asks for among the times this session saved
+    /// for the messages its index let go ([`crate::summary::dates::saved_time_near`]).
+    pub(crate) fn message_time_near(
+        &self,
+        key: &SessionRef,
+        near: crate::summary::dates::Near,
+    ) -> Option<(i64, u64)> {
+        crate::summary::dates::saved_time_near(
+            &self.lock(),
+            (&key.runner, &key.harness, &key.session),
+            near,
+        )
+    }
+
     pub(crate) fn save_app_index(
         &self,
         key: &SessionRef,
