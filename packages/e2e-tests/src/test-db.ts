@@ -17,9 +17,11 @@ class TestDatabase extends Database {
  * Setting a timeout makes the handle WAIT for the lock instead of failing.
  *
  * Closing finalizes one-shot `prepare()` statements as well as cached queries.
- * Otherwise Bun can defer the native close until garbage collection. If it
- * is the last WAL connection, its cleanup can take an exclusive lock just
- * as a restarted host opens the store, before the host sets its busy timeout.
+ * Otherwise Bun can defer the native close until garbage collection. The
+ * store uses SQLite's write-ahead log, and the last connection to close
+ * folds that log back into the database under an exclusive lock. If that
+ * late close is the last connection, it can take the lock just as a
+ * restarted host opens the store, before the host sets its busy timeout.
  *
  * Open test readers and writers here, or set a timeout of at least five seconds
  * before the handle's first use. For a deliberately fail-fast connection, put
