@@ -128,6 +128,19 @@ export function hasLengthCappedOutput(value: unknown): boolean {
     return Object.values(value).some((item) => hasLengthCappedOutput(item));
 }
 
+/** A reused child may still have a capped answer from an earlier turn or model. */
+export function isLatestAssistantLengthCapped(messages: unknown): boolean {
+    const latest = getLatestAssistantMessage(messages);
+    return (
+        hasLengthCappedOutput(latest?.info?.finish ? { finish: latest.info.finish } : null) ||
+        (Array.isArray(latest?.parts) &&
+            latest.parts.some(
+                (part) =>
+                    isRecord(part) && part.type === "step-finish" && hasLengthCappedOutput(part),
+            ))
+    );
+}
+
 /** Settlement metadata for diagnostics, never private reasoning as task output. */
 export function describeAssistantSettlement(output: unknown): string {
     if (isRecord(output) && isRecord(output.tokenLog)) {

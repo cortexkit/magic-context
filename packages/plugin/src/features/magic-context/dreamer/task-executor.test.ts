@@ -2556,6 +2556,141 @@ describe("createDreamTaskExecutor — compress-cues", () => {
 });
 
 describe("createDreamTaskExecutor — retrospective", () => {
+    test.each([
+        ["hidden", "gate"],
+        ["hidden", "deepen"],
+        ["opencode1", "gate"],
+        ["opencode1", "deepen"],
+    ] as const)("%s rejects a capped retrospective %s without processing the window", async (transport, cappedTurn) => {
+        db = freshDb();
+        const project = "/repo/retrospective-capped";
+        const watermark = Date.now() - 1000;
+        const config = {
+            task: "retrospective",
+            schedule: "0 5 * * *",
+            timeoutMinutes: 20,
+        } as const;
+        writeTaskScheduleState(db, {
+            projectPath: project,
+            task: config.task,
+            nextDueAt: null,
+            lastRunAt: null,
+            schedule: config.schedule,
+            lastStatus: null,
+            lastError: null,
+            retryCount: 0,
+            retrospectiveWatermarkMs: watermark,
+        });
+        const deps = {
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+            retrospectiveRawProvider: {
+                listProjectSessions: () => [{ sessionId: "s1", updatedAt: watermark + 2 }],
+                readUserMessagesSince: () => ({
+                    messages: [
+                        {
+                            sessionId: "s1",
+                            ordinal: 1,
+                            role: "user" as const,
+                            text: "Please add a migration test covering the new configuration key.",
+                            ts: watermark + 1,
+                        },
+                        {
+                            sessionId: "s1",
+                            ordinal: 2,
+                            role: "user" as const,
+                            text: "Please fix the migration test; it still omits the new configuration key.",
+                            followsAssistantReply: true,
+                            ts: watermark + 2,
+                        },
+                    ],
+                    truncated: false,
+                }),
+                readUserMessagesBefore: () => [],
+            },
+        };
+        let prompts = 0;
+        const answer = () => {
+            const gate = prompts === 1;
+            return {
+                text: gate ? (cappedTurn === "gate" ? "3, 5" : "y: 2") : "<learnings><learning",
+                lengthCapped: cappedTurn === (gate ? "gate" : "deepen"),
+                usage: { input: 100, output: 64 },
+            };
+        };
+        const hiddenCompletionExecutor: HiddenCompletionExecutor = {
+            capabilities: { harness: "opencode2", tools: true },
+            async open() {
+                return { id: "retro-child" };
+            },
+            async attempt() {
+                prompts += 1;
+            },
+            async collect() {
+                return answer();
+            },
+            async close() {},
+        };
+        const executor = createDreamTaskExecutor(
+            transport === "hidden"
+                ? { ...deps, hiddenCompletionExecutor, parentSessionId: "ses-parent" }
+                : {
+                      ...deps,
+                      client: {
+                          session: {
+                              list: async () => ({ data: [{ id: "ses-parent", title: "Parent" }] }),
+                              create: async () => ({ data: { id: "retro-child" } }),
+                              prompt: async () => {
+                                  prompts += 1;
+                                  return {};
+                              },
+                              messages: async () => {
+                                  const output = answer();
+                                  const message = assistantMessages(output.text)[0]!;
+                                  return {
+                                      data: [
+                                          {
+                                              ...message,
+                                              info: {
+                                                  ...message.info,
+                                                  finish: output.lengthCapped ? "length" : "stop",
+                                              },
+                                          },
+                                      ],
+                                  };
+                              },
+                              delete: async () => ({}),
+                          },
+                      } as never,
+                  },
+        );
+        const outcome = await runManualDream({
+            db,
+            projectIdentity: project,
+            tasks: [config],
+            executor,
+            task: config.task,
+        });
+        const summary = JSON.parse(getDreamRuns(db, project)[0]!.tasks_json)[0];
+        expect(outcome.failed).toEqual([config.task]);
+        expect(summary).toMatchObject({
+            status: "failed",
+            error: expect.stringContaining("Retrospective child returned length-capped output"),
+        });
+        expect(prompts).toBe(cappedTurn === "gate" ? 1 : 2);
+        expect(getTaskScheduleState(db, project, config.task)?.retrospectiveWatermarkMs).toBe(
+            watermark,
+        );
+        expect(
+            db
+                .prepare(
+                    "SELECT window_key FROM retrospective_processed_windows WHERE project_path = ?",
+                )
+                .all(project),
+        ).toEqual([]);
+        expect(getMemoriesByProject(db, project)).toEqual([]);
+    });
+
     test("persists the newest sent cohort and never hands its rows back as new work", async () => {
         db = freshDb();
         const project = "/repo/retrospective-saturated-cohort";

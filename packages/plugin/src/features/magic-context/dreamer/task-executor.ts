@@ -25,7 +25,10 @@ import {
 } from "../../../hooks/magic-context/single-store-refusal";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
-import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
+import {
+    extractLatestAssistantText,
+    isLatestAssistantLengthCapped,
+} from "../../../shared/assistant-message-extractor";
 import { teardownChildSession } from "../../../shared/child-session-teardown";
 import { describeError } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
@@ -1795,8 +1798,18 @@ async function runRetrospectiveTask(
                         });
                     },
                     validateOutput: (outputMessages) => {
-                        const text = hiddenHandle
-                            ? (outputMessages as { text: string | null }).text
+                        const completion = hiddenHandle
+                            ? (outputMessages as HiddenCompletion)
+                            : null;
+                        if (
+                            completion
+                                ? completion.lengthCapped
+                                : isLatestAssistantLengthCapped(outputMessages)
+                        ) {
+                            throw new Error("Retrospective child returned length-capped output");
+                        }
+                        const text = completion
+                            ? completion.text
                             : extractLatestAssistantText(outputMessages);
                         if (!text) throw new Error("Retrospective child returned no output.");
                         return text;

@@ -3,6 +3,7 @@ import {
     describeAssistantSettlement,
     extractLatestAssistantText,
     hasLengthCappedOutput,
+    isLatestAssistantLengthCapped,
 } from "./assistant-message-extractor";
 
 test("reasoning-only and tool-only turns stay out of manifest text and retain finish diagnostics", () => {
@@ -44,4 +45,25 @@ describe("hasLengthCappedOutput", () => {
     test("detects Pi stopReason length", () => {
         expect(hasLengthCappedOutput({ role: "assistant", stopReason: "length" })).toBe(true);
     });
+});
+
+test("only the latest assistant's settlement counts on a reused child", () => {
+    const capped = {
+        info: { role: "assistant", time: { created: 1 }, finish: "length" },
+        parts: [],
+    };
+    const stopped = {
+        info: { role: "assistant", time: { created: 2 }, finish: "stop" },
+        parts: [{ type: "tool", state: { input: { finish: "length" } } }],
+    };
+    expect(isLatestAssistantLengthCapped([capped, stopped])).toBe(false);
+    expect(isLatestAssistantLengthCapped([capped])).toBe(true);
+    expect(
+        isLatestAssistantLengthCapped([
+            {
+                ...stopped,
+                parts: [{ type: "step-finish", reason: "max_tokens" }],
+            },
+        ]),
+    ).toBe(true);
 });
