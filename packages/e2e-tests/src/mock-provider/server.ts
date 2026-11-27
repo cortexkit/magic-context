@@ -18,7 +18,8 @@ const STREAM_PING_INTERVAL_MS = 5_000;
 
 /**
  * Forward the first SSE event of `source` at once, send `ping` events while
- * the gate is held, then forward the rest. The request stays open the whole time.
+ * `hold` lasts (that many milliseconds, or until the promise resolves), then
+ * forward the rest. The request stays open the whole time.
  */
 function holdAfterFirstEvent(
     source: ReadableStream<Uint8Array>,
