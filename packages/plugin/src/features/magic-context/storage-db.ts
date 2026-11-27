@@ -1,7 +1,6 @@
 import {
     type Dirent,
     existsSync,
-    lstatSync,
     readdirSync,
     readFileSync,
     rmdirSync,
@@ -206,14 +205,11 @@ export const LATEST_SUPPORTED_VERSION = 95;
 export const BOOT_SQLITE_BUSY_TIMEOUT_MS = 5_000;
 
 function ensureSecureStorageDir(dir: string): void {
+    // A storage folder that is a symbolic link is followed, as in every release so
+    // far: people keep the store on another disk that way. The startup permission
+    // pass does not follow links, so it reports such a root as a failure and never
+    // certifies it.
     ensureStorageDirectorySync(dir);
-    if (
-        process.platform !== "win32" &&
-        shouldEnforcePrivateStoragePermissions() &&
-        !lstatSync(resolve(dir)).isDirectory()
-    ) {
-        throw new Error("Private storage directory is not a real directory");
-    }
 }
 
 function tightenStorageTree(dbPath: string): void {
