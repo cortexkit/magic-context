@@ -27,3 +27,70 @@ test("advertised mock URL reaches the mock and unknown paths retain its 404 sign
         await mock.stop();
     }
 });
+
+test("an Anthropic stream sends its start and keep-alive before the held answer", async () => {
+    const mock = new MockProvider();
+    const release = Promise.withResolvers<void>();
+    try {
+        const { baseURL } = await mock.start();
+        mock.setDefault({
+            text: "held answer",
+            streamHoldUntil: release.promise,
+            usage: { input_tokens: 1, output_tokens: 1 },
+        });
+        const response = await fetch(`${baseURL}/messages`, {
+            method: "POST",
+            body: JSON.stringify({ model: "mock", messages: [], stream: true }),
+        });
+        expect(response.status).toBe(200);
+        const reader = response.body!.pipeThrough(new TextDecoderStream()).getReader();
+        let opening = "";
+        while (!opening.includes('"type":"ping"')) {
+            const part = await reader.read();
+            if (part.done) throw new Error("stream ended before its keep-alive");
+            opening += part.value;
+        }
+        expect(opening).toStartWith("event: message_start\n");
+        expect(opening).not.toContain("event: content_block_start");
+        expect(opening).not.toContain("event: message_stop");
+        release.resolve();
+        let answer = "";
+        for (;;) {
+            const part = await reader.read();
+            if (part.done) break;
+            answer += part.value;
+        }
+        expect(answer).toContain("held answer");
+        expect(answer).toContain("event: message_stop");
+    } finally {
+        release.resolve();
+        await mock.stop();
+    }
+}, 10_000);
+
+test("an Anthropic stream can disconnect while held and be released afterward", async () => {
+    const mock = new MockProvider();
+    const release = Promise.withResolvers<void>();
+    try {
+        const { baseURL } = await mock.start();
+        mock.setDefault({
+            text: "held answer",
+            streamHoldUntil: release.promise,
+            usage: { input_tokens: 1, output_tokens: 1 },
+        });
+        const response = await fetch(`${baseURL}/messages`, {
+            method: "POST",
+            body: JSON.stringify({ model: "mock", messages: [], stream: true }),
+        });
+        const reader = response.body!.getReader();
+        expect(new TextDecoder().decode((await reader.read()).value)).toStartWith(
+            "event: message_start\n",
+        );
+        await reader.cancel();
+        release.resolve();
+        expect(await reader.read()).toEqual({ done: true, value: undefined });
+    } finally {
+        release.resolve();
+        await mock.stop();
+    }
+});

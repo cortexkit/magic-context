@@ -7,48 +7,62 @@
  * Supports each API's SSE stream plus single-shot JSON responses for direct probes.
  */
 
+import { LatestTurnThinkingValidator } from "./latest-turn-thinking";
+
 /**
- * Gap between keep-alive `ping` events while a `streamHoldMs` answer is held.
+ * Gap between keep-alive `ping` events while a streamed answer is held.
  * Shorter than the mock server's own idle timeout (Bun.serve closes a request
  * that sends nothing for 10 s).
  */
-import { LatestTurnThinkingValidator } from "./latest-turn-thinking";
-
 const STREAM_PING_INTERVAL_MS = 5_000;
 
 /**
  * Forward the first SSE event of `source` at once, send `ping` events while
- * `holdMs` elapses, then forward the rest. The request stays open the whole time.
+ * the gate is held, then forward the rest. The request stays open the whole time.
  */
 function holdAfterFirstEvent(
     source: ReadableStream<Uint8Array>,
-    holdMs: number,
+    hold: number | Promise<void>,
 ): ReadableStream<Uint8Array> {
     const reader = source.getReader();
     const ping = new TextEncoder().encode('event: ping\ndata: {"type":"ping"}\n\n');
     let held = false;
+    let cancelled = false;
+    const disconnect = Promise.withResolvers<void>();
     return new ReadableStream<Uint8Array>({
         async pull(controller) {
             if (!held) {
                 const first = await reader.read();
+                if (cancelled) return;
                 if (first.done) {
                     controller.close();
                     return;
                 }
                 controller.enqueue(first.value);
                 held = true;
-                const until = Date.now() + holdMs;
-                while (Date.now() < until) {
-                    await Bun.sleep(Math.min(STREAM_PING_INTERVAL_MS, until - Date.now()));
-                    if (Date.now() < until) controller.enqueue(ping);
+                const timer = Promise.withResolvers<void>();
+                const release = typeof hold === "number" ? timer.promise : hold;
+                const timeout =
+                    typeof hold === "number" ? setTimeout(timer.resolve, hold) : undefined;
+                const keepAlive = setInterval(() => {
+                    if (!cancelled) controller.enqueue(ping);
+                }, STREAM_PING_INTERVAL_MS);
+                try {
+                    await Promise.race([release, disconnect.promise]);
+                } finally {
+                    clearTimeout(timeout);
+                    clearInterval(keepAlive);
                 }
                 return;
             }
             const next = await reader.read();
+            if (cancelled) return;
             if (next.done) controller.close();
             else controller.enqueue(next.value);
         },
         cancel(reason) {
+            cancelled = true;
+            disconnect.resolve();
             return reader.cancel(reason);
         },
     });
@@ -93,6 +107,8 @@ export interface MockResponse {
      * default) never fire while the answer takes longer than that in total.
      */
     streamHoldMs?: number;
+    /** Anthropic streams only: send `message_start` immediately; hold the rest until released. */
+    streamHoldUntil?: Promise<void>;
     /** Optional model name echoed back in the response. Defaults to request's model. */
     model?: string;
     /**
@@ -556,10 +572,10 @@ export class MockProvider {
                     },
                 });
 
-                const body =
-                    scripted.streamHoldMs && scripted.streamHoldMs > 0
-                        ? holdAfterFirstEvent(stream, scripted.streamHoldMs)
-                        : stream;
+                const hold =
+                    scripted.streamHoldUntil ??
+                    (scripted.streamHoldMs && scripted.streamHoldMs > 0 ? scripted.streamHoldMs : 0);
+                const body = hold === 0 ? stream : holdAfterFirstEvent(stream, hold);
                 return new Response(body, {
                     status: 200,
                     headers: {
