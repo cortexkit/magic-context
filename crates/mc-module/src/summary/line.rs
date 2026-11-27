@@ -138,8 +138,9 @@ pub(crate) struct Options {
     /// ([`cost_within`]). Off, every piece is counted.
     pub stop_early: bool,
     /// Spend what the chosen forms leave of the budget on titles of hidden
-    /// summaries ([`fill_titles`]). Off, the plan is the reference
-    /// calculation's, which has no such step.
+    /// summaries ([`fill_titles`]). Off, the plan is the one the reference
+    /// calculation for `testdata/history-line-shape.json` makes, which has
+    /// no such step.
     pub fill: bool,
 }
 
