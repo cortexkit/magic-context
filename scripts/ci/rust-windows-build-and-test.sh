@@ -63,7 +63,8 @@ toolchain() {
 
 probe() {
     local label=$1 limit=$2 test=$3
-    record "probe-$label" bounded "$limit" cargo test --locked -p mc-module --lib "$test" -- --exact --nocapture
+    shift 3
+    record "probe-$label" bounded "$limit" cargo test --locked -p mc-module --lib "$test" -- --exact --nocapture "$@"
 }
 
 test_module_binary() {
@@ -102,6 +103,7 @@ record module-live-build bounded 18m cargo build --locked -p mc-module "${live[@
 record module-default-test-compile bounded 20m cargo test --locked -p mc-module --no-run
 record module-live-test-compile bounded 20m cargo test --locked -p mc-module "${live[@]}" --no-run
 
+probe sqlite-create 5m context_db::creation_probe::fresh_store_creation_timing --ignored
 probe crash-resume 5m move_in::tests::crash_resume_at_every_transaction_boundary
 probe child-workdir 3m child_scopes::tests::a_relative_folder_or_no_daemon_is_refused_by_name
 probe lab-frozen-path 3m dreamer::lab::tests::spec_refuses_live_path_hardlink_and_checkout_escape

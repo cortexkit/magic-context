@@ -47,6 +47,10 @@ const FORK_VERSION_FLOOR: u32 = declared_number(
 /// module's own migrations on top.
 pub(crate) const FRESH_SCHEMA: &str = include_str!("../testdata/context-schema.sql");
 
+#[cfg(test)]
+#[path = "context_db_creation_probe.rs"]
+mod creation_probe;
+
 /// A numeric literal declared in TypeScript source, read at compile time so
 /// an installed binary needs no TypeScript files.
 const fn declared_number(source: &str, declaration: &str) -> u32 {
