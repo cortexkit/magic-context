@@ -74,6 +74,8 @@ interface TurnRecord {
     compartments: number;
     executeDecisions: number;
     deferDecisions: number;
+    cacheExpired: boolean;
+    rewritePermitted: boolean;
     rematerialized: number;
     overflowDetected: number;
     bumpedTo95: number;
@@ -228,6 +230,8 @@ async function runCase(args: {
             compartments: h.countCompartments(sessionId),
             executeDecisions: countLines(lines, "decision=execute"),
             deferDecisions: countLines(lines, "decision=defer"),
+            cacheExpired: lines.some((line) => line.includes("cache_expired=true")),
+            rewritePermitted: lines.some((line) => line.includes("rewrite permission: allowed=true")),
             rematerialized: countLines(lines, "rematerialized=true"),
             overflowDetected: countLines(lines, "overflow detected"),
             bumpedTo95: countLines(lines, "bumping percentage to 95%"),
@@ -281,7 +285,7 @@ describe("issue 538: engine rejects oversized prompts before any model call", ()
     );
 
     it(
-        "D: case A with a short cache TTL: an idle past the TTL produces an execute pass",
+        "D: a confirmed cache expiry neither rebuilds nor recovers from an unrecognised engine rejection",
         async () => {
             const { turns } = await runCase({
                 label: "D",
@@ -294,9 +298,20 @@ describe("issue 538: engine rejects oversized prompts before any model call", ()
             });
             const wallTurn = firstRejected(turns);
             expect(wallTurn).toBeDefined();
-            // The rejected request does not refresh the idle clock, so the first
-            // pass after the idle is a scheduler execute.
-            expect(turns.find((turn) => turn.turn === (wallTurn ?? 0) + 1)?.executeDecisions).toBe(1);
+            const wall = turns.find((turn) => turn.turn === wallTurn)!;
+            const expired = turns.find((turn) => turn.turn === wall.turn + 1);
+            // The rejected request did not supply an overflow signal or refresh
+            // the clock. Expiry by itself does not authorize changing the prefix.
+            expect(expired).toMatchObject({
+                cacheExpired: true,
+                executeDecisions: 0,
+                deferDecisions: 1,
+                rewritePermitted: false,
+                rematerialized: 0,
+                rejected: true,
+                storedInputTokens: wall.storedInputTokens,
+                needsEmergencyRecovery: 0,
+            });
         },
         900_000,
     );
