@@ -172,6 +172,8 @@ fn a_tree_lists_each_file_of_its_commit_with_its_blob() {
 #[test]
 fn a_copy_holds_one_commit_reads_its_history_up_to_there_and_is_deleted_when_dropped() {
     let repo = Repo::on("master", &[("src/a.rs", "fn first_name() {}\n")]);
+    // Keep the archive's fixture bytes independent of the machine's Git settings.
+    repo.git(&["config", "core.autocrlf", "false"]);
     let first = repo.git(&["rev-parse", "HEAD"]).trim().to_owned();
     repo.write(&[("src/a.rs", "fn second_name() {}\n"), ("src/b.rs", "b\n")]);
     let second = repo.commit("second");
