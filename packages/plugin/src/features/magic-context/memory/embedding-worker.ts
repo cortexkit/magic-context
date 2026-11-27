@@ -1,12 +1,13 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { setHarness } from "../../../shared/harness";
-import { log } from "../../../shared/logger";
+import { flushLogger, log } from "../../../shared/logger";
 import { setStoragePrivatePermissionEnforcement } from "../../../shared/storage-permissions";
 import {
     getLocalEmbeddingNativeMemoryStats,
     LocalEmbeddingProvider,
     resolveLocalEmbeddingWorkerRuntime,
 } from "./embedding-local";
+import { serveEmbeddingWorker } from "./embedding-worker-loop";
 
 setHarness(workerData.harness);
 setStoragePrivatePermissionEnforcement(workerData.enforcePrivateStoragePermissions !== false);
@@ -26,34 +27,16 @@ const provider = new LocalEmbeddingProvider(
     workerData.dtype,
     unsafeNative ? "wasm" : workerData.runtimePreference,
 );
-// Handle requests one at a time: Transformers pipelines and output buffers cannot safely run concurrently.
-let queue = Promise.resolve();
-parentPort?.on("message", (request: { id: number; texts?: string[] }) => {
-    queue = queue.then(async () => {
-        try {
-            const loaded = await provider.initialize();
-            let vectors: (Float32Array | null)[] | undefined;
-            if (loaded && request.texts) {
-                vectors = [];
-                // Process at most two texts per inference batch to bound temporary model allocations.
-                for (let offset = 0; offset < request.texts.length; offset += 2) {
-                    vectors.push(
-                        ...(await provider.embedBatch(request.texts.slice(offset, offset + 2))),
-                    );
-                }
-            }
-            parentPort?.postMessage(
-                {
-                    id: request.id,
-                    loaded,
-                    vectors,
-                    failure: provider.getLastFailureReason(),
-                    stats: getLocalEmbeddingNativeMemoryStats(),
-                },
-                vectors?.flatMap((vector) => (vector ? [vector.buffer as ArrayBuffer] : [])) ?? [],
-            );
-        } catch (error) {
-            parentPort?.postMessage({ id: request.id, loaded: false, error: String(error) });
-        }
+if (parentPort)
+    serveEmbeddingWorker(parentPort, provider, {
+        // At most two texts per inference call bound temporary model allocations.
+        batchSize: 2,
+        stats: getLocalEmbeddingNativeMemoryStats,
+        exit: () => {
+            flushLogger();
+            // The model is released and no inference is running, so ending the
+            // thread here cannot interrupt a native call; waiting for the event
+            // loop to drain could instead wait on unrelated timers.
+            process.exit(0);
+        },
     });
-});

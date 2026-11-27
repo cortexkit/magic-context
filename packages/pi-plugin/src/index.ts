@@ -52,6 +52,7 @@ import {
 	type FailClosedReason,
 	formatFailClosedBlockingMessage,
 } from "@magic-context/core/features/magic-context/fail-closed-block";
+import { EMBEDDING_WORKER_STOP_MAX_MS } from "@magic-context/core/features/magic-context/memory/embedding-worker-client";
 import {
 	isUsableProjectIdentity,
 	resolveProjectIdentityForSession,
@@ -196,7 +197,7 @@ import {
 import { registerPiDroppedInputGuard } from "./dropped-input-guard-pi";
 import {
 	ensureProjectRegisteredFromPiDirectory,
-	unregisterPiProjectEmbeddings,
+	shutdownPiProjectEmbeddings,
 } from "./embedding-bootstrap";
 import { registerPiFailClosedSurface } from "./fail-closed-pi";
 import { loadPiHostOverflowCheck } from "./host-overflow-check-pi";
@@ -750,6 +751,10 @@ export const __test = {
 	formatProtectedTagsDeprecationNotice,
 	claimProtectedTagsDeprecationNoticeOnce,
 	resetClaimedProtectedTagsDeprecationNoticeForTesting,
+	/** Forget runtimes that earlier tests in this process never shut down. */
+	forgetActivePiRuntimes(): void {
+		activePiRuntimes.clear();
+	},
 };
 
 function formatTokens(value: number): string {
@@ -3326,7 +3331,18 @@ async function startPiMagicContextRuntime(
 			// best-effort cleanup
 		}
 		activePiRuntimes.delete(dreamerRegistrationOwner);
-		if (activePiRuntimes.size === 0) unregisterPiProjectEmbeddings(db);
+		// Wait for the embedding providers to be disposed before returning: Pi
+		// calls process.exit right after this handler, and under Node an exit
+		// while the local embedding worker is inside a native inference call
+		// aborts the process. That includes providers a configuration change or
+		// observation mode retired earlier in this process, whose workers may
+		// still be finishing. The worker client bounds each stop itself; the
+		// outer cap only guards against a provider whose disposal never settles.
+		if (activePiRuntimes.size === 0)
+			await withTimeout(
+				shutdownPiProjectEmbeddings(db),
+				EMBEDDING_WORKER_STOP_MAX_MS + 1_000,
+			);
 	});
 
 	// Pi has no `session_deleted` event; a switch to another session within

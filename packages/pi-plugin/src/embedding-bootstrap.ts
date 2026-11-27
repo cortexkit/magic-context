@@ -12,7 +12,10 @@ import {
 } from "@magic-context/core/features/magic-context/memory/embedding";
 import { preflightLocalEmbeddingPooling } from "@magic-context/core/features/magic-context/memory/local-embedding-pooling";
 import { resolveProjectIdentityForSession } from "@magic-context/core/features/magic-context/memory/project-identity";
-import { drainProjectEmbeddingIdentityMaintenance } from "@magic-context/core/features/magic-context/project-embedding-registry";
+import {
+	awaitEmbeddingProviderDisposals,
+	drainProjectEmbeddingIdentityMaintenance,
+} from "@magic-context/core/features/magic-context/project-embedding-registry";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
 	handleUntrustedLoad,
@@ -62,11 +65,35 @@ function configFingerprint(paths: readonly string[]): string {
 		.join("|");
 }
 
-export function unregisterPiProjectEmbeddings(db: ContextDatabase): void {
-	for (const identity of registeredIdentitiesByDatabase.get(db) ?? [])
-		unregisterProjectEmbedding(identity);
+/**
+ * Unregister every project this database registered and dispose their
+ * providers. The registry is cleared at once; the returned promise settles when
+ * the providers are disposed, which for a local model means its worker thread
+ * has finished any running inference and exited.
+ */
+export function unregisterPiProjectEmbeddings(
+	db: ContextDatabase,
+): Promise<void> {
+	const disposals = [...(registeredIdentitiesByDatabase.get(db) ?? [])].map(
+		(identity) => unregisterProjectEmbedding(identity),
+	);
 	registeredIdentitiesByDatabase.delete(db);
 	registrationFingerprintsByDatabase.get(db)?.clear();
+	return Promise.all(disposals).then(() => {});
+}
+
+/**
+ * Unregister this database's projects and wait until every embedding provider
+ * disposal has settled, including providers that a configuration change or
+ * observation mode retired earlier and that no registration reaches any more.
+ */
+export function shutdownPiProjectEmbeddings(
+	db: ContextDatabase,
+): Promise<void> {
+	return Promise.all([
+		unregisterPiProjectEmbeddings(db),
+		awaitEmbeddingProviderDisposals(),
+	]).then(() => {});
 }
 
 export async function ensureProjectRegisteredFromPiDirectory(

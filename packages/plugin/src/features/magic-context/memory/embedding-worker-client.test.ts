@@ -264,7 +264,12 @@ describe("embedding worker transport", () => {
     });
 
     test("unresponsive worker times out all pending callers and restarts on the next request", async () => {
-        const client = new EmbeddingWorkerClient({}, entry, 1000);
+        // The hung worker never finishes its request, so its stop ends by termination;
+        // a short bound keeps the test fast.
+        const client = new EmbeddingWorkerClient({}, entry, 1000, undefined, undefined, {
+            stopGraceMs: 200,
+            log: () => {},
+        });
         try {
             await client.request();
             await Promise.all([

@@ -219,7 +219,9 @@ export function retainProjectEmbedding(projectIdentity: string): () => void {
             projectContextUsers.set(projectIdentity, remaining);
         } else {
             projectContextUsers.delete(projectIdentity);
-            unregisterProjectEmbedding(projectIdentity);
+            // OpenCode 2 runs under Bun, where stopping the embedding worker does not
+            // abort the process, so its reload does not wait for the disposal.
+            void unregisterProjectEmbedding(projectIdentity);
         }
     };
 }
@@ -886,11 +888,43 @@ function snapshotFor(
     };
 }
 
-function disposeProvider(provider: EmbeddingProvider | null): void {
-    if (!provider) return;
-    void provider.dispose().catch((error) => {
-        log("[magic-context] embedding provider dispose failed:", error);
-    });
+/**
+ * Provider disposals that have started and not yet settled, whoever started
+ * them. A provider retired by a configuration or model change, observation
+ * mode, or a replaced or removed shadow-embedding registration is no longer
+ * reachable from any registration, but its local worker may still be inside a
+ * native inference; a host about to exit waits for these through
+ * `awaitEmbeddingProviderDisposals`.
+ */
+const pendingProviderDisposals = new Set<Promise<void>>();
+
+/**
+ * Start disposing `provider` and return a promise that settles once it is
+ * disposed. It never rejects. Callers that need the disposal to finish before
+ * the process exits (Pi's session_shutdown) await it; the others need not.
+ */
+function disposeProvider(provider: EmbeddingProvider | null): Promise<void> {
+    if (!provider) return Promise.resolve();
+    const disposal = provider
+        .dispose()
+        .catch((error) => {
+            log("[magic-context] embedding provider dispose failed:", error);
+        })
+        .finally(() => {
+            pendingProviderDisposals.delete(disposal);
+        });
+    pendingProviderDisposals.add(disposal);
+    return disposal;
+}
+
+/**
+ * Settles once every provider disposal started so far, and any started while
+ * waiting, has settled. Never rejects.
+ */
+export async function awaitEmbeddingProviderDisposals(): Promise<void> {
+    while (pendingProviderDisposals.size > 0) {
+        await Promise.all([...pendingProviderDisposals]);
+    }
 }
 
 function getUpsertActiveIdentityStatement(db: Database): PreparedStatement {
@@ -1516,7 +1550,7 @@ export function registerProjectShadowEmbedding(
     if (!provider) return null;
     const prior = shadowRegistrations.get(projectIdentity);
     if (prior && prior.providerIdentity === providerIdentity) {
-        void provider.dispose();
+        void disposeProvider(provider);
         dbForShadowQueue.set(projectIdentity, db);
         persistShadowDescriptor(db, prior);
         const backfillAlreadyArmed =
@@ -2542,16 +2576,18 @@ export function unregisterProjectShadowEmbedding(projectIdentity: string): void 
     }
 }
 
-export function unregisterProjectEmbedding(projectIdentity: string): void {
+export function unregisterProjectEmbedding(projectIdentity: string): Promise<void> {
     const prior = projectRegistrations.get(projectIdentity);
     const shadow = shadowRegistrations.get(projectIdentity);
-    if (!prior && !shadow) return;
+    if (!prior && !shadow) return Promise.resolve();
     projectRegistrations.delete(projectIdentity);
     shadowRegistrations.delete(projectIdentity);
     dbForShadowQueue.delete(projectIdentity);
     globalRegistrationGeneration += 1;
-    disposeProvider(prior?.provider ?? null);
-    disposeProvider(shadow?.provider ?? null);
+    return Promise.all([
+        disposeProvider(prior?.provider ?? null),
+        disposeProvider(shadow?.provider ?? null),
+    ]).then(() => {});
 }
 
 export function getProjectEmbeddingSnapshot(
