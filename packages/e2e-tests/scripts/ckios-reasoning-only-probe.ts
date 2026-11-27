@@ -134,6 +134,16 @@ for (const lane of ["plain", "mc", "marker", "marker-drops", "marker-dropped-bou
             captureMarkerState("after-defer");
             await Bun.sleep(750);
         }
+        if (process.env.MC_PROBE_FLUSH_PENDING_MARKER === "1") {
+            await client.session.command({
+                path: { id }, query: { directory: host.env.workdir }, throwOnError: true,
+                body: { command: "ctx-flush", arguments: "" },
+            });
+            await prompt("carry explicit marker flush", true);
+            captureMarkerState("after-flush");
+            await prompt("verify flushed marker stays fixed", true);
+            captureMarkerState("after-flush-defer");
+        }
         if (upgradePlugin) {
             const env = host.env;
             // Let the 500ms logger flush scheduler and marker-drain records before shutdown.
