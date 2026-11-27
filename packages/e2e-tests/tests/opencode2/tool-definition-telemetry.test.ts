@@ -31,7 +31,9 @@ interface WireTool {
 function headText(body: Record<string, unknown>): string {
     const input = body.input;
     if (!Array.isArray(input) || input.length === 0) return "";
-    const content = (input[0] as { content?: unknown }).content;
+    // A developer item may precede the user-role history head on the Responses wire.
+    const content = input.find((item) => item?.role === "user")?.content;
+    if (typeof content === "string") return content;
     if (!Array.isArray(content)) return "";
     return content
         .map((part) =>
@@ -42,16 +44,18 @@ function headText(body: Record<string, unknown>): string {
         .join("");
 }
 
+function systemText(body: Record<string, unknown>): string {
+    const developer = Array.isArray(body.input) ? body.input.filter((item) => item?.role === "developer") : [];
+    return JSON.stringify([body.instructions, ...developer]);
+}
+
 /**
- * Issue 492 finding 7: OpenCode 2 has no `tool.definition` hook, so the Tool Defs row read 0 as if
- * the catalog had been measured and the tool-set hash went out empty. The request draft carries
- * the whole tool set, so the draft is the measurement seam.
+ * OpenCode 2 has no `tool.definition` hook. Its request draft carries the
+ * whole catalog, so the sidebar cost must come from the draft.
  *
- * The byte rule this has to respect: the tool-set fingerprint is attribution for the m[0]/m[1]
- * materialization decision and never a HARD fold trigger (see ARCHITECTURE.md), because it is a
- * process-global signal that would manufacture unrelated session busts. So the proof has two
- * halves — the measurement is real, and the served m[0] bytes are unchanged across four deferred
- * passes while the hash is being recorded.
+ * Recording the measurement must not change bytes when the catalog is unchanged.
+ * Changing the session's own tool names or descriptions is different: the
+ * provider loses its cached prefix, so the plugin can also rebuild the history head.
  */
 test("v2 measures tool definitions from the request draft without moving a served byte", async () => {
     const host = await spawnOpencode2({
@@ -104,10 +108,8 @@ test("v2 measures tool definitions from the request draft without moving a serve
         const head = headText(passes[0]!.body);
         expect(head).toContain("<project-docs>");
         expect(head.length).toBeGreaterThan(200);
-        expect(String(passes[0]!.body.instructions ?? "").length).toBeGreaterThan(1000);
-        // Each fixture run gets a fresh throwaway root and a fresh session id, both of which
-        // appear verbatim in the served system prompt. Redacting them makes the pin a hash of the
-        // served CONTENT, which is what an A/B against a build without the measurement compares.
+        expect(systemText(passes[0]!.body).length).toBeGreaterThan(1000);
+        // Normalize the fixture paths and generated IDs when comparing the served content.
         const redact = (value: string) =>
             value
                 .split(host.root)
@@ -119,15 +121,10 @@ test("v2 measures tool definitions from the request draft without moving a serve
         const servedPin = passes.map((request) =>
             sha({
                 head: redact(headText(request.body)),
-                instructions: redact(String(request.body.instructions ?? "")),
+                instructions: redact(systemText(request.body)),
                 tools: redact(JSON.stringify(request.body.tools)),
             }),
         );
-        // The A/B control for issue 492 finding 7: with `recordV2ToolDefinitions` neutralised and
-        // the plugin rebuilt, this same redacted pin was
-        // d09ad7ca7dfa97379bffb5938e1f9d2b20c63f941a13ed9c9a916b1fb5e73ae4 on @opencode/cli 2.0.5 —
-        // the same value the measuring build produces. The tool-set fingerprint is attribution and
-        // never folds m[0], so measuring moves no served byte.
         expect(new Set(servedPin).size).toBe(1);
 
         // The attribution marker is now present rather than empty, and no materialization
