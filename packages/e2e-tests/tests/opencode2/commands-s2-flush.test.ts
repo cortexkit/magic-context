@@ -13,14 +13,12 @@ import {
 } from "../../src/opencode2-runner/spawn";
 
 /**
- * The server-registered `/ctx-flush` command uses the `flush` RPC handler. This
- * test calls that handler and checks the effect on the next user request: an
- * ordinary turn leaves queued work deferred, while a flush makes the next turn
- * apply it. The plugin log records the decision, so the two control turns must
- * lack an explicit-flush reason and the turn after the command must have one.
+ * The TUI's `/ctx-flush` calls the `flush` RPC handler. The next request must
+ * allow queued drops and cleanup as a user flush, not as a system change or fit
+ * retry. With nothing queued, that permission does not require rewriting the prefix.
  */
 const HEURISTICS_DECISION = "heuristics WILL";
-const EXPLICIT_FLUSH = "heuristics WILL RUN — reason=explicit_flush";
+const EXPLICIT_FLUSH = "heuristics WILL RUN — reason=pending_materialization origin=user_flush";
 
 async function eventually<T>(
 	read: () => T | undefined,
@@ -47,7 +45,7 @@ function decisions(logPath: string, sessionID: string): string[] {
 		);
 }
 
-test("/ctx-flush makes the next OpenCode 2 request a priced pass", async () => {
+test("the /ctx-flush RPC opens the reclaim gate on the next OpenCode 2 request only", async () => {
 	const fixture = isolation();
 	const logPath = join(fixture.root, "magic-context-flush.log");
 	fixture.env.MAGIC_CONTEXT_LOG_PATH = logPath;
@@ -129,16 +127,15 @@ test("/ctx-flush makes the next OpenCode 2 request a priced pass", async () => {
 		expect(flushed.message).toBeString();
 
 		await prompt("turn after the flush");
+		await prompt("ordinary turn after the flush was consumed");
 		const afterFlush = await eventually(
 			() => {
-				const seen = decisions(logPath, session.id).filter((line) =>
-					line.includes(EXPLICIT_FLUSH),
-				);
-				return seen.length > 0 ? seen : undefined;
+				const seen = decisions(logPath, session.id);
+				return seen.length >= 4 ? seen : undefined;
 			},
-			"the post-flush turn to run as an explicit-flush pass",
+			"both turns after the flush to record a pass decision",
 		);
-		expect(afterFlush.length).toBeGreaterThan(0);
+		expect(afterFlush.map((line) => line.includes(EXPLICIT_FLUSH))).toEqual([false, false, true, false]);
 		expect(readFileSync(join(fixture.root, "llm-schema-guard.jsonl"), "utf8")).toContain(`PASS ${session.id} `);
 	} catch (error) {
 		console.error(host.stdout(), host.stderr());
