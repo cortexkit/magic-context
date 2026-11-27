@@ -1462,6 +1462,7 @@ const TEMPLATE_DATA = [
 "mc-module: protected_tokens session=\x01 floor=\x01 provenance=\x01 usable_soft=\x01",
 "mc-module: skipped drop seed targeting reasoning block \x01 for session \x01\x021s",
 "Subagent temperature omitted for \x01: models.dev cache entry \x01 says yes \x01\x020m",
+"v2 restore: ignored \x01 floor \x01 at seq=\x01; rendered coverage \x01 ends at seq=\x01",
 "WARN: [auto-update-checker] Failed to resolve runtime package path: \x01",
 "WARN: Could not move legacy Magic Context config \x01 aside (\x01); reading \x01\x020p,2p",
 "[auto-update-checker] Already on latest version for channel: latest",

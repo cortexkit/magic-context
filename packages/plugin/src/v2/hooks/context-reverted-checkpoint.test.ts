@@ -195,3 +195,47 @@ test("a null cached boundary restores all rows even when the first-row capture f
         await f.cleanup();
     }
 });
+
+test("a priced pass starting at a null boundary captures the new summary that it serves", async () => {
+    const { f, pass, stored } = await revertedCheckpoint();
+    const capture = spyOn(NativeFoldReplay.prototype, "capture").mockRejectedValueOnce(
+        new Error("capture store unavailable"),
+    );
+    try {
+        f.db.prepare("DELETE FROM compartments WHERE session_id = ?").run(f.session);
+        clearCachedM0M1(f.db, f.session);
+        expect(rawIDs((await pass()).draft)).toEqual(stored(-1));
+        await f.restart();
+
+        const end = f.rows[4]!;
+        appendCompartments(f.db, f.session, [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: 5,
+                startMessageId: f.rows[0]!.id,
+                endMessageId: end.id,
+                title: "Published while the cached boundary was empty",
+                content: "Five opening rows were summarized.",
+                p1: "Five opening rows were summarized.",
+            },
+        ]);
+        f.setSystem("Independently changed system prefix permits the history refresh.");
+        const first = await pass();
+        expect(first.logs.join("\n")).toContain("starting at stored row");
+        expect(first.bytes).toContain("Published while the cached boundary was empty");
+        expect(rawIDs(first.draft)).toEqual(stored(end.seq));
+        const key = `native-fold-state/v3/${f.session}`;
+        const captured = (await f.hostStorage.get(key)) as { payload: string };
+        expect((JSON.parse(captured.payload) as CapturedReplayV3).replay.floor).toMatchObject({
+            kind: "summary",
+            id: end.id,
+        });
+        const next = await pass();
+        expect(next.bytes).toBe(first.bytes);
+        expect(next.logs.join("\n")).not.toContain("starting at stored row");
+    } finally {
+        capture.mockRestore();
+        await f.cleanup();
+    }
+});

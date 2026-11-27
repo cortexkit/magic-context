@@ -1,3 +1,4 @@
+import { getLastCompartmentEndMessageId } from "../../features/magic-context/compartment-storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { readSessionMeta } from "../../features/magic-context/storage-meta-session";
 import { HEAD_IDS } from "../hooks/payload";
@@ -156,6 +157,11 @@ export async function forgetNativeFoldProvenance(
     } while (after);
 }
 
+interface FloorCoverage {
+    id: string | null;
+    after: number;
+}
+
 /** A disposable per-session row cache. The host owns the session history and
  * every edit and revert to it; this cache only holds copies. Host events
  * invalidate the copies of hidden rows, and visible rows are replaced from each
@@ -207,6 +213,13 @@ export class NativeFoldReplay {
         private readonly options: {
             protocol?: 2 | 3;
             log?: (sessionID: string, line: string) => void;
+            rendersHistory?: (sessionID: string) => boolean;
+            servesHostCheckpoint?: (sessionID: string, checkpointID: string) => boolean;
+            onUncoveredFloor?: (
+                sessionID: string,
+                floor: ReplayFloor,
+                coverage: FloorCoverage,
+            ) => void;
         } = {},
     ) {
         storage.onEvict((sessionID) => this.clear(sessionID));
@@ -314,6 +327,42 @@ export class NativeFoldReplay {
             this.options.log?.(sessionID, `v3 host fold: ${reason}`);
         } catch {}
     }
+    private historyCoverage(sessionID: string, reader: V2StoreReader): FloorCoverage | undefined {
+        if (!this.options.rendersHistory?.(sessionID)) return undefined;
+        const db = this.storage.db;
+        const cached = db
+            .prepare(
+                "SELECT cached_m0_last_baseline_end_message_id AS id, cached_m0_bytes IS NOT NULL AS hasBytes FROM session_meta WHERE session_id=?",
+            )
+            .get(sessionID) as { id: string | null; hasBytes: number } | null;
+        const id = cached?.hasBytes ? cached.id : getLastCompartmentEndMessageId(db, sessionID);
+        const after = id
+            ? reader.sequenceForId(sessionID, id)
+            : (reader.earliestSequence(sessionID) ?? 0) - 1;
+        // A missing boundary needs store-based repair or replay refusal. It
+        // does not prove that the cached summaries cover no rows.
+        return after === undefined ? undefined : { id, after };
+    }
+    private floorCovered(
+        sessionID: string,
+        floor: ReplayFloor,
+        coverage?: FloorCoverage,
+        record?: ReplayStateV3,
+    ): boolean {
+        // Legacy admissions proved coverage with the serialized transcript.
+        // After its retirement, the rendered summary boundary is the evidence.
+        if (
+            !coverage ||
+            floor.kind === "start" ||
+            (floor.kind === "host-checkpoint" &&
+                !record?.withoutRecentContext &&
+                this.options.servesHostCheckpoint?.(sessionID, floor.id)) ||
+            floor.after <= coverage.after
+        )
+            return true;
+        this.options.onUncoveredFloor?.(sessionID, floor, coverage);
+        return false;
+    }
     private async floorState(
         sessionID: string,
         reader: V2StoreReader,
@@ -321,6 +370,7 @@ export class NativeFoldReplay {
         served?: SessionContext,
         preferCapture = false,
     ): Promise<ReplayStateV3 | undefined> {
+        const coverage = this.historyCoverage(sessionID, reader);
         const retained = this.tail(sessionID)?.replay;
         const controlsKnown = (replay: ReplayStateV3) =>
             replay.controls.every(
@@ -331,7 +381,8 @@ export class NativeFoldReplay {
             retained &&
             validReplayState(retained) &&
             controlsKnown(retained) &&
-            validFloor(reader, sessionID, retained.floor)
+            validFloor(reader, sessionID, retained.floor) &&
+            this.floorCovered(sessionID, retained.floor, coverage, retained)
                 ? retained
                 : undefined;
         const cut = reader.latestCompaction(sessionID);
@@ -341,11 +392,19 @@ export class NativeFoldReplay {
             saved.proof.sourceDigest === foldDigest(reader.hostIdentity()) &&
             (!cut || saved.proof.admissionID === cut.id) &&
             controlsKnown(saved.replay) &&
-            validFloor(reader, sessionID, saved.replay.floor)
+            validFloor(reader, sessionID, saved.replay.floor) &&
+            this.floorCovered(sessionID, saved.replay.floor, coverage, saved.replay)
                 ? saved.replay
                 : undefined;
-        const imported = importedFloor(reader, sessionID, cut?.seq);
-        const captured = await this.readCapturedReplay(sessionID, reader);
+        const marker = importedFloor(reader, sessionID, cut?.seq);
+        const imported =
+            marker && this.floorCovered(sessionID, marker, coverage) ? marker : undefined;
+        const capturedRecord = await this.readCapturedReplay(sessionID, reader);
+        const captured =
+            capturedRecord &&
+            this.floorCovered(sessionID, capturedRecord.floor, coverage, capturedRecord)
+                ? capturedRecord
+                : undefined;
         const existing = preferCapture
             ? (captured ?? memory ?? durable)
             : (memory ?? durable ?? captured);
@@ -815,6 +874,15 @@ export class NativeFoldReplay {
                 );
                 return false;
             }
+            if (
+                !this.floorCovered(
+                    sessionID,
+                    replay.floor,
+                    this.historyCoverage(sessionID, reader),
+                    replay,
+                )
+            )
+                return false;
             await this.retainReplay(
                 sessionID,
                 saved.replay,
@@ -960,6 +1028,12 @@ export class NativeFoldReplay {
             return saved.proof.sourceDigest === foldDigest(reader.hostIdentity()) &&
                 saved.proof.summaryDigest === foldDigest(cut.data.summary ?? "") &&
                 validFloor(reader, sessionID, saved.replay.floor) &&
+                this.floorCovered(
+                    sessionID,
+                    saved.replay.floor,
+                    this.historyCoverage(sessionID, reader),
+                    saved.replay,
+                ) &&
                 saved.proof.historyDigest ===
                     historyDigest(reader, sessionID, cut.seq - 1, saved.replay.floor.after)
                 ? "native"
@@ -1356,9 +1430,15 @@ export class NativeFoldReplay {
                     saved &&
                     !this.editedAdmissions.has(draft.sessionID) &&
                     cut?.id === saved.proof.admissionID &&
-                    replay.floor.after > saved.replay.floor.after &&
-                    boundary &&
-                    this.servedBaseline(draft) === boundary.summary
+                    (replay.floor.after > saved.replay.floor.after ||
+                        !this.floorCovered(
+                            draft.sessionID,
+                            saved.replay.floor,
+                            this.historyCoverage(draft.sessionID, reader),
+                            saved.replay,
+                        )) &&
+                    ((boundary && this.servedBaseline(draft) === boundary.summary) ||
+                        (replay.floor.kind === "start" && restoredFirstRow === replay.floor.id))
                 ) {
                     const value: AdmissionV3 = {
                         ...saved,
@@ -1717,7 +1797,11 @@ export class NativeFoldReplay {
             }
             const through = cut.seq - 1;
             let metadata = this.metadata.get(sessionID);
-            if (!metadata || (this.metadataThrough.get(sessionID) ?? -1) < through) {
+            if (
+                !metadata ||
+                (this.metadataThrough.get(sessionID) ?? -1) < through ||
+                (this.options.protocol === 3 && (this.metadataAfter.get(sessionID) ?? -1) > after)
+            ) {
                 reader ??= this.openReader(sessionID);
                 metadata = reader
                     .rowStampsThrough(
@@ -1728,6 +1812,7 @@ export class NativeFoldReplay {
                     .filter(conversational);
                 this.metadata.set(sessionID, metadata);
                 this.metadataThrough.set(sessionID, through);
+                this.metadataAfter.set(sessionID, this.options.protocol === 3 ? after : undefined);
             }
             const required = metadata.filter((row) => row.seq > after && row.seq <= through);
             // Sequence numbers also cover non-message rows. Only explicit source-row

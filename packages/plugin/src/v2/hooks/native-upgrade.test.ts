@@ -1,5 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { NativeFoldReplay } from "../fold/native-replay";
+import { encodeAdmissionV3, floorFor, hostCheckpointCarrier } from "../fold/native-replay-v3";
+import { foldDigest } from "../fold/owner";
 import { CHECKPOINT_NOTE } from "../fold/summary";
 import { V2StoreReader } from "../store-reader";
 import { oc2ContextFixture } from "./__tests__/oc2-context.fixture";
@@ -10,6 +12,65 @@ const text = (messages: Array<{ content: Array<Record<string, unknown>> }>) =>
         .flatMap((message) => message.content)
         .map((part) => part.text ?? "")
         .join("\n");
+
+test.each([
+    ["checkpoint only", true, false, true],
+    ["checkpoint and tail", false, false, false],
+    ["checkpoint without its historical transcript", true, true, false],
+] as const)("an old host-checkpoint receipt depends on its own served carrier (%s)", async (_, onlyCheckpoint, withoutRecentContext, usesCarrier) => {
+    const f = await oc2ContextFixture(8659, { instructions: false, temporal: false });
+    try {
+        for (const row of f.rows) f.edit(row.id, `Legacy source row ${row.seq} ends here.`);
+        await f.pass();
+        const cutID = await f.nativeFold(3, 2, "", "manual");
+        const original = f.rows.map((row) => row.text);
+        const summary = "The old host wrote this summary.";
+        f.raw
+            .prepare("UPDATE session_message SET data=? WHERE id=?")
+            .run(
+                JSON.stringify({ status: "completed", summary, recent: original.join("\n") }),
+                cutID,
+            );
+        const reader = new V2StoreReader(process.env.OPENCODE_DB!);
+        try {
+            const cut = reader.latestCompaction(f.session)!;
+            expect(cut.id).toBe(cutID);
+            const payload = encodeAdmissionV3({
+                version: 3,
+                replay: {
+                    floor: floorFor(cut, "host-checkpoint"),
+                    controls: [],
+                    ...(withoutRecentContext ? { withoutRecentContext } : {}),
+                },
+                proof: {
+                    admissionID: cut.id,
+                    sessionID: f.session,
+                    sourceDigest: foldDigest(reader.hostIdentity()),
+                    summaryDigest: foldDigest(summary),
+                    historyDigest: foldDigest("[]"),
+                },
+            });
+            await f.hostStorage.set(`native-fold/v3/${f.session}`, {
+                payload,
+                digest: foldDigest(payload),
+            });
+            await f.restart();
+            if (!onlyCheckpoint) f.user("Now continue with a raw tail", 1_000);
+            const served = await f.pass((draft) => {
+                const carrier = hostCheckpointCarrier(cut);
+                draft.messages = onlyCheckpoint ? [carrier] : [carrier, draft.messages.at(-1)!];
+            });
+            const body = text(served.draft.messages);
+            expect(body.includes(summary)).toBe(usesCarrier);
+            expect(body.includes("<conversation-checkpoint>")).toBe(usesCarrier);
+            for (const snippet of original) expect(body.split(snippet)).toHaveLength(2);
+        } finally {
+            reader.close();
+        }
+    } finally {
+        await f.cleanup();
+    }
+});
 
 test("a V2 upgrade preserves warm and expired bytes and converts only on an independently rebuilding pass", async () => {
     const f = await oc2ContextFixture(8631, {

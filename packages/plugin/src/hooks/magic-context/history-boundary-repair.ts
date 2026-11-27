@@ -252,8 +252,8 @@ export function repairMissingHistoryBoundary(args: {
         try {
             const boundaries = readStoreBoundaries(db, sessionId);
             const first = boundaries.findIndex(({ endMessageId }) => removed.has(endMessageId));
-            if (first < 0) return { kind: "intact" };
-            const affected = boundaries[first]!;
+            const affected = boundaries[first];
+            if (!affected) return { kind: "intact" };
             const previous = boundaries[first - 1];
             let anchor: HistoryAnchor | null = null;
             if (previous) {

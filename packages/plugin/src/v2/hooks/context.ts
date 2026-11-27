@@ -687,6 +687,8 @@ interface V2ContextPass {
     recoveredCheckpointID?: string;
     nativeReplayCheckpointID?: string;
     servedInstructionIDs?: ReadonlySet<string>;
+    loggedUncoveredFloor?: boolean;
+    checkpointWithoutTail?: string;
 }
 
 interface RecoveredInstructions {
@@ -695,6 +697,24 @@ interface RecoveredInstructions {
 }
 
 const contextPass = new AsyncLocalStorage<V2ContextPass>();
+
+function noteCheckpointWithoutTail(
+    sessionID: string,
+    cut: ReturnType<V2StoreReader["latestCompaction"]>,
+    incoming: V2Message | undefined,
+    messageCount: number,
+): void {
+    const pass = contextPass.getStore();
+    if (pass?.sessionID !== sessionID) return;
+    // For a receipt at this exact cut, the inclusive checkpoint floor leaves
+    // no rows for the shared transform to turn into a replacement head. A
+    // legacy checkpoint may carry its own summary or transcript; the fixed
+    // checkpoint note does not contain any history.
+    pass.checkpointWithoutTail =
+        cut && incoming && messageCount === 1 && !isCheckpointNote(cut.data.summary)
+            ? cut.id
+            : undefined;
+}
 
 function withV2ContextPass<T>(
     sessionID: SessionContext["sessionID"],
@@ -1136,6 +1156,28 @@ export async function registerContext(context: V2Context) {
         ? new NativeFoldReplay(nativeFoldMemory, () => openStoreReader(), context.storage, {
               protocol: 3,
               log: sessionLog,
+              rendersHistory: (sessionID) => {
+                  if (rustModeModuleClient) return false;
+                  const mode = storedSubagentMode(storage.require(), sessionID);
+                  return mode !== undefined && rendersCompartmentHistory(mode, compactionOff);
+              },
+              servesHostCheckpoint: (sessionID, checkpointID) => {
+                  const pass = contextPass.getStore();
+                  return (
+                      pass?.sessionID === sessionID && pass.checkpointWithoutTail === checkpointID
+                  );
+              },
+              onUncoveredFloor: (sessionID, floor, coverage) => {
+                  const pass = contextPass.getStore();
+                  if (pass?.sessionID === sessionID) {
+                      if (pass.loggedUncoveredFloor) return;
+                      pass.loggedUncoveredFloor = true;
+                  }
+                  sessionLog(
+                      sessionID,
+                      `v2 restore: ignored ${floor.kind} floor ${floor.id} at seq=${floor.after}; rendered coverage ${coverage.id ?? "none"} ends at seq=${coverage.after}`,
+                  );
+              },
           })
         : undefined;
     setOutputReserveConfig(config.output_reserve);
@@ -2627,8 +2669,8 @@ export async function registerContext(context: V2Context) {
             (await nativeFoldReplay?.instructionRetirement(draft.sessionID, reader)) ??
             (() => false);
         const floor = Math.max(
-            // A valid native floor still wins when higher; rows between the
-            // summary end and that floor are not restored.
+            // Summary-backed floors have already been checked against the
+            // history rendered in the first two synthetic messages.
             nativeFloor ?? -Infinity,
             // A changed hidden row may have lived inside the frozen
             // prefix. Make it available to the shared-path rebuild too.
@@ -3052,6 +3094,7 @@ export async function registerContext(context: V2Context) {
                     const incoming =
                         localCut && messages.find((message) => message.id === localCut.id);
                     if (localCut && !incoming) return undefined;
+                    noteCheckpointWithoutTail(draft.sessionID, localCut, incoming, messages.length);
                     checkpointAtEntry = incoming || null;
                     // A replay serves the tool list a healthy pass would serve: in a
                     // subagent session that is without the primary-only tools, which
@@ -3343,6 +3386,12 @@ export async function registerContext(context: V2Context) {
                 const localCut = cut && isLocalCheckpoint(cut) ? cut : undefined;
                 const incoming =
                     localCut && draft.messages.find((message) => message.id === localCut.id);
+                noteCheckpointWithoutTail(
+                    draft.sessionID,
+                    localCut,
+                    incoming,
+                    draft.messages.length,
+                );
                 // With compaction off nothing is restored after a host checkpoint,
                 // so the draft needs no checkpoint to restore against.
                 if (!compactionOff && localCut && !incoming)

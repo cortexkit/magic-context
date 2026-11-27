@@ -49,7 +49,7 @@ const toolResult = (id: string): V2Message => ({
         },
     ],
 });
-function fixture(count = 2, imported = 0, budget?: NativeFoldBudget) {
+function fixture(count = 2, imported = 0, budget?: NativeFoldBudget, rendersHistory = false) {
     const db = new Database(":memory:");
     initializeDatabase(db);
     runMigrations(db);
@@ -79,6 +79,7 @@ function fixture(count = 2, imported = 0, budget?: NativeFoldBudget) {
         close() {},
         hostIdentity: () => "private-host",
         latestSequence: () => Math.max(...rows.map((row) => row.seq), running?.seq ?? 0),
+        earliestSequence: () => rows[0]?.seq,
         latestCompaction: () => completed,
         latestRunningCompaction: () => running,
         sequenceForId: (_s: string, id: string) => rows.find((row) => row.id === id)?.seq,
@@ -137,10 +138,12 @@ function fixture(count = 2, imported = 0, budget?: NativeFoldBudget) {
         new NativeFoldReplay(nativeFoldCache(db), () => reader, storage, {
             protocol: version,
             log: (_sid, line) => logs.push(line),
+            rendersHistory: () => rendersHistory,
         });
     const replay = new NativeFoldReplay(cache, () => reader, storage, {
         protocol: 3,
         log: (_sid, line) => logs.push(line),
+        rendersHistory: () => rendersHistory,
     });
     let cuts = 0;
     const begin = () => {
@@ -555,6 +558,25 @@ async function oldReceipt(f: ReturnType<typeof fixture>, summary = "head") {
     const bytes = JSON.stringify(f.kv.get("native-fold/v2/s"));
     return { raw, cut, bytes };
 }
+
+test("applying the coverage limit to a legacy checkpoint with an empty source range is a no-op", async () => {
+    const f = fixture(1, 0, undefined, true);
+    f.rows[0] = { ...f.rows[0]!, type: "compaction", data: { status: "failed" } };
+    const { cut } = await oldReceipt(f);
+    const draft = context([message(cut.id, "host checkpoint")]);
+    expect(await f.replay.prepareLegacyUpgrade({ draft, cut, reader: f.reader })).toBe(true);
+    expect(f.replay.legacyUpgradeInput("s", draft.model)).toEqual([]);
+    expect(await f.replay.commitLegacyUpgrade("s", true)).toBe(true);
+    const saved = f.kv.get("native-fold/v3/s") as { payload: string };
+    expect(JSON.parse(saved.payload).replay.floor.kind).toBe("checkpoint");
+    expect(await f.replay.admits("s", cut, f.reader)).toBe(false);
+    expect(
+        await f.replay.restorationFloor("s", cut, f.reader, { allowMissingFloor: true }),
+    ).toBeUndefined();
+    expect(f.reader.range("s", 0, cut.seq - 1).every((row) => row.type === "compaction")).toBe(
+        true,
+    );
+});
 
 test("a V2 receipt upgrades once from exact summary coverage, not keepID alone", async () => {
     const f = fixture(8);

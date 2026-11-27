@@ -1,6 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
+import { clearCachedM0M1 } from "../../features/magic-context/storage-meta-shared";
 import { NativeFoldReplay } from "../fold/native-replay";
-import { IMPORTED_MC_SUMMARY } from "../fold/native-replay-v3";
+import { type AdmissionV3, encodeAdmissionV3, IMPORTED_MC_SUMMARY } from "../fold/native-replay-v3";
+import { foldDigest } from "../fold/owner";
 import {
     installTransientFailure,
     type Oc2ContextFixture,
@@ -242,8 +244,7 @@ test("repair without a local host checkpoint continues to restore the host's unc
     }
 });
 
-// A fix that restores the uncovered rows should turn these tests red on purpose.
-test("known gap: rows between the newest summary and a higher imported floor are not restored", async () => {
+test("an imported checkpoint cannot hide rows after the newest surviving summary", async () => {
     const f = await oc2ContextFixture(62905, options);
     const native = spyOn(NativeFoldReplay.prototype, "restore");
     try {
@@ -267,12 +268,11 @@ test("known gap: rows between the newest summary and a higher imported floor are
             "replay refused: invalid checkpoint floor or provenance",
         );
         expect(cachedEnd(f)).toBe(anchor.id);
-        expect(native).not.toHaveBeenCalled();
+        expect(native).toHaveBeenCalledTimes(1);
         const skipped = storedIDs(f, anchor.seq, imported.seq);
         expect(skipped).toEqual(f.rows.slice(6, 9).map(({ id }) => id));
-        // These rows are in neither the surviving summary nor a served checkpoint.
         for (const pass of [first, next]) {
-            expect(rawIDs(pass.draft)).toEqual(storedIDs(f, imported.seq));
+            expect(rawIDs(pass.draft)).toEqual(storedIDs(f, anchor.seq));
             expect(pass.bytes).not.toContain(IMPORTED_MC_SUMMARY);
             expect(pass.bytes).not.toContain("Review history 1");
         }
@@ -283,7 +283,7 @@ test("known gap: rows between the newest summary and a higher imported floor are
     }
 });
 
-test("known gap: a cached-boundary reset can replay a higher native floor and omit uncovered rows", async () => {
+test("a cached-boundary reset rejects the higher native floor and replaces both receipts", async () => {
     const f = await oc2ContextFixture(62906, options);
     const native = spyOn(NativeFoldReplay.prototype, "restore");
     try {
@@ -304,20 +304,57 @@ test("known gap: a cached-boundary reset can replay a higher native floor and om
         expect(first.logs.join("\n")).toContain(
             "rebuilding it on this pass against compartment end",
         );
-        expect(native).toHaveBeenCalledTimes(1);
+        expect(native).not.toHaveBeenCalled();
         const next = await f.pass();
-        expect(native).toHaveBeenCalledTimes(2);
+        expect(native).toHaveBeenCalledTimes(1);
         expect(cachedEnd(f)).toBe(anchor.id);
         const skipped = storedIDs(f, anchor.seq, newest.seq);
         expect(skipped).toEqual(f.rows.slice(6, 14).map(({ id }) => id));
         for (const pass of [first, next]) {
-            expect(rawIDs(pass.draft)).toEqual(storedIDs(f, newest.seq));
+            expect(rawIDs(pass.draft)).toEqual(storedIDs(f, anchor.seq));
             expect(pass.bytes).not.toContain("<conversation-checkpoint>");
             expect(pass.bytes).not.toContain("Review history 1");
+        }
+        for (const key of ["native-fold/v3", "native-fold-state/v3"]) {
+            const saved = (await f.hostStorage.get(`${key}/${f.session}`)) as { payload: string };
+            expect(JSON.parse(saved.payload).replay.floor).toMatchObject({ id: anchor.id });
         }
         expect(next.bytes).toBe(first.bytes);
     } finally {
         native.mockRestore();
+        await f.cleanup();
+    }
+});
+
+test("an ignored summary floor cannot retire uncovered instruction rows", async () => {
+    const f = await oc2ContextFixture(62910, options);
+    try {
+        const { newest } = seedSummaries(f);
+        await f.pass();
+        await f.nativeFold(3, 2, "", "manual");
+        const instruction = f.rows[7]!.id;
+        const instructionText = "Uncovered instruction: check the archival checksum.";
+        f.raw
+            .prepare("UPDATE session_message SET type='system',data=? WHERE id=?")
+            .run(JSON.stringify({ text: instructionText }), instruction);
+        const key = `native-fold/v3/${f.session}`;
+        const old = (await f.hostStorage.get(key)) as { payload: string };
+        const admission = JSON.parse(old.payload) as AdmissionV3;
+        expect(admission.replay.floor.id).toBe(newest.id);
+        admission.replay.retiredInstructionThrough = newest.seq;
+        admission.replay.retiredInstructionIDs = [instruction];
+        const payload = encodeAdmissionV3(admission);
+        await f.hostStorage.set(key, { payload, digest: foldDigest(payload) });
+        removeNewestCompartment(f);
+        clearCachedM0M1(f.db, f.session);
+        await f.restart();
+
+        const first = await f.pass();
+        expect(first.bytes.split(instructionText)).toHaveLength(2);
+        expect(first.logs.join("\n")).toContain("ignored summary floor");
+        const next = await f.pass();
+        expect(next.bytes).toBe(first.bytes);
+    } finally {
         await f.cleanup();
     }
 });
