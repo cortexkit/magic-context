@@ -152,6 +152,12 @@ def _request_json(request, deadline, clock=time.monotonic, pause=time.sleep, ope
             delay = TRANSIENT_RETRY_DELAYS[min(retries, len(TRANSIENT_RETRY_DELAYS) - 1)]
             if on_retry is not None:
                 on_retry(error)
+            # An HTTP error is also an open response. Close it before the
+            # retry, so it is not left for the garbage collector, which on
+            # Python 3.14 prints the error text in a warning. An error built
+            # without a response has nothing to close.
+            if isinstance(error, HTTPError) and error.fp is not None:
+                error.close()
             pause(min(delay, remaining))
             retries += 1
 
