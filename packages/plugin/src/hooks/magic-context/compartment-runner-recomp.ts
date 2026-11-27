@@ -10,7 +10,10 @@ import {
     type RecompStaging,
     saveRecompStagingPass,
 } from "../../features/magic-context/compartment-storage";
-import { clearCompressionDepth } from "../../features/magic-context/compression-depth-storage";
+import {
+    clearCompressionDepth,
+    clearCompressionDepthRange,
+} from "../../features/magic-context/compression-depth-storage";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { appendM0Mutation } from "../../features/magic-context/storage";
 import {
@@ -28,6 +31,7 @@ import { normalizeSDKResponse } from "../../shared";
 import { getErrorMessage } from "../../shared/error-message";
 import { getHarness } from "../../shared/harness";
 import { sessionLog } from "../../shared/logger";
+import { RECOMP_PAUSED_HEADING } from "../../shared/recomp-outcome";
 import type { Database } from "../../shared/sqlite";
 import {
     renderUserFacingFailure,
@@ -39,6 +43,7 @@ import { updateCompactionMarkerAfterPublication } from "./compaction-marker-mana
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
 import { queueDropsForCompartmentalizedMessages } from "./compartment-runner-drop-queue";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
+import { compartmentToInput } from "./compartment-runner-recomp-carry";
 import type { CandidateCompartment, CompartmentRunnerDeps } from "./compartment-runner-types";
 import {
     getReducedRecompTokenBudget,
@@ -105,21 +110,31 @@ export function promoteRecompStagingWithM0Mutation(
     sessionId: string,
     holderId: string,
 ): RecompPromotion | null {
-    const promoted = promoteRecompStaging(db, sessionId, holderId, false);
-    return promoted === "would-shrink" ? null : promoted;
+    const promoted = promoteRecompStaging(db, sessionId, holderId);
+    return typeof promoted === "string" ? null : promoted;
 }
 
 type RecompPromotion = {
     compartments: CandidateCompartment[];
     facts: Array<{ category: string; content: string }>;
+    carriedCount: number;
+    carriedThrough: number | null;
 };
+
+type StoppedRecomp = { allowCarry: boolean; discardIfShort: boolean };
+type PromotionResult =
+    | RecompPromotion
+    | "would-shrink"
+    | "discarded"
+    | "staging-removed"
+    | "lease-lost";
 
 function promoteRecompStaging(
     db: Database,
     sessionId: string,
     holderId: string,
-    preserveCoverage: boolean,
-): RecompPromotion | "would-shrink" | null {
+    stopped?: StoppedRecomp,
+): PromotionResult {
     const now = Date.now();
     db.exec("BEGIN IMMEDIATE");
     const transactionStartedAt = performance.now();
@@ -128,21 +143,40 @@ function promoteRecompStaging(
         if (!isCompartmentLeaseHeld(db, sessionId, holderId)) {
             db.exec("ROLLBACK");
             finished = true;
-            return null;
+            return "lease-lost";
         }
 
         const staging = getRecompStaging(db, sessionId);
-        if (!staging || staging.compartments.length === 0) {
+        const staged = staging?.compartments.at(-1);
+        if (!staging || !staged) {
             db.exec("ROLLBACK");
             finished = true;
-            return null;
+            return "staging-removed";
         }
 
-        if (preserveCoverage && !reachesLiveHistory(db, sessionId, staging)) {
-            db.exec("ROLLBACK");
-            finished = true;
-            return "would-shrink";
+        let carried: ReturnType<typeof readAlignedLiveTail> = null;
+        if (stopped) {
+            const live = readLiveRanges(db, sessionId);
+            const stagedEnd = resolvedOrdinal(sessionId, staged.endMessageId) ?? staged.endMessage;
+            if (live.some((row) => row.end > stagedEnd)) {
+                if (stopped.allowCarry)
+                    carried = readAlignedLiveTail(db, sessionId, live, staging, stagedEnd);
+                if (!carried) {
+                    if (stopped.discardIfShort) {
+                        clearRecompStaging(db, sessionId);
+                        db.exec("COMMIT");
+                        finished = true;
+                        return "discarded";
+                    }
+                    db.exec("ROLLBACK");
+                    finished = true;
+                    return "would-shrink";
+                }
+            }
         }
+        const compartments = carried
+            ? [...staging.compartments, ...carried.compartments]
+            : staging.compartments;
 
         deleteChunkEmbedBackoffForSession(db, sessionId);
         db.prepare("DELETE FROM compartments WHERE session_id = ?").run(sessionId);
@@ -152,7 +186,7 @@ function promoteRecompStaging(
         // The renderer no longer reads session_facts, so we clear any legacy
         // rows for hygiene and never re-insert.
         db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
-        insertRecompCompartmentRows(db, sessionId, staging.compartments, now);
+        insertRecompCompartmentRows(db, sessionId, compartments, now);
         appendM0Mutation(db, {
             sessionId,
             mutationType: "recomp_boundary_change",
@@ -167,7 +201,12 @@ function promoteRecompStaging(
         finished = true;
         invalidateAutoEmbedSession(sessionId);
         logSlowWriteTransaction("historian-publish:recomp", transactionStartedAt);
-        return { compartments: staging.compartments, facts: staging.facts };
+        return {
+            compartments,
+            facts: staging.facts,
+            carriedCount: carried?.compartments.length ?? 0,
+            carriedThrough: carried?.end ?? null,
+        };
     } finally {
         if (!finished) {
             try {
@@ -179,23 +218,57 @@ function promoteRecompStaging(
     }
 }
 
-function reachesLiveHistory(db: Database, sessionId: string, staging: RecompStaging): boolean {
-    const live = db
+function resolvedOrdinal(sessionId: string, id: string | null): number | null {
+    return id ? readRawSessionMessageOrdinalById(sessionId, id) : null;
+}
+
+function readLiveRanges(db: Database, sessionId: string) {
+    const rows = db
         .prepare(
-            `SELECT end_message, end_message_id FROM compartments
-         WHERE session_id = ? ORDER BY sequence DESC LIMIT 1`,
+            `SELECT sequence, start_message, start_message_id, end_message, end_message_id FROM compartments
+         WHERE session_id = ? ORDER BY sequence`,
         )
-        .get(sessionId) as { end_message: number; end_message_id: string | null } | null;
-    if (!live) return true;
-    const endOrdinal = (id: string | null, stored: number) =>
-        (id ? readRawSessionMessageOrdinalById(sessionId, id) : null) ?? stored;
-    // TypeScript staging covers whole messages, including any live end inside a message.
-    const staged = staging.compartments.at(-1);
-    return (
-        staged !== undefined &&
-        endOrdinal(staged.endMessageId, staged.endMessage) >=
-            endOrdinal(live.end_message_id, live.end_message)
-    );
+        .all(sessionId) as Array<{
+        sequence: number;
+        start_message: number;
+        start_message_id: string | null;
+        end_message: number;
+        end_message_id: string | null;
+    }>;
+    return rows.map((row) => {
+        const resolvedEnd = resolvedOrdinal(sessionId, row.end_message_id);
+        return { ...row, end: resolvedEnd ?? row.end_message, resolvedEnd };
+    });
+}
+
+function readAlignedLiveTail(
+    db: Database,
+    sessionId: string,
+    live: ReturnType<typeof readLiveRanges>,
+    staging: RecompStaging,
+    stagedEnd: number,
+): { compartments: CandidateCompartment[]; end: number } | null {
+    let next = 1;
+    let seam: number | undefined;
+    for (const row of live) {
+        const start = resolvedOrdinal(sessionId, row.start_message_id);
+        // The resulting union must be the same prefix, not a repaired or expanded one.
+        if ((start ?? row.start_message) !== next || row.end < next) return null;
+        if (seam !== undefined && (start === null || row.resolvedEnd === null)) return null;
+        if (row.end === stagedEnd) seam = row.sequence;
+        next = row.end + 1;
+    }
+    if (seam === undefined) return null;
+    const seamSequence = seam;
+    const tail = getCompartments(db, sessionId).filter((row) => row.sequence > seamSequence);
+    if (!tail.length || tail.length !== live.filter((row) => row.sequence > seamSequence).length)
+        return null;
+    return {
+        compartments: tail.map((row, index) =>
+            compartmentToInput(row, staging.compartments.length + index),
+        ),
+        end: next - 1,
+    };
 }
 
 function getResumableFullStaging(
@@ -209,14 +282,11 @@ function getResumableFullStaging(
         reason = "the staged passes were for a range rebuild";
     } else if (staging) {
         reason = validateStoredCompartments(staging.compartments);
-        if (!reason && staging.lastEndMessage > rawMessageCount) {
-            reason = "the staged range extends beyond the current raw history";
-        }
         if (!reason) {
             const ordinals = readRawSessionMessageIdOrdinalsForRange(
                 sessionId,
                 1,
-                staging.lastEndMessage,
+                Math.min(rawMessageCount, staging.lastEndMessage),
             );
             if (
                 staging.compartments.some(
@@ -237,6 +307,8 @@ function getResumableFullStaging(
 
 const PUBLISH_LEASE_LOST =
     "## Magic Recomp — Skipped\n\nAnother process acquired the compartment-state lease before recomp could publish. No state was written.";
+const STAGING_REMOVED =
+    "## Magic Recomp — Failed\n\nThe unfinished rebuild was removed because the session's history changed. Nothing was published.\nRun /ctx-recomp again.";
 
 export async function executeContextRecompInternal(deps: CompartmentRunnerDeps): Promise<string> {
     const {
@@ -375,6 +447,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             heading: "Complete" | "Partial" = "Partial",
             failure: UserFacingFailureKey = "recomp_unavailable",
             sentence?: string,
+            repeatsWithSameInput = false,
         ): Promise<string | null> {
             if (passCount === 0 || candidateCompartments.length === 0) return null;
 
@@ -390,28 +463,45 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
 
             // Check the live boundary under the same transaction and lease as publication:
             // the normal historian could have added summaries while this rebuild was paused.
-            const promoted = promoteRecompStaging(db, sessionId, leaseHolderId, true);
-            if (promoted === "would-shrink") {
+            const promoted = promoteRecompStaging(db, sessionId, leaseHolderId, {
+                allowCarry: heading === "Complete",
+                discardIfShort:
+                    repeatsWithSameInput && resumed && passCount === existingStaging.passCount,
+            });
+            if (promoted === "would-shrink" || promoted === "discarded") {
                 const detail = renderUserFacingFailure(failure, "markdown", {
                     sentence,
                     ...(failure !== "historian_window_too_small" ? { action: "" } : {}),
                 });
+                if (promoted === "discarded") {
+                    return [
+                        "## Magic Recomp — Failed",
+                        "",
+                        `The rebuild could not get past message ${offset}. ${detail}`,
+                        "The unfinished rebuild was discarded.",
+                        "Your current history is unchanged.",
+                    ].join("\n");
+                }
                 return [
-                    "## Magic Recomp — Paused",
+                    RECOMP_PAUSED_HEADING,
                     "",
-                    `Rebuilt messages 1-${lastCompartmentEnd} of ${rawMessageCount}, then stopped. ${detail}`,
+                    resumed
+                        ? `Messages 1-${lastCompartmentEnd} of ${totalMessages} are rebuilt and kept for the next run. ${detail}`
+                        : `Rebuilt messages 1-${lastCompartmentEnd} of ${totalMessages}, then stopped. ${detail}`,
                     "Your current history is unchanged.",
                     `Run /ctx-recomp again to continue from message ${lastCompartmentEnd + 1}.`,
                 ].join("\n");
             }
-            if (!promoted) return PUBLISH_LEASE_LOST;
+            if (promoted === "lease-lost") return PUBLISH_LEASE_LOST;
+            if (promoted === "staging-removed") return STAGING_REMOVED;
 
-            // Full recomp rebuilds every compartment from message 1 onward, so
-            // all pre-existing compression-depth rows are stale — the compressor
-            // would otherwise skip or wrongly tier the fresh compartments. Wipe
-            // per-session depth state so the rebuilt compartments start at depth
-            // 0, matching what partial recomp does for its rebuilt range.
-            afterPublish("compression-depth", () => clearCompressionDepth(db, sessionId));
+            // Rebuilt summaries start again at depth zero. Carried ordinals keep
+            // their depth, just as they do outside a range rebuild.
+            afterPublish("compression-depth", () => {
+                if (promoted.carriedCount > 0)
+                    clearCompressionDepthRange(db, sessionId, 1, lastCompartmentEnd);
+                else clearCompressionDepth(db, sessionId);
+            });
 
             if (deps.preserveInjectionCacheUntilConsumed !== true) {
                 clearInjectionCache(sessionId);
@@ -468,12 +558,13 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // applies directly here. Plan v6 §6: also CAS-clear any stale pending
             // marker that a prior in-flight incremental publish may have left
             // behind — recomp now owns the boundary.
-            if (lastCompartmentEnd > 0) {
+            const publishedEnd = promoted.carriedThrough ?? lastCompartmentEnd;
+            if (publishedEnd > 0) {
                 afterPublish("compaction-marker", () => {
                     const markerUpdated = (
                         deps.compactionMarkerStrategy?.publish ??
                         updateCompactionMarkerAfterPublication
-                    )(db, sessionId, lastCompartmentEnd, deps.directory);
+                    )(db, sessionId, publishedEnd, deps.directory);
                     // Only CAS-clear a stale pending marker blob when the direct
                     // update actually advanced the boundary. If the update failed
                     // (transient OpenCode DB write error on removal/injection), keep
@@ -486,6 +577,16 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                         }
                     }
                 });
+            }
+
+            if (promoted.carriedCount > 0) {
+                const rebuilt = promoted.compartments.length - promoted.carriedCount;
+                return [
+                    "## Magic Recomp — Complete",
+                    "",
+                    `Rebuilt ${rebuilt} history block${rebuilt === 1 ? "" : "s"} through message ${lastCompartmentEnd}.`,
+                    `Kept ${promoted.carriedCount} existing history block${promoted.carriedCount === 1 ? "" : "s"} through message ${publishedEnd}.`,
+                ].join("\n");
             }
 
             sessionLog(
@@ -558,6 +659,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                     "Complete",
                     "recomp_unavailable",
                     `Raw history ${offset}-${protectedTailStart - 1} could not be turned into a valid historian chunk.`,
+                    true,
                 );
                 if (promoted) return promoted;
                 return `## Magic Recomp — Failed\n\nRecomp stopped because raw history ${offset}-${protectedTailStart - 1} could not be turned into a valid historian chunk. Nothing was written.`;
@@ -570,6 +672,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                     "Partial",
                     "recomp_unavailable",
                     "The next chunk could not be represented safely.",
+                    true,
                 );
                 if (partial) return partial;
                 sessionLog(
@@ -745,11 +848,13 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                     "Partial",
                     "recomp_unavailable",
                     reason,
+                    true,
                 );
                 if (partial) return partial;
                 return `## Magic Recomp — Failed\n\n${reason} Nothing was written.`;
             }
 
+            const hadStagedPrefix = candidateCompartments.length > 0;
             candidateCompartments = [
                 ...candidateCompartments,
                 ...(validatedPass.compartments ?? []),
@@ -761,7 +866,30 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             passAttempt = 1;
 
             // ── Persist to staging after each successful pass ────────────────
-            saveRecompStagingPass(db, sessionId, passCount, candidateCompartments, candidateFacts);
+            const saved = db
+                .transaction(() => {
+                    // OpenCode 2 clears staging if it finds that the host removed its
+                    // history boundary. Don't restore the prefix when the model returns.
+                    if (
+                        hadStagedPrefix &&
+                        !db
+                            .prepare(
+                                "SELECT 1 FROM recomp_compartments WHERE session_id = ? LIMIT 1",
+                            )
+                            .get(sessionId)
+                    )
+                        return false;
+                    saveRecompStagingPass(
+                        db,
+                        sessionId,
+                        passCount,
+                        candidateCompartments,
+                        candidateFacts,
+                    );
+                    return true;
+                })
+                .immediate();
+            if (!saved) return STAGING_REMOVED;
 
             offset = nextOffset;
             emitProgress();
@@ -779,15 +907,17 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         }
 
         // Final success: promote staging → real tables
-        saveRecompStagingPass(db, sessionId, passCount, candidateCompartments, candidateFacts);
         const lastCompartmentEnd =
             candidateCompartments[candidateCompartments.length - 1]?.endMessage ?? 0;
         const compartmentTagKeys =
             lastCompartmentEnd > 0
                 ? await getRawSessionTagKeysThrough(sessionId, lastCompartmentEnd, { db })
                 : null;
-        const promoted = promoteRecompStagingWithM0Mutation(db, sessionId, leaseHolderId);
-        if (!promoted) {
+        const promoted = promoteRecompStaging(db, sessionId, leaseHolderId);
+        if (promoted === "staging-removed") {
+            return candidateCompartments.length > 0 ? STAGING_REMOVED : PUBLISH_LEASE_LOST;
+        }
+        if (typeof promoted === "string") {
             sessionLog(sessionId, "recomp publish skipped: compartment lease no longer held");
             return PUBLISH_LEASE_LOST;
         }

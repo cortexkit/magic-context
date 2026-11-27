@@ -2,6 +2,7 @@ import { clearEmergencyRecovery } from "../../features/magic-context/storage-met
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared/logger";
 import type { ModelInput } from "../../shared/model-resolution";
+import { pausedRecompReason } from "../../shared/recomp-outcome";
 import type { Database } from "../../shared/sqlite";
 import { renderUserFacingFailure, userFacingFailureCode } from "../../shared/user-facing-codes";
 import { executeContextRecomp, type PartialRecompRange } from "./compartment-runner";
@@ -281,7 +282,7 @@ export async function runManagedRecomp(
             ctx.liveSessionState,
             sessionId,
             terminalPhase,
-            extractRecompReason(message),
+            pausedRecompReason(message) === null ? extractRecompReason(message) : message,
         );
         return message;
     } catch (error) {

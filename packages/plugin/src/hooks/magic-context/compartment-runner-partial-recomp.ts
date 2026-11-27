@@ -27,6 +27,7 @@ import { updateCompactionMarkerAfterPublication } from "./compaction-marker-mana
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
 import { promoteRecompStagingWithM0Mutation } from "./compartment-runner-recomp";
+import { compartmentToInput } from "./compartment-runner-recomp-carry";
 import type { CandidateCompartment, CompartmentRunnerDeps } from "./compartment-runner-types";
 import {
     getReducedRecompTokenBudget,
@@ -110,29 +111,6 @@ export function snapRangeToCompartments(
     };
 }
 
-function compartmentToInput(c: Compartment, newSequence: number): CompartmentInput {
-    return {
-        sequence: newSequence,
-        startMessage: c.startMessage,
-        endMessage: c.endMessage,
-        startMessageId: c.startMessageId,
-        endMessageId: c.endMessageId,
-        startBlockIndex: c.startBlockIndex,
-        endBlockIndex: c.endBlockIndex,
-        title: c.title,
-        content: c.content,
-        // v2: preserve paraphrase tiers + scoring on prior/tail compartments that
-        // a partial recomp keeps UNCHANGED. Dropping these would re-write them as
-        // flat (NULL-tier, legacy=0) rows and break decay rendering.
-        p1: c.p1,
-        p2: c.p2,
-        p3: c.p3,
-        p4: c.p4,
-        importance: c.importance,
-        episodeType: c.episodeType,
-    };
-}
-
 export async function executePartialRecompInternal(
     deps: CompartmentRunnerDeps,
     range: PartialRecompRange,
@@ -178,8 +156,7 @@ export async function executePartialRecompInternal(
                 "",
                 `An unfinished partial recomp is already staged for range ${storedRange.start}-${storedRange.end}, which does not match the requested range ${snapStart}-${snapEnd}.`,
                 "",
-                "Resume that range by running `/ctx-recomp` with the same original arguments,",
-                "or cancel it by running `/ctx-flush` before starting a new partial recomp.",
+                "Finish that range by running `/ctx-recomp` with the same original arguments, or run `/ctx-recomp` without arguments to start a full rebuild.",
             ].join("\n");
         }
         if (existingStaging && !storedRange) {
@@ -187,8 +164,7 @@ export async function executePartialRecompInternal(
                 "## Magic Recomp — Failed",
                 "",
                 "An unfinished full recomp is already staged for this session.",
-                "Resume it by running `/ctx-recomp` without arguments,",
-                "or cancel it before starting a partial recomp.",
+                "Finish it by running `/ctx-recomp` without arguments before starting a partial recomp.",
             ].join("\n");
         }
 

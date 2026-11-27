@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { releaseCompartmentLease } from "../../features/magic-context/compartment-lease";
 import {
     appendCompartments,
+    clearRecompStaging,
     getCompartments,
     getRecompPartialRange,
     getRecompStaging,
@@ -13,6 +14,7 @@ import {
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
 import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
+import { pausedRecompReason } from "../../shared/recomp-outcome";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { executeContextRecompWithResult } from "./compartment-runner";
@@ -109,12 +111,16 @@ async function withMessages<T>(
     count: number,
     run: () => Promise<T>,
     omitIds: number[] = [],
+    noiseFrom = Infinity,
 ): Promise<T> {
     const raw = Array.from({ length: count }, (_, index) => ({
         ordinal: index + 1,
         id: omitIds.includes(index + 1) ? `replacement-${index + 1}` : `m-${index + 1}`,
-        role: "user",
-        parts: [{ type: "text", text: `message ${index + 1} alpha beta gamma delta` }],
+        role: index + 1 >= noiseFrom && index < count - 5 ? "assistant" : "user",
+        parts:
+            index + 1 >= noiseFrom && index < count - 5
+                ? []
+                : [{ type: "text", text: `message ${index + 1} alpha beta gamma delta` }],
     }));
     const unregister = rawSession.setRawMessageProvider(sessionId, {
         readMessages: () => raw,
@@ -296,9 +302,14 @@ describe("full recomp staging", () => {
         expect({ rows: getCompartments(db, sessionId), cache: cache() }).toEqual(before);
         expect(rebuildRequest(db, sessionId, 60, true).bytes).toBe(beforeWire.bytes);
         expect(message).toBe(
-            "## Magic Recomp — Paused\n\nRebuilt messages 1-18 of 60, then stopped. History compression could not be rebuilt. (MC-R01)\nYour current history is unchanged.\nRun /ctx-recomp again to continue from message 19.",
+            "## Magic Recomp — Paused\n\nRebuilt messages 1-18 of 55, then stopped. History compression could not be rebuilt. (MC-R01)\nYour current history is unchanged.\nRun /ctx-recomp again to continue from message 19.",
         );
         expect(ctx.liveSessionState.recompProgressBySession.get(sessionId)?.phase).toBe("failed");
+        expect(
+            pausedRecompReason(
+                ctx.liveSessionState.recompProgressBySession.get(sessionId)?.message,
+            ),
+        ).toStartWith("Rebuilt messages 1-18 of 55");
         expect(ctx.liveSessionState.historyRefreshSessions.has(sessionId)).toBe(false);
         expect(getRecompStaging(db, sessionId)?.lastEndMessage).toBe(18);
 
@@ -469,6 +480,8 @@ describe("full recomp staging", () => {
             runManagedRecomp(context(db, range), sessionId, { range: { start: 1, end: 10 } }),
         );
         expect(refusal).toContain("An unfinished full recomp is already staged for this session.");
+        expect(refusal).toContain("Finish it by running `/ctx-recomp` without arguments");
+        expect(refusal).not.toContain("cancel");
         expect(range.requestedStarts).toEqual([]);
         expect(getRecompStaging(db, sessionId)).toEqual(staged);
 
@@ -480,18 +493,231 @@ describe("full recomp staging", () => {
         expect(resumed.requestedStarts).toEqual([19]);
     });
 
+    it("completes an empty tail by carrying aligned live noise coverage exactly once", async () => {
+        appendCompartments(db, sessionId, [
+            oldSummary(1, 40, 0),
+            {
+                ...oldSummary(41, 46, 1),
+                title: "",
+                content: "",
+                episodeType: "filtered-noise",
+                importance: 1,
+                p1: "noise tier one",
+                p2: "noise tier two",
+                p3: "noise tier three",
+                p4: "noise tier four",
+                startBlockIndex: 0,
+                endBlockIndex: 2,
+            },
+        ]);
+        const carried = getCompartments(db, sessionId).at(-1)!;
+        const executor = executorCoveringRequestedRange((start, end) =>
+            Math.min(end, start === 1 ? 20 : 40),
+        );
+        const result = await withMessages(
+            sessionId,
+            60,
+            () => executeContextRecompWithResult(buildRecompDeps(context(db, executor), sessionId)),
+            [],
+            41,
+        );
+        expect(result.published).toBe(true);
+        expect(result.message).toStartWith("## Magic Recomp — Complete");
+        expect(result.message).not.toContain("could not be rebuilt");
+        expect(executor.requestedStarts).toEqual([1, 21]);
+        const live = getCompartments(db, sessionId);
+        expect(live.map((row) => [row.sequence, row.startMessage, row.endMessage])).toEqual([
+            [0, 1, 20],
+            [1, 21, 40],
+            [2, 41, 46],
+        ]);
+        const carriedAfter = live.at(-1)!;
+        expect(carriedAfter).toEqual({
+            ...carried,
+            sequence: 2,
+            id: carriedAfter.id,
+            createdAt: carriedAfter.createdAt,
+        });
+        const represented = live.flatMap((row) =>
+            Array.from(
+                { length: row.endMessage - row.startMessage + 1 },
+                (_, i) => row.startMessage + i,
+            ),
+        );
+        const raw = Array.from({ length: 14 }, (_, i) => i + 47);
+        expect([...represented, ...raw]).toEqual(Array.from({ length: 60 }, (_, i) => i + 1));
+        expect(getRecompStaging(db, sessionId)).toBeNull();
+    });
+
+    it("does not carry any of an empty tail if one live row has no endpoint ID", async () => {
+        appendCompartments(db, sessionId, [
+            oldSummary(1, 40, 0),
+            oldSummary(41, 43, 1),
+            oldSummary(44, 46, 2),
+        ]);
+        db.prepare(
+            "UPDATE compartments SET end_message_id = NULL WHERE session_id = ? AND sequence = 2",
+        ).run(sessionId);
+        const live = () =>
+            db
+                .prepare("SELECT * FROM compartments WHERE session_id = ? ORDER BY sequence")
+                .all(sessionId);
+        const before = live();
+        const ex = executorCoveringRequestedRange((start) => (start === 1 ? 40 : null));
+        const run = () =>
+            withMessages(sessionId, 60, () => runManagedRecomp(context(db, ex), sessionId), [], 41);
+        expect(await run()).toStartWith("## Magic Recomp — Paused");
+        expect(getRecompStaging(db, sessionId)?.lastEndMessage).toBe(40);
+        expect(await run()).toContain("The unfinished rebuild was discarded.");
+        expect(live()).toEqual(before);
+        expect(getRecompStaging(db, sessionId)).toBeNull();
+    });
+
+    it("does not replace the resolved furthest end with an out-of-order newest sequence", async () => {
+        appendCompartments(db, sessionId, [oldSummary(1, 46, 0), oldSummary(20, 30, 1)]);
+        const before = getCompartments(db, sessionId);
+        const executor = executorCoveringRequestedRange((start) => (start === 1 ? 35 : null));
+        const result = await withMessages(sessionId, 60, () =>
+            executeContextRecompWithResult(buildRecompDeps(context(db, executor), sessionId)),
+        );
+        expect(getCompartments(db, sessionId)).toEqual(before);
+        expect(result.published).toBe(false);
+        expect(result.message).toStartWith("## Magic Recomp — Paused");
+        expect(getRecompStaging(db, sessionId)?.lastEndMessage).toBe(35);
+    });
+
     it.each([
-        "window",
+        false,
+        true,
+    ])("reports history change rather than lease loss when a pass loses its staging (pass succeeds=%s)", async (succeeds) => {
+        appendCompartments(db, sessionId, [oldSummary(1, 46, 0)]);
+        const before = getCompartments(db, sessionId);
+        let removed = false;
+        const executor = executorCoveringRequestedRange((start, end) => {
+            if (start === 1) return 18;
+            if (!removed) {
+                expect(getRecompStaging(db, sessionId)?.lastEndMessage).toBe(18);
+                clearRecompStaging(db, sessionId);
+                removed = true;
+            }
+            return succeeds ? end : null;
+        });
+        const result = await withMessages(sessionId, 60, () =>
+            executeContextRecompWithResult(buildRecompDeps(context(db, executor), sessionId)),
+        );
+        expect(removed).toBe(true);
+        expect(result).toEqual({
+            published: false,
+            message:
+                "## Magic Recomp — Failed\n\nThe unfinished rebuild was removed because the session's history changed. Nothing was published.\nRun /ctx-recomp again.",
+        });
+        expect(getCompartments(db, sessionId)).toEqual(before);
+        expect(getRecompStaging(db, sessionId)).toBeNull();
+    });
+
+    it("rejects noncontiguous resume staging even when every endpoint is present", async () => {
+        saveRecompStagingPass(
+            db,
+            sessionId,
+            1,
+            [
+                rebuiltPrefix,
+                {
+                    ...rebuiltPrefix,
+                    sequence: 1,
+                    startMessage: 20,
+                    startMessageId: "m-20",
+                    endMessage: 25,
+                    endMessageId: "m-25",
+                },
+            ],
+            [],
+        );
+        const executor = executorCoveringRequestedRange();
+        const result = await withMessages(sessionId, 60, () =>
+            runManagedRecomp(context(db, executor), sessionId),
+        );
+        expect(executor.requestedStarts).toEqual([1]);
+        expect(result).toStartWith("## Magic Recomp — Complete");
+        expect(getRecompStaging(db, sessionId)).toBeNull();
+    });
+
+    it.each([
         "empty chunk",
         "unsafe chunk",
         "no progress",
-    ] as const)("keeps the staged prefix and live history on the %s exit", async (exit) => {
+    ] as const)("discards a repeated %s stop without making the live history shorter", async (exit) => {
+        appendCompartments(db, sessionId, [oldSummary(1, 46, 0)]);
+        const before = getCompartments(db, sessionId);
+        const ex = executorCoveringRequestedRange((start) => (start === 1 ? 18 : null));
+        const realRead = rawSession.readSessionChunk;
+        const realCoverage = validation.validateChunkCoverage;
+        const realPass = historian.runValidatedHistorianPass;
+        const chunk =
+            exit === "empty chunk"
+                ? spyOn(rawSession, "readSessionChunk").mockImplementation((...args) => {
+                      const real = realRead(...args);
+                      return (args[2] ?? 1) >= 19 ? { ...real, text: "", messageCount: 0 } : real;
+                  })
+                : undefined;
+        const coverage =
+            exit === "unsafe chunk"
+                ? spyOn(validation, "validateChunkCoverage").mockImplementation((args) =>
+                      args.startIndex >= 19 ? "unrepresented message" : realCoverage(args),
+                  )
+                : undefined;
+        let failedAttempts = 0;
+        const pass =
+            exit === "no progress"
+                ? spyOn(historian, "runValidatedHistorianPass").mockImplementation((args) => {
+                      if (args.chunk.startIndex < 19) return realPass(args);
+                      if (++failedAttempts > 1)
+                          throw new Error("historian was called again without making progress");
+                      return Promise.resolve({
+                          ok: true,
+                          compartments: [{ ...rebuiltPrefix, sequence: 1, startMessage: 19 }],
+                          facts: [],
+                      });
+                  })
+                : undefined;
+        try {
+            const run = () =>
+                withMessages(sessionId, 60, () => runManagedRecomp(context(db, ex), sessionId));
+            const reason = {
+                "empty chunk":
+                    "Raw history 19-55 could not be turned into a valid historian chunk. (MC-R01)",
+                "unsafe chunk": "The next chunk could not be represented safely. (MC-R01)",
+                "no progress": "Recomp made no forward progress after messages 19-55. (MC-R01)",
+            }[exit];
+            expect(await run()).toBe(
+                `## Magic Recomp — Paused\n\nRebuilt messages 1-18 of 55, then stopped. ${reason}\nYour current history is unchanged.\nRun /ctx-recomp again to continue from message 19.`,
+            );
+            expect(getRecompStaging(db, sessionId)?.lastEndMessage).toBe(18);
+            failedAttempts = 0;
+            const result = await run();
+            expect(result).toBe(
+                `## Magic Recomp — Failed\n\nThe rebuild could not get past message 19. ${reason}\nThe unfinished rebuild was discarded.\nYour current history is unchanged.`,
+            );
+            expect(result).not.toContain("again");
+            expect(getRecompStaging(db, sessionId)).toBeNull();
+            expect(getCompartments(db, sessionId)).toEqual(before);
+        } finally {
+            chunk?.mockRestore();
+            coverage?.mockRestore();
+            pass?.mockRestore();
+        }
+        const range = await withMessages(sessionId, 60, () =>
+            runManagedRecomp(context(db, executorCoveringRequestedRange()), sessionId, {
+                range: { start: 1, end: 46 },
+            }),
+        );
+        expect(range).toStartWith("## Magic Recomp — Partial Complete");
+    });
+
+    it.each(["window", "model"] as const)("keeps staging on repeated %s stops", async (exit) => {
         appendCompartments(db, sessionId, [oldSummary(1, 46, 0)]);
         saveRecompStagingPass(db, sessionId, 1, [rebuiltPrefix], []);
-        const liveBefore = getCompartments(db, sessionId);
-        const stagingBefore = getRecompStaging(db, sessionId);
-        // The no-progress arm is defensive: the real validator rejects such a
-        // model response before it reaches the runner. Inject it at that seam.
+        const before = getRecompStaging(db, sessionId);
         const fit =
             exit === "window"
                 ? spyOn(fitting, "fitRecompHistorianPrompt").mockReturnValue({
@@ -499,51 +725,24 @@ describe("full recomp staging", () => {
                       reason: "fixed instructions exceed the model window",
                   })
                 : undefined;
-        const coverage =
-            exit === "unsafe chunk"
-                ? spyOn(validation, "validateChunkCoverage").mockReturnValue(
-                      "unrepresented message",
-                  )
-                : undefined;
-        const readChunk = rawSession.readSessionChunk;
-        const chunk =
-            exit === "empty chunk"
-                ? spyOn(rawSession, "readSessionChunk").mockImplementation((...args) => ({
-                      ...readChunk(...args),
-                      text: "",
-                      messageCount: 0,
-                  }))
-                : undefined;
-        const pass =
-            exit === "no progress"
-                ? spyOn(historian, "runValidatedHistorianPass").mockResolvedValue({
-                      ok: true,
-                      compartments: [{ ...rebuiltPrefix, sequence: 1, startMessage: 19 }],
-                      facts: [],
-                  })
-                : undefined;
         try {
-            const executor = executorCoveringRequestedRange();
-            const result = await withMessages(sessionId, 60, () =>
-                executeContextRecompWithResult(buildRecompDeps(context(db, executor), sessionId)),
-            );
-            expect(result.published).toBe(false);
-            expect(result.message).toStartWith("## Magic Recomp — Paused");
-            const reason = {
-                window: "History compression is paused because the history model's context window is too small for its instructions. Set historian.model in magic-context.jsonc to a model with a larger context window. (MC-H05)",
-                "empty chunk":
-                    "Raw history 19-55 could not be turned into a valid historian chunk. (MC-R01)",
-                "unsafe chunk": "The next chunk could not be represented safely. (MC-R01)",
-                "no progress": "Recomp made no forward progress after messages 19-55. (MC-R01)",
-            }[exit];
-            expect(result.message).toContain(reason);
-            expect(getRecompStaging(db, sessionId)).toEqual(stagingBefore);
-            expect(getCompartments(db, sessionId)).toEqual(liveBefore);
+            const ex = executorCoveringRequestedRange(() => null);
+            for (let i = 0; i < 2; i++) {
+                const result = await withMessages(sessionId, 60, () =>
+                    executeContextRecompWithResult(buildRecompDeps(context(db, ex), sessionId)),
+                );
+                expect(result.published).toBe(false);
+                const reason =
+                    exit === "window"
+                        ? "History compression is paused because the history model's context window is too small for its instructions. Set historian.model in magic-context.jsonc to a model with a larger context window. (MC-H05)"
+                        : "History compression could not be rebuilt. (MC-R01)";
+                expect(result.message).toBe(
+                    `## Magic Recomp — Paused\n\nMessages 1-18 of 55 are rebuilt and kept for the next run. ${reason}\nYour current history is unchanged.\nRun /ctx-recomp again to continue from message 19.`,
+                );
+                expect(getRecompStaging(db, sessionId)).toEqual(before);
+            }
         } finally {
             fit?.mockRestore();
-            coverage?.mockRestore();
-            chunk?.mockRestore();
-            pass?.mockRestore();
         }
     });
 

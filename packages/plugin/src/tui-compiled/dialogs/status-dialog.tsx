@@ -22,6 +22,7 @@ import { createElement as _$createElement } from "opentui:runtime-module:%40open
  */
 import { createMemo, createSignal, onCleanup } from "opentui:runtime-module:solid-js";
 import packageJson from "../../../package.json";
+import { pausedRecompReason } from "../../shared/recomp-outcome";
 import { buildStatusViewFor, distributeBarWidths, statusColumnsFor } from "../../shared/status-view";
 import { RUST_MODE_HOST_PATHS_LINE } from "../../shared/rust-mode-status";
 const R = props => (() => {
@@ -411,6 +412,17 @@ export const StatusDialog = props => {
               },
               get fg() {
                 return t().textMuted;
+              }
+            });
+            const paused = pausedRecompReason(p.message);
+            if (paused !== null) return _$createComponent(R, {
+              get t() {
+                return t();
+              },
+              l: "Status",
+              v: `${verb} paused: ${paused}`,
+              get fg() {
+                return t().warning;
               }
             });
             return _$createComponent(R, {

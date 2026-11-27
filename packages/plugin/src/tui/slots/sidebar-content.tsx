@@ -6,6 +6,7 @@ import { badgeTextColor } from '../badge-contrast';
 import { loadSidebarSnapshot, type SidebarSnapshot } from "../data/context-db"
 import { directoryForSession } from "../data/session-directory"
 import { formatThresholdPercent } from "../../shared/format-threshold"
+import { pausedRecompReason } from "../../shared/recomp-outcome"
 import { renderUserFacingFailure } from "../../shared/user-facing-codes"
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "../compaction-off"
 import {
@@ -416,6 +417,7 @@ const RecompProgressSection = (props: {
               : props.progress.kind === "wrapup"
                 ? "wrapping ⟳"
                 : "comparting ⟳"
+    const paused = createMemo(() => pausedRecompReason(props.progress.message))
     const label = createMemo(() => {
         switch (props.progress.phase) {
             case "recomp":
@@ -436,7 +438,9 @@ const RecompProgressSection = (props: {
                 // "retry shortly" (wrong for a partial stall).
                 return { text: "stopped", color: props.theme.textMuted }
             case "failed":
-                return { text: `✗ ${verb()} failed`, color: props.theme.error }
+                return paused() === null
+                    ? { text: `✗ ${verb()} failed`, color: props.theme.error }
+                    : { text: `${verb()} paused`, color: props.theme.warning }
         }
     })
 
@@ -480,7 +484,7 @@ const RecompProgressSection = (props: {
             {/* Terminal reason (failed/skipped) — kept visible so the user sees
                 WHY (a failure, or the transient "retry shortly" skip cause). */}
             {(phase() === "failed" || phase() === "skipped") && props.progress.message && (
-                <text fg={props.theme.textMuted}>{props.progress.message}</text>
+                <text fg={props.theme.textMuted}>{paused() ?? props.progress.message}</text>
             )}
         </>
     )

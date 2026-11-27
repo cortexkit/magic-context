@@ -12,6 +12,7 @@
 import { createMemo, createSignal, onCleanup } from "solid-js"
 import type { TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import packageJson from "../../../package.json"
+import { pausedRecompReason } from "../../shared/recomp-outcome"
 import {
     buildStatusViewFor,
     distributeBarWidths,
@@ -229,6 +230,8 @@ export const StatusDialog = (props: { api: TuiPluginApi; status: StatusDetailRes
                         if (p.phase === "migration") return <R t={t()} l="Status" v={p.note ?? "Migrating memories ⟳"} fg={t().warning} />
                         if (p.phase === "done") return <R t={t()} l="Status" v={`✓ ${verb} complete`} fg={t().accent} />
                         if (p.phase === "skipped") return <R t={t()} l="Status" v={p.message ?? `${verb} stopped early`} fg={t().textMuted} />
+                        const paused = pausedRecompReason(p.message)
+                        if (paused !== null) return <R t={t()} l="Status" v={`${verb} paused: ${paused}`} fg={t().warning} />
                         return <R t={t()} l="Status" v={`✗ ${verb} failed${p.message ? `: ${p.message}` : ""}`} fg={t().error} />
                     })()}
                 </box>

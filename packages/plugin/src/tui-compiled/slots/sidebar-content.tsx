@@ -13,6 +13,7 @@ import { badgeTextColor } from "../badge-contrast";
 import { loadSidebarSnapshot } from "../data/context-db";
 import { directoryForSession } from "../data/session-directory";
 import { formatThresholdPercent } from "../../shared/format-threshold";
+import { pausedRecompReason } from "../../shared/recomp-outcome";
 import { renderUserFacingFailure } from "../../shared/user-facing-codes";
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "../compaction-off";
 import { computeEffectiveOrder, DEFAULT_SLOT_ORDER, PLUGIN_KEY, queueTuiPreferenceUpdate, readTuiPreferencesFile, readTuiPreferencesFileSync, resolveMagicContextPrefs, watchTuiPreferences } from "../../shared/tui-preferences";
@@ -406,6 +407,7 @@ const RecompProgressSection = props => {
   // run, so a plain /ctx-recomp never renders as an "Upgrade" (dogfood 2026-06-04).
   const verb = () => props.progress.kind === "upgrade" ? "Upgrade" : props.progress.kind === "embed" ? "Embed" : props.progress.kind === "wrapup" ? "Wrapup" : "Recomp";
   const activeText = () => props.progress.kind === "upgrade" ? "upgrading ⟳" : props.progress.kind === "embed" ? "embedding ⟳" : props.progress.kind === "wrapup" ? "wrapping ⟳" : "comparting ⟳";
+  const paused = createMemo(() => pausedRecompReason(props.progress.message));
   const label = createMemo(() => {
     switch (props.progress.phase) {
       case "recomp":
@@ -435,9 +437,12 @@ const RecompProgressSection = props => {
           color: props.theme.textMuted
         };
       case "failed":
-        return {
+        return paused() === null ? {
           text: `✗ ${verb()} failed`,
           color: props.theme.error
+        } : {
+          text: `${verb()} paused`,
+          color: props.theme.warning
         };
     }
   });
@@ -515,7 +520,7 @@ const RecompProgressSection = props => {
     dim: true
   })), _$memo(() => _$memo(() => !!((phase() === "failed" || phase() === "skipped") && props.progress.message))() && (() => {
     var _el$24 = _$createElement("text");
-    _$insert(_el$24, () => props.progress.message);
+    _$insert(_el$24, () => paused() ?? props.progress.message);
     _$effect(_$p => _$setProp(_el$24, "fg", props.theme.textMuted, _$p));
     return _el$24;
   })())];
