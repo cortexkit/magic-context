@@ -8,7 +8,7 @@
  * the shared model chain is exercised here against an OpenCode host double.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -26,13 +26,9 @@ import { runVerify } from "./verify";
 
 const PRIMARY = "opencode/deepseek-v4.1-flash-free";
 const FALLBACK = "anthropic/claude-sonnet-5-5";
-/**
- * Production uses DREAMER_FIRST_OUTPUT_TIMEOUT_MS. The prompt_async wait polls the
- * child once a second, so the deadline here must leave room for the first poll to
- * see a streamed part.
- */
+// Allow one virtual poll before the first-output deadline.
 const FIRST_OUTPUT_MS = 2_000;
-/** Per-test bound: a few poll cycles plus one first-output deadline. */
+/** Watchdog for real fixture preparation, such as running git. */
 const TEST_TIMEOUT_MS = 20_000;
 
 /**
@@ -71,6 +67,7 @@ function opencodeHost(
     const sessions = new Map<string, HostMessage[]>();
     const runs = new Map<string, ChildRun | null>();
     const sent: string[] = [];
+    const firstSend = Promise.withResolvers<void>();
     let created = 0;
     let rows = 0;
 
@@ -122,6 +119,7 @@ function opencodeHost(
                     model,
                     sentAt: Date.now(),
                 });
+                firstSend.resolve();
                 return { data: undefined };
             },
             status: async () => {
@@ -155,7 +153,53 @@ function opencodeHost(
             },
         },
     };
-    return { client: client as never, sent };
+    return { client: client as never, sent, firstSend: firstSend.promise };
+}
+
+async function driveHost<T>(
+    host: ReturnType<typeof opencodeHost>,
+    task: () => Promise<T>,
+    behaviour: "dead" | "partial" | "slow",
+) {
+    jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+    jest.setSystemTime(new Date("2026-08-11T12:00:00Z"));
+    const flushHost = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const pending = task();
+    let settled = false;
+    const markSettled = () => {
+        settled = true;
+    };
+    void pending.then(markSettled, markSettled);
+    // Real preparation can include filesystem and process work. Start stepping
+    // the deadline only after the fixture receives the first provider call.
+    await Promise.race([host.firstSend, pending]);
+    await flushHost();
+    expect(host.sent).toEqual([PRIMARY]);
+    jest.advanceTimersByTime(1_000);
+    await flushHost();
+    jest.advanceTimersByTime(999);
+    await flushHost();
+    expect(host.sent).toEqual([PRIMARY]);
+    expect(settled).toBe(false);
+    jest.advanceTimersByTime(1);
+    await flushHost();
+    expect(host.sent).toEqual(behaviour === "dead" ? [PRIMARY, FALLBACK] : [PRIMARY]);
+    expect(settled).toBe(false);
+    // The fallback needs one poll; a streamed primary remains active instead.
+    if (behaviour === "partial") {
+        jest.advanceTimersByTime(3_000);
+        await flushHost();
+    } else {
+        jest.advanceTimersByTime(1_000);
+        await flushHost();
+        if (behaviour === "slow") {
+            expect(settled).toBe(false);
+            jest.advanceTimersByTime(1_000);
+            await flushHost();
+        }
+    }
+    expect(settled).toBe(true);
+    return pending;
 }
 
 function idsIn(prompt: string): number[] {
@@ -179,6 +223,7 @@ const tempDirs: string[] = [];
 const dbs: Database[] = [];
 
 afterEach(() => {
+    jest.useRealTimers();
     for (const db of dbs.splice(0)) closeQuietly(db);
     for (const dir of tempDirs.splice(0)) {
         rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
@@ -246,13 +291,14 @@ describe("classify-memories", () => {
         "a primary that never answers falls back and the fallback classifies the chunk",
         async () => {
             const host = opencodeHost({ [PRIMARY]: "dead" }, classifyAnswer);
-            const startedAt = Date.now();
-
-            const result = await runClassify(classifyArgs(host.client, 60_000));
+            const result = await driveHost(
+                host,
+                () => runClassify(classifyArgs(host.client, 60_000)),
+                "dead",
+            );
 
             expect(result).toMatchObject({ classified: 10, remaining: 0, complete: true });
             expect(host.sent).toEqual([PRIMARY, FALLBACK]);
-            expect(Date.now() - startedAt).toBeLessThan(10_000);
         },
         TEST_TIMEOUT_MS,
     );
@@ -262,9 +308,9 @@ describe("classify-memories", () => {
         async () => {
             const host = opencodeHost({ [PRIMARY]: "partial" }, classifyAnswer);
 
-            await expect(runClassify(classifyArgs(host.client, 5_000))).rejects.toThrow(
-                /^prompt timed out after \d+ms$/,
-            );
+            await expect(
+                driveHost(host, () => runClassify(classifyArgs(host.client, 5_000)), "partial"),
+            ).rejects.toThrow(/^prompt timed out after \d+ms$/);
             expect(host.sent).toEqual([PRIMARY]);
         },
         TEST_TIMEOUT_MS,
@@ -306,7 +352,11 @@ describe("classify-memories", () => {
             async () => {
                 const host = opencodeHost({ [PRIMARY]: "dead" }, classifyAnswer);
 
-                const result = await runClassify(moduleArgs(host.client, 60_000));
+                const result = await driveHost(
+                    host,
+                    () => runClassify(moduleArgs(host.client, 60_000)),
+                    "dead",
+                );
 
                 expect(result).toMatchObject({ classified: 10, remaining: 0, complete: true });
                 expect(host.sent).toEqual([PRIMARY, FALLBACK]);
@@ -319,9 +369,9 @@ describe("classify-memories", () => {
             async () => {
                 const host = opencodeHost({ [PRIMARY]: "partial" }, classifyAnswer);
 
-                await expect(runClassify(moduleArgs(host.client, 5_000))).rejects.toThrow(
-                    /^Rust classify module failed: prompt timed out after \d+ms$/,
-                );
+                await expect(
+                    driveHost(host, () => runClassify(moduleArgs(host.client, 5_000)), "partial"),
+                ).rejects.toThrow(/^Rust classify module failed: prompt timed out after \d+ms$/);
                 expect(host.sent).toEqual([PRIMARY]);
             },
             TEST_TIMEOUT_MS,
@@ -353,7 +403,7 @@ describe("map-memories batches", () => {
         async () => {
             const host = opencodeHost({ [PRIMARY]: "dead" }, mapAnswer);
 
-            const result = await mapMemories(mapArgs(host.client));
+            const result = await driveHost(host, () => mapMemories(mapArgs(host.client)), "dead");
 
             expect(result).toMatchObject({ independent: 5, remaining: 0, complete: true });
             expect(host.sent).toEqual([PRIMARY, FALLBACK]);
@@ -370,7 +420,7 @@ describe("map-memories batches", () => {
             // is sent.
             const host = opencodeHost({ [PRIMARY]: "slow" }, mapAnswer);
 
-            const result = await mapMemories(mapArgs(host.client));
+            const result = await driveHost(host, () => mapMemories(mapArgs(host.client)), "slow");
 
             expect(result).toMatchObject({ independent: 5, remaining: 0, complete: true });
             expect(host.sent).toEqual([PRIMARY]);
@@ -404,7 +454,7 @@ describe("verify batches", () => {
         async () => {
             const host = opencodeHost({ [PRIMARY]: "dead" }, verifyAnswer);
 
-            const result = await runVerify(verifyArgs(host.client));
+            const result = await driveHost(host, () => runVerify(verifyArgs(host.client)), "dead");
 
             expect(result).toMatchObject({ verified: 5, remaining: 0, complete: true });
             expect(host.sent).toEqual([PRIMARY, FALLBACK]);
@@ -417,7 +467,7 @@ describe("verify batches", () => {
         async () => {
             const host = opencodeHost({ [PRIMARY]: "slow" }, verifyAnswer);
 
-            const result = await runVerify(verifyArgs(host.client));
+            const result = await driveHost(host, () => runVerify(verifyArgs(host.client)), "slow");
 
             expect(result).toMatchObject({ verified: 5, remaining: 0, complete: true });
             expect(host.sent).toEqual([PRIMARY]);

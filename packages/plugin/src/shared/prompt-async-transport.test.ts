@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, mock, test } from "bun:test";
 import { refuseBudgetedToolCall } from "../features/magic-context/dreamer/token-budget";
 import { createDroppedInputToolExecuteBeforeHook } from "../hooks/magic-context/dropped-input-guard";
 import { promptSyncWithValidatedOutputRetry } from "./model-suggestion-retry";
@@ -683,6 +683,18 @@ test("session errors belonging to another child do not fail the run", async () =
 });
 
 describe("prompt_async transport and the first-output deadline", () => {
+    beforeEach(() => {
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        jest.setSystemTime(new Date("2026-08-11T12:00:00Z"));
+    });
+    afterEach(() => jest.useRealTimers());
+
+    async function poll(ms: number) {
+        jest.advanceTimersByTime(ms);
+        // Drain the host replies and let the waiter arm its next poll.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
     /**
      * A child session where each model answers its own way. "dead" leaves the
      * empty assistant row the host writes before the provider responds and stays
@@ -784,19 +796,38 @@ describe("prompt_async transport and the first-output deadline", () => {
         const host = modelHost({ "opencode/free-model": "dead" });
         const startedAt = Date.now();
 
-        const run = await runChain(host, 5_000, 60);
+        const pending = runChain(host, 5_000, 60);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        await poll(59);
+        expect(host.sent).toEqual(["opencode/free-model"]);
+        expect(host.abort).not.toHaveBeenCalled();
+        await poll(1);
+        expect(host.sent).toEqual(["opencode/free-model", "anthropic/claude-sonnet-5-5"]);
+        await poll(5);
+        const run = await pending;
 
         expect(run.attempt.label).toBe("anthropic/claude-sonnet-5-5");
-        expect(host.sent).toEqual(["opencode/free-model", "anthropic/claude-sonnet-5-5"]);
         // The dead model's run is stopped on the host before the fallback is sent.
         expect(host.abort).toHaveBeenCalledWith({ path: { id: "ses-child" } });
-        expect(Date.now() - startedAt).toBeLessThan(2_000);
+        expect(Date.now() - startedAt).toBe(65);
     });
 
     test("a model that streamed part of an answer keeps its timeout and does not fall back", async () => {
         const host = modelHost({ "opencode/free-model": "partial" });
 
-        await expect(runChain(host, 200, 40)).rejects.toThrow("prompt timed out after 200ms");
+        let outcome: unknown;
+        const pending = runChain(host, 200, 40).then(
+            (result) => (outcome = result),
+            (error: unknown) => (outcome = error),
+        );
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        await poll(5); // Let the first poll see the streamed answer before advancing to the cut.
+        await poll(194);
+        expect(host.abort).not.toHaveBeenCalled();
+        await poll(1);
+        expect(outcome).toBeInstanceOf(Error);
+        expect((outcome as Error).message).toBe("prompt timed out after 200ms");
+        await pending;
         expect(host.sent).toEqual(["opencode/free-model"]);
     });
 
@@ -804,12 +835,17 @@ describe("prompt_async transport and the first-output deadline", () => {
         test(`a recorded provider ${failure} stops the host retry loop and immediately tries the fallback`, async () => {
             const host = modelHost({ "opencode/free-model": failure });
             const startedAt = Date.now();
-            const result = await runChain(host, 5_000, 5_000);
+            const pending = runChain(host, 5_000, 5_000);
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            await poll(5);
+            expect(host.sent).toEqual(["opencode/free-model", "anthropic/claude-sonnet-5-5"]);
+            await poll(5);
+            const result = await pending;
             expect(result.attempt.label).toBe("anthropic/claude-sonnet-5-5");
             expect(host.sent).toEqual(["opencode/free-model", "anthropic/claude-sonnet-5-5"]);
             expect(host.abort).toHaveBeenCalledTimes(1);
             expect(host.abort).toHaveBeenCalledWith({ path: { id: "ses-child" } });
-            expect(Date.now() - startedAt).toBeLessThan(2_000);
+            expect(Date.now() - startedAt).toBe(10);
         });
     }
 });

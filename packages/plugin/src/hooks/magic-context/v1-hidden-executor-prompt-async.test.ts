@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, jest, mock, test } from "bun:test";
 import {
     buildHiddenAgentConfig,
     buildHiddenAgentRegistrations,
@@ -245,6 +245,17 @@ function slowHost(options: { runMs: number; hostRequestTimerMs: number }) {
 }
 
 describe("OpenCode 1 historian under a host request timer", () => {
+    afterEach(() => jest.useRealTimers());
+
+    function freezeTime() {
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        jest.setSystemTime(new Date("2026-08-11T12:00:00Z"));
+    }
+
+    function flushHost() {
+        return new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
     test("a run that outlasts the host's request timer still completes within the historian timeout", async () => {
         const db = freshDb();
         const h = slowHost({ runMs: 1_500, hostRequestTimerMs: 100 });
@@ -253,13 +264,30 @@ describe("OpenCode 1 historian under a host request timer", () => {
             const handle = await executor.open(run("historian"));
             // The same wiring runHistorianPrompt uses: the retry chain owns the
             // configured timeout and sends through the executor.
-            await promptSyncWithModelSuggestionRetry(h.client, request, {
+            freezeTime();
+            let settled = false;
+            const pending = promptSyncWithModelSuggestionRetry(h.client, request, {
                 transport: Object.assign((args: PromptArgs) => executor.attempt(handle, args), {
                     childSessionId: handle.childSessionId,
                 }),
                 timeoutMs: 10_000,
                 callContext: "historian",
+            }).then(() => {
+                settled = true;
             });
+            await flushHost();
+            expect(h.promptAsync).toHaveBeenCalledTimes(1);
+            expect(h.prompt).not.toHaveBeenCalled();
+            jest.advanceTimersByTime(1_000);
+            await flushHost();
+            expect(settled).toBe(false);
+            jest.advanceTimersByTime(999);
+            await flushHost();
+            expect(settled).toBe(false);
+            jest.advanceTimersByTime(1);
+            await flushHost();
+            expect(settled).toBe(true);
+            await pending;
             const completion = await executor.collect(handle, 50);
 
             expect(completion.text).toBe("<output/>");
@@ -276,20 +304,24 @@ describe("OpenCode 1 historian under a host request timer", () => {
         try {
             const executor = createV1HiddenCompletionExecutor(h.client, db, "/repo");
             const handle = await executor.open(run("historian"));
-            const startedAt = Date.now();
-
-            await expect(
-                promptSyncWithModelSuggestionRetry(h.client, request, {
-                    transport: Object.assign((args: PromptArgs) => executor.attempt(handle, args), {
-                        childSessionId: handle.childSessionId,
-                    }),
-                    timeoutMs: 400,
-                    callContext: "historian",
+            freezeTime();
+            const pending = promptSyncWithModelSuggestionRetry(h.client, request, {
+                transport: Object.assign((args: PromptArgs) => executor.attempt(handle, args), {
+                    childSessionId: handle.childSessionId,
                 }),
-            ).rejects.toThrow("prompt timed out after 400ms");
-
-            expect(Date.now() - startedAt).toBeLessThan(5_000);
+                timeoutMs: 400,
+                callContext: "historian",
+            });
+            const caught = pending.catch((error: unknown) => error);
+            await flushHost();
+            expect(h.promptAsync).toHaveBeenCalledTimes(1);
+            jest.advanceTimersByTime(399);
+            await flushHost();
+            expect(h.abort).not.toHaveBeenCalled();
+            jest.advanceTimersByTime(1);
+            await flushHost();
             expect(h.abort).toHaveBeenCalledWith({ path: { id: "ses-child" } });
+            expect(await caught).toEqual(new Error("prompt timed out after 400ms"));
         } finally {
             h.stop();
             closeQuietly(db);

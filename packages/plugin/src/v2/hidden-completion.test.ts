@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, jest, spyOn, test } from "bun:test";
 import { parsePluginConfig } from "../config";
 import { withLiveDreamerOutputCap } from "../config/live-child-output-cap";
 import { acquireLease } from "../features/magic-context/dreamer/lease";
@@ -537,6 +537,7 @@ async function close(
 }
 
 describe("OpenCode 2 hidden child completion", () => {
+    afterEach(() => jest.useRealTimers());
     for (const retryAfterMs of [undefined, 190_000_000]) {
         test(`retains structured quota delay when the host exposes it (${retryAfterMs ?? "unavailable"})`, async () => {
             const f = await setup();
@@ -638,6 +639,7 @@ describe("OpenCode 2 hidden child completion", () => {
             });
             const prompt = f.host.prompt;
             const sent: string[] = [];
+            const primaryReady = Promise.withResolvers<void>();
             f.host.prompt = async (input) => {
                 const model = f.creates.find((_, i) => `child-${i + 1}` === input.sessionID)?.model
                     .id;
@@ -658,10 +660,14 @@ describe("OpenCode 2 hidden child completion", () => {
                         type: "session.reasoning.delta",
                         data: { sessionID: input.sessionID, delta: "thinking" },
                     });
+                primaryReady.resolve();
             };
             f.host.wait = async ({ sessionID }) => {
                 if (sessionID === "child-1") await new Promise(() => {});
             };
+            jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+            jest.setSystemTime(new Date("2026-08-11T12:00:00Z"));
+            const flushAttempt = () => new Promise<void>((resolve) => setImmediate(resolve));
             const startedAt = Date.now();
             try {
                 const result = promptSyncWithValidatedOutputRetry(undefined, request(), {
@@ -672,16 +678,34 @@ describe("OpenCode 2 hidden child completion", () => {
                     fetchOutput: () => f.executor.collect(handle),
                     validateOutput: (completion) => completion.text,
                 });
+                let settledAt: number | undefined;
+                void result.then(
+                    () => {
+                        settledAt = Date.now();
+                    },
+                    () => {
+                        settledAt = Date.now();
+                    },
+                );
+                const deadline = streaming ? 500 : 60;
+                // Keep virtual time still until the host has published its activity.
+                await Promise.race([primaryReady.promise, result]);
+                await flushAttempt();
+                expect(sent).toEqual(["cheap"]);
+                jest.advanceTimersByTime(deadline - 1);
+                await flushAttempt();
+                expect(sent).toEqual(["cheap"]);
+                expect(settledAt).toBeUndefined();
+                jest.advanceTimersByTime(1);
+                await flushAttempt();
+                expect(settledAt).toBe(startedAt + deadline);
                 if (streaming) {
                     await expect(result).rejects.toThrow("prompt timed out after 500ms");
                     expect(sent).toEqual(["cheap"]);
-                    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(450);
                     expect(getSubagentInvocations(f.db, "user-session")).toHaveLength(0);
                 } else {
                     expect((await result).validated).toBe("editor completion");
                     expect(sent).toEqual(["cheap", "fallback"]);
-                    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(55);
-                    expect(Date.now() - startedAt).toBeLessThan(400);
                     expect(f.interrupts).toContain("child-1");
                     expect(getSubagentInvocations(f.db, "user-session")).toMatchObject([
                         {

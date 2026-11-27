@@ -1,4 +1,4 @@
-import { describe, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, jest, mock, spyOn, test } from "bun:test";
 import { recordedGeminiQuotaMessages } from "../features/magic-context/dreamer/provider-output-failure.test-support";
 import { HiddenAgentStepLimit } from "../v2/hooks/hidden-child";
 import { hiddenModelCooldowns } from "./hidden-model-cooldown";
@@ -817,6 +817,19 @@ describe("first-output deadline", () => {
     const primary = { providerID: "opencode", modelID: "free-model" };
     type Behaviour = "silent" | "partial" | "answer" | "unmonitored";
 
+    afterEach(() => jest.useRealTimers());
+
+    function freezeTime() {
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        jest.setSystemTime(new Date("2026-08-11T12:00:00Z"));
+    }
+
+    async function advance(ms: number) {
+        jest.advanceTimersByTime(ms);
+        // Let the attempt's rejection and the next attempt's startup settle.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
     /**
      * A transport double that behaves per model. "silent" watches the child but the
      * model never answers; "partial" streams something and then hangs; "unmonitored"
@@ -874,18 +887,27 @@ describe("first-output deadline", () => {
     }
 
     test("a primary that streams nothing by the deadline moves on to the fallback", async () => {
-        const outcome = await run(
+        freezeTime();
+        let settled = false;
+        const pending = run(
             { "opencode/free-model": "silent" },
             { timeoutMs: 2_000, firstOutputTimeoutMs: 40 },
-        );
+        ).then((outcome) => {
+            settled = true;
+            return outcome;
+        });
+        await advance(39);
+        expect(settled).toBe(false);
+        await advance(1);
+        expect(settled).toBe(true);
+        const outcome = await pending;
         expect(outcome.caught).toBeUndefined();
         expect(outcome.result?.attempt.label).toBe("anthropic/claude-sonnet-5-5");
         expect(outcome.calls.map((call) => call.model)).toEqual([
             "opencode/free-model",
             "anthropic/claude-sonnet-5-5",
         ]);
-        // The silent primary was cut at its first-output deadline, not its timeout.
-        expect(outcome.elapsedMs).toBeLessThan(1_000);
+        expect(outcome.elapsedMs).toBe(40);
     });
 
     test("the unvalidated chain also moves on from a silent primary", async () => {
@@ -919,16 +941,25 @@ describe("first-output deadline", () => {
     test("a silent primary's time comes out of the fallback's timeout", async () => {
         // The fallback is the last model, so it gets no first-output cut of its own;
         // its timeout is what the silent primary left of the overall 300 ms.
-        const outcome = await run(
+        freezeTime();
+        let settled = false;
+        const pending = run(
             { "opencode/free-model": "silent", "anthropic/claude-sonnet-5-5": "silent" },
             { timeoutMs: 300, firstOutputTimeoutMs: 100 },
-        );
-        const message = (outcome.caught as Error).message;
-        const fallbackTimeoutMs = Number(/prompt timed out after (\d+)ms$/.exec(message)?.[1]);
+        ).then((outcome) => {
+            settled = true;
+            return outcome;
+        });
+        await advance(100);
+        await advance(199);
+        expect(settled).toBe(false);
+        await advance(1);
+        expect(settled).toBe(true);
+        const outcome = await pending;
         expect(outcome.calls).toHaveLength(2);
-        expect(fallbackTimeoutMs).toBeLessThanOrEqual(200);
-        expect(fallbackTimeoutMs).toBeGreaterThan(100);
-        expect(outcome.elapsedMs).toBeLessThan(300 + 150);
+        expect(outcome.calls[1]!.startedAt - outcome.calls[0]!.startedAt).toBe(100);
+        expect((outcome.caught as Error).message).toBe("prompt timed out after 200ms");
+        expect(outcome.elapsedMs).toBe(300);
     });
 
     test("the last model in the chain is never cut for silence", async () => {
