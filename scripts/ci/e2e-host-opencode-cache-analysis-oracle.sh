@@ -5,6 +5,8 @@ cd packages/e2e-tests
 status=0
 bun test --timeout 600000 src/cache-analysis.test.ts scripts/ckios-reasoning-only-probe.test.ts || status=1
 bun test --timeout 600000 scripts/tool-sweep-marker-refusal-gate.test.ts || status=1
+# The oversized-prompt rejection test is long; run it on the lightest measured shard.
+bun test --timeout 600000 tests/issue-538-engine-wall.test.ts || status=1
 
 # The home-project test changes the process HOME and must not share a Bun run.
 mkdir -p "${TMPDIR:-/tmp}/magic-context"

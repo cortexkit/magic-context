@@ -420,9 +420,10 @@
         },
         {
             "path": "tests/issue-538-engine-wall.test.ts",
-            "tier": "ts-only",
+            "runs_in": "scripts/ci/e2e-host-opencode-cache-analysis-oracle.sh",
+            "tier": "excluded",
             "invocation": {
-                "ts": true,
+                "ts": false,
                 "rust": false
             },
             "rationale": "issue 538 reproduction: an engine that rejects oversized prompts before any model call, on a real OpenCode 1 host.",
@@ -1127,13 +1128,12 @@
         },
         {
             "path": "tests/opencode2/fork-inheritance.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane (issue 608): a parent session with compartments and a dropped tool output is forked with OpenCode's own fork, and the fork's first request must be served under the mock provider's enforced window with the history head rendered from the inherited compartments; a session Magic Context has no state for whose raw history is over the window must be refused (MC-H06) until the historian has caught up, never sent unmanaged; a small first pass is served unchanged; the v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "rationale": "Real OpenCode 2 seeds fork history and tests first-pass reduction or safe refusal before any oversized request reaches the provider.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1158,13 +1158,12 @@
         },
         {
             "path": "tests/opencode2/missing-history-boundary.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane (issue 590): compartments and a host compaction, then the newest compartment's end row deleted from the throwaway store (or its end id cleared, or every end deleted); the next turn must re-anchor on one rebuild pass and fit the mock provider's enforced window, or be refused, never sent uncut; the v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "rationale": "Real OpenCode 2 repairs a deleted or missing history boundary, or refuses with a stored notice if no safe anchor survives.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1375,13 +1374,13 @@
         },
         {
             "path": "tests/opencode2/converted-store-overwindow.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
+            "runs_in": "scripts/ci/e2e-host-opencode2-run-oc2-conversion-and-marker-regressions.sh",
             "tier": "excluded",
             "invocation": {
                 "ts": false,
                 "rust": false
             },
-            "rationale": "Conversion in the loop: the real 1.x host creates completed tool output, the real 2.x host converts the same throwaway store, and the first cache-busting model-switch pass must reclaim the over-window converted tail before one provider request; it runs only in the dedicated v2 lane",
+            "rationale": "A first priced OpenCode 2 pass rejects the old model reading and reduces an over-window tool tail in a converted OpenCode 1 store. Runs serially with the other conversion fixtures.",
             "contract_refs": [
                 "S2-MIGRATION",
                 "OC2-S1"
@@ -1626,13 +1625,12 @@
         },
         {
             "path": "tests/opencode2/compaction-off-host-compaction.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: with Magic Context compaction off, the compaction hook stays registered for hidden children but leaves a user session's result unset; the real host must then compact that session itself (completed model-written checkpoint, turn continues to the provider), exactly as with no hook registered; needs the real v2 host's compaction, so it runs only in the dedicated v2 lane",
+            "rationale": "With Magic Context compaction disabled, real OpenCode 2 still compacts through the native host; the completed checkpoint shrinks the served request without repeating.",
             "contract_refs": [
                 "OC2-S1",
                 "ISSUE-602"
@@ -1970,13 +1968,12 @@
         },
         {
             "path": "tests/opencode2/emergency-refusal-visible.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode 2 provider-proven >=95% refusal must reach the user: the v2 lane has no v1 client, so the notice routes through the TUI RPC toast before session.interrupt; it runs only in the dedicated v2 lane",
+            "rationale": "Real OpenCode 2 stores the emergency refusal notice and its interrupted idle event before the follow-up can reach the provider.",
             "contract_refs": [
                 "S2-MIGRATION",
                 "OC2-S1"
@@ -2003,13 +2000,12 @@
         },
         {
             "path": "tests/opencode2/storage-refusal-reason.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode 2 turn refused because a live older host blocks the context.db migration must name that host in the Magic Context log and the conversation, and the next turn after the blocker stops must migrate and get a reply without a host restart; it runs only in the dedicated v2 lane",
+            "rationale": "Real OpenCode 2 names a migration refused by an older live host and resumes safe requests after the blocker exits without restarting.",
             "contract_refs": [
                 "S2-MIGRATION",
                 "OC2-S1"

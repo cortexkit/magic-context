@@ -133,9 +133,10 @@ test("with compaction off, the host's own compaction of a user session succeeds 
 const CHECKPOINT_WINDOW = 40_000;
 const BALLAST =
 	"The service retries each failed upload with exponential backoff, records the attempt in the audit table, and moves on to the next queued item. ";
-// About 1.5k tokens per turn, so the host's checkpoint summarizes many turns and
-// keeps only the newest few.
-const ballastTurn = (turn: number) => `checkpoint-scenario turn ${turn}: ${BALLAST.repeat(40)}`;
+// Mark only the early turns. The host may include the triggering prompt in
+// the summary input and still send it as the newest user message.
+const ballastTurn = (turn: number) =>
+	`${turn <= 6 ? `checkpoint-scenario turn ${turn}: ` : ""}${BALLAST.repeat(40)}`;
 const turnMarkers = (text: string) =>
 	[...new Set([...text.matchAll(/checkpoint-scenario turn (\d+):/g)].map((match) => Number(match[1])))];
 

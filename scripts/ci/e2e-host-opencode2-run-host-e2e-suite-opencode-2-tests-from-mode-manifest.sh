@@ -3,7 +3,7 @@
 set -euo pipefail
 cd packages/e2e-tests
 set -o pipefail
-shard="${1:?missing workflow argument}/2"
+shard="${1:?missing workflow argument}/3"
 files=$(bun scripts/select-host-shard.ts opencode2 "$shard" | tr '\n' ' ')
 if [ -z "${files// /}" ]; then echo 'mode manifest selected no files'; exit 1; fi
 echo "Running OpenCode 2 host tests from mode manifest: $files"

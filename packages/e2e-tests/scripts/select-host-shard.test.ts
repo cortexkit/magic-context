@@ -3,7 +3,7 @@ import { selectHostShard, type ShardedHost } from "./select-host-shard";
 import { filesForMode, validateModeManifest } from "./validate-mode-manifest";
 
 describe("host shard coverage", () => {
-    for (const [host, count] of [["opencode", 4], ["opencode2", 2]] as const) {
+    for (const [host, count] of [["opencode", 4], ["opencode2", 3]] as const) {
         test(`${host} shards cover the manifest exactly once and exclude other lanes`, () => {
             const validation = validateModeManifest();
             const files = filesForMode(validation, "ts", host);
@@ -17,6 +17,7 @@ describe("host shard coverage", () => {
                 if (!entry.invocation.ts || !entry.hosts.includes(host)) expect(selected).not.toContain(entry.path);
             }
             expect(selected).not.toContain("tests/opencode2/store-generation-conversion.test.ts");
+            expect(selected).not.toContain("tests/opencode2/converted-store-overwindow.test.ts");
             expect(selected).not.toContain("tests/opencode2/marker-s3-runtime.test.ts");
         });
     }

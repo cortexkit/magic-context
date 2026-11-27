@@ -4,6 +4,7 @@ set -euo pipefail
 cd packages/e2e-tests
 status=0
 bun test --timeout 600000 tests/opencode2/store-generation-conversion.test.ts || status=1
+bun test --timeout 600000 tests/opencode2/converted-store-overwindow.test.ts || status=1
 bun test --timeout 600000 tests/opencode2/marker-s3-runtime.test.ts || status=1
 
 # The mapper probe checks the private TMPDIR before starting its host.

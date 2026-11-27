@@ -31,7 +31,7 @@ env:
 #   preflight publishes complete dists before independent checks
 #        ├─ unit suites and packaging smokes
 #        ├─ Docker install smokes (independent of unit/host results)
-#        ├─ host behavior (OC1: four whole-file shards; OC2: two)
+#   ├─ host behavior (OpenCode 1: four whole-file shards; OpenCode 2: three)
 #   Rust clippy and lib archive → lib partitions start immediately.
 #   Rust integration/doctests/remaining crates consume dists.
 #   Hermetic build → shards runs independently of preflight checks.
@@ -519,12 +519,12 @@ jobs:
           MC_E2E_HOST: pi
         run: bash scripts/ci/e2e-host-pi-run-mapper-step-cap.sh
   e2e-host-opencode2:
-    name: E2E (OpenCode ${{ matrix.version }}, host behavior ${{ matrix.shard }}/2)
+    name: E2E (OpenCode ${{ matrix.version }}, host behavior ${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1]
+        shard: [0, 1, 2]
         version: [2.0.22, 2.1.0, 2.3.2, 2.4.2]
     env:
       MC_E2E_OPENCODE2_VERSION: ${{ matrix.version }}

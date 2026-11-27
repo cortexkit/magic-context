@@ -136,16 +136,19 @@ test("OpenCode 2 names a migration refused by an older live host, then recovers 
 				},
 			);
 			try {
-				return (
-					db
-						.prepare(
-							"SELECT type, data FROM session_message WHERE session_id = ? ORDER BY seq",
-						)
-						.all(session.id) as Array<{ type: string; data: string }>
-				).map((row) => ({
-					type: row.type,
-					data: JSON.parse(row.data) as Record<string, unknown>,
-				}));
+				// Newer OpenCode hosts may store assistant text outside the message row.
+				const parts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_part'").get()
+					? db.prepare("SELECT data FROM session_part WHERE message_id = ? ORDER BY ordinal")
+					: undefined;
+				const messages = db.prepare("SELECT id, type, data FROM session_message WHERE session_id = ? ORDER BY seq")
+					.all(session.id) as Array<{ id: string; type: string; data: string }>;
+				return messages.map((row) => {
+					const data = JSON.parse(row.data) as Record<string, unknown>;
+					if (parts && row.type === "assistant" && Array.isArray(data.content) && data.content.length === 0) {
+						data.content = (parts.all(row.id) as Array<{ data: string }>).map((part) => JSON.parse(part.data));
+					}
+					return { type: row.type, data };
+				});
 			} finally {
 				db.close();
 			}

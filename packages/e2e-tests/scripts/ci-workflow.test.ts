@@ -99,7 +99,7 @@ test("artifact consumers start setup immediately and gate tests on artifacts", (
         }
     }
     expect(workflow.jobs["e2e-host-opencode"]!.strategy).toEqual({ "fail-fast": false, matrix: { shard: [0, 1, 2, 3] } });
-    expect(workflow.jobs["e2e-host-opencode2"]!.strategy).toEqual({ "fail-fast": false, matrix: { shard: [0, 1], version: openCode2Versions.compatibility } });
+    expect(workflow.jobs["e2e-host-opencode2"]!.strategy).toEqual({ "fail-fast": false, matrix: { shard: [0, 1, 2], version: openCode2Versions.compatibility } });
 });
 
 test("same-run artifact downloads retry transient failures and guard consumers", () => {

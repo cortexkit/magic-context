@@ -82,8 +82,14 @@ test("local full expands CI's matrices, including both slow modes and every Rust
         full.filter((lane) => lane.id === "rust-mc-module-lib").map((lane) => lane.matrix.shard),
     ).toEqual([1, 2, 3, 4]);
     expect(
-        full.filter((lane) => lane.id === "e2e-host-opencode2").map((lane) => lane.matrix.version),
-    ).toEqual([...openCode2Versions.compatibility, ...openCode2Versions.compatibility]);
+        full
+            .filter((lane) => lane.id === "e2e-host-opencode2")
+            .map((lane) => [lane.matrix.shard, lane.matrix.version]),
+    ).toEqual(
+        [0, 1, 2].flatMap((shard) =>
+            openCode2Versions.compatibility.map((version) => [shard, version]),
+        ),
+    );
     expect(full.some((lane) => lane.id === "rust-raw-replay-review")).toBe(true);
 });
 

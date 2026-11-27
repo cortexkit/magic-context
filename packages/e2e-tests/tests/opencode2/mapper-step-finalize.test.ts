@@ -18,7 +18,7 @@ test.skipIf(process.env.MC_E2E_MAPPER_STEP_PROBE !== "1")("real OpenCode 2 verif
         const build = await Bun.build({ entrypoints: [join(import.meta.dir, "dream-loop-probe.ts")], outdir: bundle, naming: "index.js", target: "node", format: "esm", define: { "process.env.NODE_ENV": '"production"' }, external: ["bun:sqlite", "node:sqlite"] });
         if (!build.success) throw new Error(build.logs.join("\n"));
         // Bun's bundled asynchronous initializers can reference an undefined
-        // helper. Repair the temporary probe only, as in fold-s3-owner.test.ts.
+        // helper. Repair only the temporary probe, not the built plugin.
         const probe = join(bundle, "index.js");
         writeFileSync(probe, readFileSync(probe, "utf8").replaceAll("__promiseAll(", "Promise.all("));
         host = await spawnOpencode2({ probePlugin: bundle, includeMagicContext: false, serviceMode: true });

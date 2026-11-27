@@ -266,6 +266,15 @@ test("the first priced pass reclaims an over-window converted-store tail", async
         expect(inflateConvertedToolOutputs(fixture.openCodeDbPath, sessionId, inflatedOutputs)).toBe(
             callIds.length,
         );
+        // Exercise the first read of the converted model's last reply regardless
+        // of whether OpenCode 1 recorded that reply's usage before it stopped.
+        const contextDb = new Database(fixture.contextDbPath, { fileMustExist: true });
+        try {
+            contextDb.exec("PRAGMA busy_timeout = 5000");
+            contextDb.prepare("UPDATE session_meta SET last_response_time = 0 WHERE session_id = ?").run(sessionId);
+        } finally {
+            contextDb.close();
+        }
         v2 = await spawnOpencode2({
             existingIsolation: fixture,
             existingMock: { mock, baseURL: provider.baseURL },

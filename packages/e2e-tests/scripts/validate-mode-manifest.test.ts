@@ -32,7 +32,7 @@ describe("mode manifest validator", () => {
     it("derives separate TS and Rust invocation lists", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
-        expect(ts).toHaveLength(139);
+        expect(ts).toHaveLength(143);
         expect(rust).toHaveLength(60);
         expect(rust).toContain("tests/rust-compaction-marker-catchup.test.ts");
         expect(rust).toContain("tests/rust-tool-attachments.test.ts");
@@ -59,7 +59,7 @@ describe("mode manifest validator", () => {
         expect(ts).toContain("tests/reasoning-token-budget.test.ts");
         expect(rust).not.toContain("tests/reasoning-token-budget.test.ts");
         expect(filesForMode(validation, "ts", "pi")).toHaveLength(37);
-        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(98);
+        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(103);
         // These OpenCode 2 files are ts-only with hosts ["opencode2"], so only the
         // OpenCode 2 host lane runs them; the other host lanes never select them.
         for (const path of [
@@ -111,6 +111,7 @@ describe("mode manifest validator", () => {
             "tests/historian-host-timeout.test.ts",
             "tests/historian-no-tools.test.ts",
             "tests/historian-window-fit.test.ts",
+            "tests/issue-538-engine-wall.test.ts",
             "tests/issue-570-home-project.test.ts",
             "tests/issue-574-unborn-project.test.ts",
             "tests/issue-586-pi-responses-orphans.test.ts",
@@ -119,20 +120,15 @@ describe("mode manifest validator", () => {
             "tests/live-providers.test.ts",
             "tests/opencode2/commands-s2-keymap.test.ts",
             "tests/opencode2/commands-s2-tui-feedback.test.ts",
-            "tests/opencode2/compaction-off-host-compaction.test.ts",
             "tests/opencode2/context-s2-lanes.test.ts",
             "tests/opencode2/converted-store-overwindow.test.ts",
-            "tests/opencode2/emergency-refusal-visible.test.ts",
-            "tests/opencode2/fork-inheritance.test.ts",
             "tests/opencode2/hidden-run-notifications.test.ts",
             "tests/opencode2/mapper-step-finalize.test.ts",
             "tests/opencode2/marker-s3-runtime.test.ts",
-            "tests/opencode2/missing-history-boundary.test.ts",
             "tests/opencode2/rust-mode-boundary-restart-gate.test.ts",
             "tests/opencode2/session-api-cutover.test.ts",
             "tests/opencode2/sidebar-component.test.ts",
             "tests/opencode2/status-dialog.test.ts",
-            "tests/opencode2/storage-refusal-reason.test.ts",
             "tests/opencode2/store-generation-conversion.test.ts",
             "tests/opencode2/ts-mode-on-migrated-real-store.test.ts",
             "tests/rust-classify-host-runner.test.ts",

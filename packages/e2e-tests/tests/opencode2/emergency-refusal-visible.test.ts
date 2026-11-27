@@ -30,11 +30,13 @@ test("provider-proven emergency pressure stores a visible refusal before v2 inte
 			model: { providerID: "openai", id: "mock-model" },
 		});
 		await waitForPluginActive(client, host.cwd);
+		// The provider reports the rejected size but not its limit. A reported
+		// limit would let Magic Context prove that this small draft now fits.
 		host.mock.setDefault({
 			error: {
 				status: 400,
 				type: "invalid_request_error",
-				message: "prompt is too long: 1091002 tokens > 100000 maximum",
+				message: "prompt is too long: 1091002 tokens",
 			},
 		});
 		await client.session.prompt({
