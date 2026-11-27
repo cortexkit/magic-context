@@ -11,6 +11,7 @@ import {
     loadCompartmentChunkEmbeddingsForSearch,
     peekCompartmentChunkSearchPool,
     type StoredCompartmentChunkEmbedding,
+    trackCompartmentChunkSearchPool,
     warmCompartmentChunkSearchPool,
 } from "./compartment-chunk-embedding";
 import { type GitCommitSearchHit, searchGitCommitsSync } from "./git-commits";
@@ -239,6 +240,8 @@ export interface UnifiedSearchOptions {
      * build.
      */
     chunkPoolWarmOnly?: boolean;
+    /** The kept worker starts upkeep after it posts the result. */
+    deferChunkPoolWarmup?: boolean;
     /** Optional sink for how long each lane took. Durations and states only. */
     stepTimings?: UnifiedSearchStepTimings;
 }
@@ -1802,6 +1805,7 @@ async function searchCompartmentChunks(args: {
     modelId?: string | null;
     dateRange: InclusiveDateRange | null;
     warmOnly?: boolean;
+    deferWarmup?: boolean;
     signal?: AbortSignal;
     timings?: UnifiedSearchStepTimings;
     diagnostics?: AutoSearchDiagnostics;
@@ -1819,13 +1823,17 @@ async function searchCompartmentChunks(args: {
         args.reportDiagnostics?.();
         // A late query vector is common for automatic hints. Warm the pool now
         // anyway, so a later turn whose vector does arrive finds it ready.
-        if (args.warmOnly)
-            void warmCompartmentChunkSearchPool(
-                args.db,
-                args.sessionId,
-                args.projectPath,
-                args.modelId,
-            );
+        if (args.warmOnly) {
+            if (args.deferWarmup)
+                trackCompartmentChunkSearchPool(args.db, args.sessionId, args.projectPath, args.modelId);
+            else
+                void warmCompartmentChunkSearchPool(
+                    args.db,
+                    args.sessionId,
+                    args.projectPath,
+                    args.modelId,
+                );
+        }
         return [];
     }
     const cutoff = args.maxOrdinal != null && args.maxOrdinal >= 0 ? args.maxOrdinal : null;
@@ -1846,14 +1854,15 @@ async function searchCompartmentChunks(args: {
                 args.diagnostics.poolRows = 0;
             }
             args.reportDiagnostics?.();
-            // Never throws. It runs between this thread's later work, which
-            // already yields between pages and batches.
-            void warmCompartmentChunkSearchPool(
-                args.db,
-                args.sessionId,
-                args.projectPath,
-                args.modelId,
-            );
+            // The peek already registered the scope. The worker's post-result
+            // upkeep can warm it without contending with this search.
+            if (!args.deferWarmup)
+                void warmCompartmentChunkSearchPool(
+                    args.db,
+                    args.sessionId,
+                    args.projectPath,
+                    args.modelId,
+                );
             return [];
         }
         if (args.timings) args.timings.chunkPool = "warm";
@@ -2527,6 +2536,7 @@ export async function unifiedSearch(
               modelId: chunkModelId && chunkModelId !== "off" ? chunkModelId : null,
               dateRange,
               warmOnly: options.chunkPoolWarmOnly,
+              deferWarmup: options.deferChunkPoolWarmup,
               signal: options.signal,
               timings,
               diagnostics: options.autoSearchDiagnostics,

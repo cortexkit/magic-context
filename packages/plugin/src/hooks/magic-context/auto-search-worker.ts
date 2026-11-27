@@ -194,6 +194,7 @@ serveWorkerJobs<AutoSearchWorkerInput>(async (initial, port) => {
                     input.query,
                     {
                         ...input.options,
+                        deferChunkPoolWarmup: persistent,
                         backfillMemoryEmbeddings: false,
                         countRetrievals: false,
                         measurementDisabled: true,

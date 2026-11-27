@@ -1455,7 +1455,12 @@ const trackedSearchPools = new WeakMap<
     Map<string, { sessionId: string; projectPath: string; modelId: string }>
 >();
 
-function trackSearchPool(db: Database, sessionId: string, projectPath: string, modelId: string) {
+export function trackCompartmentChunkSearchPool(
+    db: Database,
+    sessionId: string,
+    projectPath: string,
+    modelId: string,
+): void {
     let tracked = trackedSearchPools.get(db);
     if (!tracked) {
         tracked = new Map();
@@ -1512,7 +1517,7 @@ export function peekCompartmentChunkSearchPool(
         if (diagnostic) diagnostic.peek = "no-model";
         return null;
     }
-    trackSearchPool(db, sessionId, projectPath, modelId);
+    trackCompartmentChunkSearchPool(db, sessionId, projectPath, modelId);
     const entry = getDecodedSearchPool(db).get(searchPoolKey(sessionId, projectPath, modelId));
     if (!entry || searchPoolInTransaction(db)) {
         if (diagnostic) diagnostic.peek = entry ? "transaction" : "missing";
@@ -1549,7 +1554,7 @@ export async function warmCompartmentChunkSearchPool(
         finishedAtUnixMs: Date.now(),
     });
     if (!modelId) return report("current");
-    trackSearchPool(db, sessionId, projectPath, modelId);
+    trackCompartmentChunkSearchPool(db, sessionId, projectPath, modelId);
     const key = searchPoolKey(sessionId, projectPath, modelId);
     try {
         if (pendingSearchPools.get(db)?.has(key)) return report("in-progress");

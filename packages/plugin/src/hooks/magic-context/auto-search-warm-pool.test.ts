@@ -1,6 +1,8 @@
 import { afterEach, expect, jest, spyOn, test } from "bun:test";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { createAutoSearchDiagnostics } from "../../features/magic-context/auto-search-diagnostics";
 import {
     peekCompartmentChunkSearchPool,
@@ -12,12 +14,19 @@ import { type UnifiedSearchResult, unifiedSearch } from "../../features/magic-co
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { getAutoSearchHintDecisions } from "../../features/magic-context/storage-meta-persisted";
 import * as logger from "../../shared/logger";
-import { Database } from "../../shared/sqlite";
+import { Database, getSqliteDatabasePath } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import { WORKER_CLOSE_MESSAGE } from "../../shared/worker-shutdown";
+import { nextLoopTurn } from "./auto-search-clock.test";
 import { _resetAutoSearchCache, runAutoSearchHint } from "./auto-search-runner";
 import { autoSearchTestSnapshot } from "./auto-search-snapshot.fixture";
 import * as workers from "./auto-search-worker-client";
-import { AutoSearchBusyError, searchAutoHint } from "./auto-search-worker-client";
+import {
+    AutoSearchBusyError,
+    type AutoSearchWorkerInput,
+    type AutoSearchWorkerReply,
+    searchAutoHint,
+} from "./auto-search-worker-client";
 
 const directories: string[] = [];
 const databases: Database[] = [];
@@ -68,14 +77,6 @@ const query = "historian cache wiring";
 const hasChunkHit = (results: UnifiedSearchResult[]) =>
     results.some((result) => result.source === "compartment");
 
-async function until(condition: () => boolean, timeoutMs = 5000): Promise<void> {
-    const started = performance.now();
-    while (!condition()) {
-        if (performance.now() - started > timeoutMs) throw new Error("condition not met in time");
-        await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-}
-
 /** A first search whose query embedding only settles when its deadline aborts it. */
 async function searchUntilDeadline(db: Database): Promise<UnifiedSearchResult[]> {
     const deadline = new AbortController();
@@ -94,27 +95,34 @@ async function searchUntilDeadline(db: Database): Promise<UnifiedSearchResult[]>
     return pending;
 }
 
+function observeLateSearch() {
+    const late = Promise.withResolvers<string>();
+    const realLog = logger.log;
+    const log = spyOn(logger, "log").mockImplementation((message, data) => {
+        realLog(message, data);
+        if (message.includes("deadline passed after")) late.resolve(message);
+    });
+    return { message: late.promise, restore: () => log.mockRestore() };
+}
+
 test("a deadline stops waiting but keeps the worker, and the next turn finds the pool warm", async () => {
     const db = fixture();
     const before = workers.getAutoSearchWorkerStats();
-    expect(await searchUntilDeadline(db)).toEqual([]);
-    // The abandoned search finishes in the background; until then the session
-    // is skipped rather than queued. Then the same worker serves the next turn
-    // from the pool that search warmed.
-    let warm: UnifiedSearchResult[] = [];
-    async function poll() {
-        try {
+    const late = observeLateSearch();
+    try {
+        expect(await searchUntilDeadline(db)).toEqual([]);
+        await late.message;
+        // The detached search has finished. Keep querying the same
+        // worker until its post-result upkeep has published the decoded pool.
+        let warm: UnifiedSearchResult[] = [];
+        for (let attempt = 0; attempt < 100 && !hasChunkHit(warm); attempt++) {
             warm = await searchAutoHint(db, "session", "/synthetic", query, options);
-        } catch (error) {
-            if (!(error instanceof AutoSearchBusyError)) throw error;
         }
+        expect(hasChunkHit(warm)).toBe(true);
+        expect(workers.getAutoSearchWorkerStats().created - before.created).toBe(1);
+    } finally {
+        late.restore();
     }
-    for (let attempt = 0; attempt < 100 && !hasChunkHit(warm); attempt++) {
-        await poll();
-        if (!hasChunkHit(warm)) await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    expect(hasChunkHit(warm)).toBe(true);
-    expect(workers.getAutoSearchWorkerStats().created - before.created).toBe(1);
 }, 15000);
 
 test("a search of a session whose earlier search is still running is skipped, not queued", async () => {
@@ -153,21 +161,16 @@ test("a search of a session whose earlier search is still running is skipped, no
 
 test("a deadline logs where the abandoned search spent its time, without its text", async () => {
     const db = fixture();
-    const log = spyOn(logger, "log");
+    const late = observeLateSearch();
     try {
         await searchUntilDeadline(db);
-        const late = () =>
-            log.mock.calls
-                .map(([message]) => String(message))
-                .find((message) => message.includes("deadline passed after"));
-        await until(() => late() !== undefined);
-        const line = late() ?? "";
+        const line = await late.message;
         for (const step of ["message FTS", "vector wait", "chunk lane", "pool"])
             expect(line).toContain(step);
         expect(line).not.toContain(query);
         expect(line).not.toContain("answer");
     } finally {
-        log.mockRestore();
+        late.restore();
     }
 }, 15000);
 
@@ -180,10 +183,62 @@ test("a turn with a cold pool skips the chunk lane at once and warms it in the b
     expect(peekCompartmentChunkSearchPool(db, "session", "/synthetic", "model")).toBeNull();
     expect(hasChunkHit(cold)).toBe(false);
     expect(cold.some((result) => result.source === "message")).toBe(true);
-    await until(
-        () => peekCompartmentChunkSearchPool(db, "session", "/synthetic", "model") !== null,
-    );
+    while (peekCompartmentChunkSearchPool(db, "session", "/synthetic", "model") === null) {
+        await nextLoopTurn();
+    }
     expect(hasChunkHit(await search())).toBe(true);
+});
+
+test("a cold worker posts the text-only result before it starts reading history vectors", async () => {
+    const db = fixture();
+    const input: AutoSearchWorkerInput = {
+        jobId: 1,
+        job: "search",
+        persistent: true,
+        path: getSqliteDatabasePath(db)!,
+        harness: "opencode",
+        sessionId: "session",
+        projectPath: "/synthetic",
+        query,
+        options: {
+            sources: ["message"],
+            autoHint: true,
+            memoryEnabled: false,
+            chunkModelIdOverride: "model",
+            chunkPoolWarmOnly: true,
+        },
+        embeddingRuntimeEnabled: true,
+        embeddingHostBusy: false,
+        snapshot: undefined,
+    };
+    const worker = new Worker(new URL("./auto-search-worker-probe.fixture.ts", import.meta.url), {
+        workerData: input,
+    });
+    const exit = once(worker, "exit");
+    const completed = Promise.withResolvers<void>();
+    const order: string[] = [];
+    let results: UnifiedSearchResult[] = [];
+    worker.on("error", completed.reject);
+    worker.on("message", (message: AutoSearchWorkerReply | { kind: "history-load-started" }) => {
+        if (message.kind === "query") {
+            worker.postMessage({ jobId: 1, id: message.id, result: new Float32Array([1, 0]) });
+        } else if (message.kind === "error") {
+            completed.reject(new Error(message.error));
+        } else if (message.kind === "result" || message.kind === "history-load-started") {
+            order.push(message.kind);
+            if (message.kind === "result") results = message.results;
+            if (order.length === 2) completed.resolve();
+        }
+    });
+    try {
+        await completed.promise;
+        expect(order).toEqual(["result", "history-load-started"]);
+        expect(hasChunkHit(results)).toBe(false);
+        expect(results.some((result) => result.source === "message")).toBe(true);
+    } finally {
+        worker.postMessage(WORKER_CLOSE_MESSAGE);
+        await exit;
+    }
 });
 
 test("worker diagnostics report cold starts, warm reuse and signature-invalidated peeks without content", async () => {
@@ -204,7 +259,7 @@ test("worker diagnostics report cold starts, warm reuse and signature-invalidate
     let warm = cold;
     for (let attempt = 0; attempt < 100 && !hasChunkHit(warm.results); attempt++) {
         warm = await search();
-        if (!hasChunkHit(warm.results)) await new Promise((resolve) => setTimeout(resolve, 20));
+        if (!hasChunkHit(warm.results)) await nextLoopTurn();
     }
     expect(warm.diagnostics.workerStarted).toBe(false);
     expect(warm.diagnostics.pool).toBe("warm");
