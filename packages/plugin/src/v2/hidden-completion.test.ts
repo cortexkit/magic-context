@@ -6,7 +6,12 @@ import {
     mapMemories,
     parseMapMemoriesCompletion,
 } from "../features/magic-context/dreamer/map-memories";
-import { inspectCurateMemoryOperations } from "../features/magic-context/dreamer/task-executor";
+import { getDreamRuns } from "../features/magic-context/dreamer/storage-dream-runs";
+import {
+    createDreamTaskExecutor,
+    inspectCurateMemoryOperations,
+} from "../features/magic-context/dreamer/task-executor";
+import { leaseKeyFor } from "../features/magic-context/dreamer/task-registry";
 import { getMemoryVerifications, insertMemory } from "../features/magic-context/memory";
 import { runMigrations } from "../features/magic-context/migrations";
 import { closeDatabase, openDatabase } from "../features/magic-context/storage";
@@ -206,6 +211,7 @@ const request = (
 class Rows {
     private readonly rows = new Map<string, StoreRow<"assistant">[]>();
     private readonly idle = new Map<string, StoreRow<"idle">[]>();
+    private readonly synthetic: StoreRow<"synthetic">[] = [];
     private seq = 0;
     latestAssistantCalls = 0;
     latestIdleCalls = 0;
@@ -219,6 +225,25 @@ class Rows {
 
     assistantSince(sessionID: string, afterSeq: number): StoreRow<"assistant">[] {
         return (this.rows.get(sessionID) ?? []).filter((row) => row.seq > afterSeq);
+    }
+
+    range(sessionID: string, afterSeq: number, throughSeq: number): StoreRow[] {
+        return [...this.assistantSince(sessionID, afterSeq), ...this.synthetic]
+            .filter(
+                (row) =>
+                    row.session_id === sessionID && row.seq > afterSeq && row.seq <= throughSeq,
+            )
+            .sort((left, right) => left.seq - right.seq);
+    }
+
+    appendSynthetic(sessionID: string, text: string) {
+        this.synthetic.push({
+            id: `message-${++this.seq}`,
+            session_id: sessionID,
+            type: "synthetic",
+            seq: this.seq,
+            data: { text, time: { created: Date.now() } },
+        });
     }
 
     latestAssistant(sessionID: string): StoreRow<"assistant"> | undefined {
@@ -960,9 +985,15 @@ describe("OpenCode 2 hidden child completion", () => {
         message: "Response still truncated after two output token limit continuations",
     };
 
-    function writeContinuedLengthRows(rows: Rows, sessionID: string) {
-        // OpenCode 2.4.2 persists each of the original request and two continuations.
-        for (let call = 0; call < 3; call++) {
+    function writeContinuedLengthRows(rows: Rows, sessionID: string, continuations = 2) {
+        // OpenCode persists a synthetic instruction before each continuation.
+        for (let call = 0; call <= continuations; call++) {
+            if (call > 0) {
+                rows.appendSynthetic(
+                    sessionID,
+                    "Your last response hit the output token limit (stop reason: length). Do not apologize, recap, or repeat yourself. Break the remaining work into smaller pieces.",
+                );
+            }
             const row = rows.append(sessionID, "", { finish: "length" });
             row.data.rawFinish = "max_output_tokens";
             row.data.content = [{ type: "reasoning", text: "budget spent reasoning" }];
@@ -996,6 +1027,89 @@ describe("OpenCode 2 hidden child completion", () => {
         } finally {
             await close(state.executor, handle, true);
             state.db.close();
+        }
+    });
+
+    test.each([
+        { host: "2.4.2", continuations: 2, spent: 642 },
+        { host: "2.0.22", continuations: 0, spent: 440 },
+    ])("records tool-loop steps and the capped reply on OpenCode $host", async ({
+        continuations,
+        spent,
+    }) => {
+        const state = await setup(undefined, {
+            writeRows(rows, sessionID) {
+                for (let step = 0; step < 3; step++) {
+                    const row = rows.append(sessionID, "", { finish: "tool-calls" });
+                    row.data.content = [
+                        {
+                            type: "tool",
+                            name: "read",
+                            state: { status: "completed", input: { filePath: `file-${step}.ts` } },
+                        },
+                    ];
+                }
+                writeContinuedLengthRows(rows, sessionID, continuations);
+                if (continuations) rows.appendIdle(sessionID, "failed", outputLimit);
+                else rows.appendIdle(sessionID, "succeeded");
+            },
+        });
+        const db = new Database(":memory:");
+        initializeDatabase(db);
+        runMigrations(db);
+        const { dir: projectIdentity, cleanup } = createTestTempDir("mc-v2-map-capped-");
+        try {
+            insertMemory(db, {
+                projectPath: projectIdentity,
+                category: "ARCHITECTURE",
+                content: "Prefer explicit error handling.",
+            });
+            const holderId = "holder";
+            const leaseKey = leaseKeyFor("map-memories", projectIdentity);
+            expect(acquireLease(db, holderId, leaseKey)).toBe(true);
+            const execute = createDreamTaskExecutor({
+                hiddenCompletionExecutor: state.executor,
+                parentSessionId: "parent",
+                sessionDirectory: projectIdentity,
+                openOpenCodeDb: () => null,
+            });
+            const result = await execute(
+                {
+                    task: "map-memories",
+                    schedule: "0 5 * * *",
+                    timeoutMinutes: 20,
+                    tokenBudget: 1000,
+                    model: "mock/cheap",
+                },
+                { db, projectIdentity, holderId, leaseKey },
+            );
+            expect(result).toMatchObject({
+                status: "failed",
+                error: expect.stringContaining("length-capped"),
+            });
+            expect(state.requests).toHaveLength(1);
+            const summary = JSON.parse(getDreamRuns(db, projectIdentity)[0]!.tasks_json)[0];
+            expect(summary).toMatchObject({
+                name: "map-memories",
+                status: "failed",
+                error: expect.stringContaining("length-capped"),
+                children: [{ sessionId: "child-1", promptTokens: spent }],
+                tokenBudget: { budget: 1000, spent, finalizeFired: false, banked: 0 },
+            });
+            expect(getSubagentInvocations(db, "parent")).toMatchObject([
+                {
+                    task: "map-memories",
+                    status: "empty",
+                    inputTokens: 404,
+                    outputTokens: 97,
+                    cacheReadTokens: 21,
+                    cacheWriteTokens: 15,
+                },
+            ]);
+        } finally {
+            db.close();
+            state.db.close();
+            cleanup();
         }
     });
 

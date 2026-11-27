@@ -95,6 +95,7 @@ export interface HiddenChildRows {
     latestSequence(sessionID: string): number;
     latestAssistant(sessionID: string): StoreRow<"assistant"> | undefined;
     assistantSince?(sessionID: string, afterSeq: number): StoreRow<"assistant">[];
+    range?(sessionID: string, afterSeq: number, throughSeq: number): StoreRow[];
     latestIdle(sessionID: string): StoreRow<"idle"> | undefined;
 }
 

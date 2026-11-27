@@ -235,6 +235,40 @@ function sumRowUsage(rows: readonly StoreRow<"assistant">[]): HiddenCompletion["
     );
 }
 
+function isLengthCapped(row: StoreRow): boolean {
+    return row.data.finish === "length" || row.data.finish === "max_tokens";
+}
+
+const OUTPUT_LIMIT_CONTINUATION_TEXT =
+    "Your last response hit the output token limit (stop reason: length). Do not apologize, recap, or repeat yourself. Break the remaining work into smaller pieces.";
+
+function outputLimitChainStart(rows: readonly StoreRow[], finalSeq: number): number {
+    let firstSeq = finalSeq;
+    // OpenCode stores a synthetic user instruction, not a flag on the assistant.
+    // Walk only those instructions between consecutive capped replies, so earlier
+    // tool steps and any real user input end the chain.
+    for (let i = rows.findIndex((row) => row.seq === finalSeq); i >= 2; i -= 2) {
+        const instruction = rows[i - 1];
+        const prior = rows[i - 2];
+        if (
+            instruction?.type !== "synthetic" ||
+            instruction.data.text !== OUTPUT_LIMIT_CONTINUATION_TEXT ||
+            prior?.type !== "assistant" ||
+            !isLengthCapped(prior) ||
+            prior.data.content?.some(
+                (part) =>
+                    part.type === "tool" ||
+                    part.type === "tool-call" ||
+                    part.type === "tool-result",
+            )
+        ) {
+            break;
+        }
+        firstSeq = prior.seq;
+    }
+    return firstSeq;
+}
+
 /**
  * Rebuild the child's assistant text and tool calls in the host message shape the dreamer validators read
  * (`state.status`, `state.input`, `state.output`), matching what the OpenCode 1 transport
@@ -1031,10 +1065,18 @@ export async function createV2HiddenCompletionExecutor(
                     typeof value === "number" && Number.isFinite(value) ? value : undefined;
                 // A refused tool still consumes a model step. Count every assistant
                 // row in this attempt, excluding earlier runs on a reused carrier.
-                const steps = withReader(
+                const attemptRows = withReader(
                     options.openReader,
-                    (reader) => reader.assistantSince?.(run.child.id, baseline) ?? [row],
-                ).filter((step) => step.seq > baseline && step.seq <= row.seq);
+                    (reader) =>
+                        (outputLimit
+                            ? reader.range?.(run.child.id, baseline, row.seq)
+                            : undefined) ??
+                        reader.assistantSince?.(run.child.id, baseline) ?? [row],
+                );
+                const steps = attemptRows.filter(
+                    (step): step is StoreRow<"assistant"> =>
+                        step.type === "assistant" && step.seq > baseline && step.seq <= row.seq,
+                );
                 // Short runs can settle before the first poll; also collect the final
                 // step of longer runs without charging previously polled steps twice.
                 const exceeded = chargeBudgetRows(steps);
@@ -1042,9 +1084,17 @@ export async function createV2HiddenCompletionExecutor(
                     await interruptAndRetire(run, "token-budget");
                     throw exceeded;
                 }
-                // Report the usage of the capped reply, not the sum of OpenCode's
-                // continuations. The budget above still charges all assistant rows.
-                const usageRows = outputLimit ? [row] : steps;
+                const cappedChainStart = outputLimit
+                    ? outputLimitChainStart(attemptRows, row.seq)
+                    : row.seq;
+                // Earlier tool steps and the returned reply count in the report.
+                // The local budget above also charges the host's repeats.
+                const usageRows =
+                    cappedChainStart < row.seq
+                        ? steps.filter(
+                              (step) => step.seq < cappedChainStart || step.seq === row.seq,
+                          )
+                        : steps;
                 const reportedUsage = usageRows.some(
                     (step) =>
                         tokenNumber(step.data.tokens?.input) !== undefined ||
@@ -1076,8 +1126,7 @@ export async function createV2HiddenCompletionExecutor(
                     // and floor omitted components to zero. With no numeric usage,
                     // use the local meter so budget accounting remains finite.
                     usage: reportedUsage ? usage : meter(system, promptText(request), text ?? ""),
-                    lengthCapped:
-                        outputLimit || ["length", "max_tokens"].includes(row.data.finish ?? ""),
+                    lengthCapped: outputLimit || isLengthCapped(row),
                     providerId: row.data.model?.providerID ?? requested.providerID,
                     modelId: row.data.model?.id ?? requested.modelID,
                     attemptedModel: requestedRef,
