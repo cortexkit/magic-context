@@ -9,7 +9,7 @@ import { spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/
 import { providerSystemText } from "../../src/provider-system-text";
 import {
     assertStoreIsolation, clientFor, expectExactlyOnce, expectRestoredHistory, expectUnchangedPrefix, HISTORIAN_SYSTEM,
-    IMPORTED_SUMMARY, probe, readRows, recomp, revert, type Session, state, summaries,
+    IMPORTED_SUMMARY, probe, readRows, recomp, revert, seedLegacyPartialRebuild, type Session, state, summaries,
 } from "./stale-floor-fixture";
 
 const CONTEXT_LIMIT = 64_000;
@@ -49,7 +49,7 @@ function historianRange(body: Record<string, unknown>): { start: number; end: nu
     if (ordinals.length) return { start: Math.min(...ordinals), end: Math.max(...ordinals) };
 }
 
-async function withConvertedSession(label: string, turns: number, scenario: (s: Session, setPartial: (value: boolean) => void) => Promise<void>): Promise<void> {
+async function withConvertedSession(label: string, turns: number, scenario: (s: Session, seedPartial: () => Promise<void>) => Promise<void>): Promise<void> {
     const fixture = conversionFixture(label);
     const mock = new MockProvider();
     const provider = await mock.start();
@@ -106,7 +106,8 @@ async function withConvertedSession(label: string, turns: number, scenario: (s: 
         }
         const logPath = fixture.logPath("v2");
         fixture.env.MAGIC_CONTEXT_LOG_PATH = logPath;
-        const host = await spawnOpencode2({ existingIsolation: fixture, existingMock: { mock, baseURL: provider.baseURL }, magicContextConfig, modelContextLimit: CONTEXT_LIMIT, modelOutputLimit: OUTPUT_LIMIT, compactionAuto: false });
+        const boot = () => spawnOpencode2({ existingIsolation: fixture, existingMock: { mock, baseURL: provider.baseURL }, magicContextConfig, modelContextLimit: CONTEXT_LIMIT, modelOutputLimit: OUTPUT_LIMIT, compactionAuto: false });
+        let host = await boot();
         try {
             const client = clientFor(host);
             const s = { host, client, sessionId, logPath };
@@ -118,25 +119,28 @@ async function withConvertedSession(label: string, turns: number, scenario: (s: 
             expectExactlyOnce(first);
             expectExactlyOnce(next);
             expectUnchangedPrefix(first, next);
-            await scenario(s, value => { partial = value; });
+            await scenario(s, async () => {
+                partial = true;
+                try {
+                    await seedLegacyPartialRebuild(s, async () => { host = await boot(); return host; }, 20);
+                } finally { partial = false; }
+            });
         } finally {
-            try { assertStoreIsolation(host); } finally { await host.stopHost(); }
+            await host.stopHost();
         }
     } finally {
         await mock.stop();
     }
 }
 
-async function shrink(s: Session, setPartial: (value: boolean) => void, label: string) {
-    setPartial(true);
-    await recomp(s, "Partial");
-    setPartial(false);
+async function shrink(s: Session, seedPartial: () => Promise<void>, label: string) {
+    await seedPartial();
     return [await probe(s, `${label}-partial-first`), await probe(s, `${label}-partial-next`)] as const;
 }
 
 test("a partial rebuild of converted history keeps rows below the imported checkpoint visible", async () => {
-    await withConvertedSession("imported-partial", 30, async (s, setPartial) => {
-        const [first, next] = await shrink(s, setPartial, "imported");
+    await withConvertedSession("imported-partial", 30, async (s, seedPartial) => {
+        const [first, next] = await shrink(s, seedPartial, "imported");
         const after = state(s);
         expect(after.seq.get(after.summaries.at(-1)!.endId)!).toBeLessThan(after.cut!.seq);
         expectRestoredHistory(first);
@@ -145,9 +149,8 @@ test("a partial rebuild of converted history keeps rows below the imported check
     });
 }, 600_000);
 
-async function rebuildAndRevert(s: Session, setPartial: (value: boolean) => void, label: string, keepsSummary: boolean): Promise<void> {
-    await shrink(s, setPartial, label);
-    await recomp(s, "Complete");
+async function rebuildAndRevert(s: Session, label: string, keepsSummary: boolean): Promise<void> {
+    await recomp(s);
     expectExactlyOnce(await probe(s, `${label}-complete`));
     const before = state(s);
     const cut = before.cut!;
@@ -173,9 +176,9 @@ async function rebuildAndRevert(s: Session, setPartial: (value: boolean) => void
 }
 
 test("a revert after a completed rebuild restores rows between the surviving summary and imported checkpoint", async () => {
-    await withConvertedSession("imported-reanchor", 30, (s, setPartial) => rebuildAndRevert(s, setPartial, "imported-reanchor", true));
+    await withConvertedSession("imported-reanchor", 30, (s) => rebuildAndRevert(s, "imported-reanchor", true));
 }, 600_000);
 
 test("a revert of all summary ends in converted history no longer serves the reverted summaries", async () => {
-    await withConvertedSession("imported-retire-all", 10, (s, setPartial) => rebuildAndRevert(s, setPartial, "imported-retire-all", false));
+    await withConvertedSession("imported-retire-all", 10, (s) => rebuildAndRevert(s, "imported-retire-all", false));
 }, 600_000);

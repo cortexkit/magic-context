@@ -3,11 +3,14 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
+import { deleteChunkEmbedBackoffForSession } from "../../../plugin/src/features/magic-context/compartment-chunk-embedding";
+import { clearCompressionDepth } from "../../../plugin/src/features/magic-context/compression-depth-storage";
 import { getHiddenSeamPlaceholderIds, getStrippedPlaceholderIds } from "../../../plugin/src/features/magic-context/storage-meta-persisted";
+import { clearCachedM0M1 } from "../../../plugin/src/features/magic-context/storage-meta-shared";
 import { estimateTokens } from "../../../plugin/src/hooks/magic-context/read-session-formatting";
 import { Database } from "../../../plugin/src/shared/sqlite";
 import { V2StoreReader } from "../../../plugin/src/v2/store-reader";
-import type { spawnOpencode2 } from "../../src/opencode2-runner/spawn";
+import { type spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
 import { providerSystemText } from "../../src/provider-system-text";
 
 export type Host = Awaited<ReturnType<typeof spawnOpencode2>>;
@@ -123,15 +126,121 @@ export function log(s: Session): string {
     return existsSync(s.logPath) ? readFileSync(s.logPath, "utf8") : "";
 }
 
-export async function recomp(s: Session, result: "Partial" | "Complete"): Promise<void> {
+async function recompOutcome(s: Session): Promise<string | undefined> {
     const offset = log(s).length;
     await s.client.session.command({ sessionID: s.sessionId, name: "ctx-recomp", text: "" });
-    const after = await waitFor(() => log(s).slice(offset), (text) => text.includes("recomp finished"), `${result} recomp`);
+    const after = await waitFor(() => log(s).slice(offset), (text) => text.includes("recomp finished"), "recomp outcome");
     const outcome = after.split("\n").find(line => line.includes("recomp finished"));
     console.log(outcome);
+    return outcome;
+}
+
+export async function recomp(s: Session): Promise<string | undefined> {
+    const outcome = await recompOutcome(s);
     expect(outcome).toContain("published=true");
-    if (result === "Partial") expect(outcome).toContain("Partial");
-    else expect(outcome).not.toContain("Partial");
+    expect(outcome).not.toContain("Partial");
+    return outcome;
+}
+
+export async function seedUnprovedRevert(s: Session, cutoff: number, boot: () => Promise<Host>): Promise<void> {
+    assertStoreIsolation(s.host);
+    await s.host.stopHost();
+    const path = hostDbPath(s.host);
+    expect(path.startsWith(`${s.host.root}/`)).toBe(true);
+    const db = new Database(path, { fileMustExist: true });
+    db.exec("PRAGMA busy_timeout = 5000");
+    try {
+        db.exec("PRAGMA foreign_keys = ON");
+        db.prepare("DELETE FROM session_message WHERE session_id = ? AND seq >= ?").run(s.sessionId, cutoff);
+    } finally {
+        db.close();
+    }
+    s.host = await boot();
+    s.client = clientFor(s.host);
+    await waitForPluginActive(s.client, s.host.cwd);
+    assertStoreIsolation(s.host);
+}
+
+/** The current command can stage the shorter history, but it no longer publishes it. */
+export async function seedLegacyPartialRebuild(
+    s: Session,
+    boot: () => Promise<Host>,
+    endMessage: number,
+): Promise<void> {
+    const before = state(s);
+    const readReceipts = () => readRows<{ key: string; value: string }>(hostDbPath(s.host), `
+        SELECT key, value FROM kv WHERE key LIKE ? OR key LIKE ? ORDER BY key
+    `, `%:native-fold/v3/${s.sessionId}`, `%:native-fold-state/v3/${s.sessionId}`);
+    const receipts = readReceipts();
+    expect(receipts.some(({ key }) => key.includes(":native-fold-state/v3/"))).toBe(true);
+    const outcome = await recompOutcome(s);
+    expect(outcome).toContain("published=false");
+    expect(outcome).toContain("Magic Recomp — Paused");
+    expect(state(s).summaries).toEqual(before.summaries);
+
+    assertStoreIsolation(s.host);
+    await s.host.stopHost();
+    // Only the fixture writes the old published state, with no host running.
+    // Copy staging to preserve the exact message IDs and block coordinates.
+    const path = contextDbPath(s.host);
+    expect(path.startsWith(`${s.host.root}/`)).toBe(true);
+    const db = new Database(path, { fileMustExist: true });
+    db.exec("PRAGMA busy_timeout = 5000");
+    try {
+        const staged = db.prepare(`
+            SELECT sequence, start_message AS startMessage, end_message AS endMessage,
+                start_message_id AS startId, end_message_id AS endId, title
+            FROM recomp_compartments WHERE session_id = ? ORDER BY sequence
+        `).all(s.sessionId) as Summary[];
+        expect(staged).toEqual([{
+            sequence: 0, startMessage: 1, endMessage,
+            startId: expect.any(String), endId: expect.any(String), title: `History 1-${endMessage}`,
+        }]);
+        const [{ startId, endId }] = staged as [Summary];
+        expect(before.seq.get(startId)).toBeLessThan(before.seq.get(endId)!);
+
+        db.transaction(() => {
+            deleteChunkEmbedBackoffForSession(db, s.sessionId);
+            db.prepare("DELETE FROM compartments WHERE session_id = ?").run(s.sessionId);
+            db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(s.sessionId);
+            db.prepare(`
+                INSERT INTO compartments (session_id, sequence, start_message, end_message,
+                    start_message_id, end_message_id, start_block_index, end_block_index,
+                    title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at, harness)
+                SELECT session_id, sequence, start_message, end_message,
+                    start_message_id, end_message_id, start_block_index, end_block_index,
+                    title, content, p1, p2, p3, p4, importance, episode_type,
+                    CASE WHEN length(p1) > 0 THEN 0 ELSE 1 END, created_at, harness
+                FROM recomp_compartments WHERE session_id = ?
+            `).run(s.sessionId);
+            db.prepare(`
+                INSERT INTO m0_mutation_log (session_id, mutation_type, target_id, queued_at)
+                VALUES (?, 'recomp_boundary_change', NULL, ?)
+            `).run(s.sessionId, Date.now());
+            db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(s.sessionId);
+            db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(s.sessionId);
+            clearCachedM0M1(db, s.sessionId);
+            clearCompressionDepth(db, s.sessionId);
+        }).immediate();
+
+        expect(summaries(path, s.sessionId)).toEqual(staged);
+        expect(db.prepare(`
+            SELECT cached_m0_bytes AS m0, cached_m1_bytes AS m1,
+                cached_m0_last_baseline_end_message_id AS boundary,
+                (SELECT count(*) FROM recomp_compartments WHERE session_id = ?1) AS stagedSummaries,
+                (SELECT count(*) FROM recomp_facts WHERE session_id = ?1) AS stagedFacts
+            FROM session_meta WHERE session_id = ?1
+        `).get(s.sessionId)).toEqual({ m0: null, m1: null, boundary: null, stagedSummaries: 0, stagedFacts: 0 });
+    } finally {
+        db.close();
+    }
+    expect(readReceipts()).toEqual(receipts);
+    expect(state(s).checkpoints).toEqual(before.checkpoints);
+
+    s.host = await boot();
+    s.client = clientFor(s.host);
+    await waitForPluginActive(s.client, s.host.cwd);
+    assertStoreIsolation(s.host);
 }
 
 export async function revert(s: Session, target: string): Promise<void> {

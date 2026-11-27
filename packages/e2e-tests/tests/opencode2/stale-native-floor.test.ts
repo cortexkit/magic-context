@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { estimateTokens } from "../../../plugin/src/hooks/magic-context/read-session-formatting";
+import { MockProvider } from "../../src/mock-provider/server";
 import { isolation, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
 import {
     assertStoreIsolation, clientFor, expectRestoredHistory, expectUnchangedPrefix, probe,
-    recomp, requestTokens, revert, type Session, state, turn, waitFor,
+    log, readRows, recomp, requestTokens, revert, seedLegacyPartialRebuild, seedUnprovedRevert,
+    type Session, state, turn, waitFor,
 } from "./stale-floor-fixture";
 
 const WINDOW = 60_000;
@@ -19,14 +21,18 @@ async function compact(s: Session): Promise<void> {
 }
 
 async function withSession(label: string, testScenario: (s: Session, controls: {
-    setPartial(value: boolean): void;
+    seedPartial(): Promise<void>;
+    seedOldRevert(cutoff: number): Promise<void>;
     enforceWindow(): void;
 }) => Promise<void>, earlyCut = false): Promise<void> {
     const fixture = isolation();
     const logPath = join(fixture.root, `${label}.log`);
     fixture.env.MAGIC_CONTEXT_LOG_PATH = logPath;
-    const host = await spawnOpencode2({
+    const mock = new MockProvider();
+    const provider = await mock.start();
+    const boot = () => spawnOpencode2({
         existingIsolation: fixture,
+        existingMock: { mock, baseURL: provider.baseURL },
         magicContextPlugin: process.env.MC_RELEASE_PLUGIN,
         modelContextLimit: WINDOW,
         modelOutputLimit: 1_024,
@@ -34,7 +40,9 @@ async function withSession(label: string, testScenario: (s: Session, controls: {
         magicContextConfig: { memory: { enabled: false }, dreamer: { disable: true }, historian: { two_pass: false } },
         historianModel: HISTORIAN_MODEL,
     });
+    let host: Awaited<ReturnType<typeof boot>> | undefined;
     try {
+        host = await boot();
         let partial = false;
         let enforce = false;
         let ordinary = 0;
@@ -83,20 +91,26 @@ async function withSession(label: string, testScenario: (s: Session, controls: {
         }
         await client.session.command({ sessionID: session.id, name: "ctx-flush", text: "" });
         await turn(s, "Turn 26: settle the baseline after the compaction");
+        const restart = async () => { host = await boot(); return host; };
         await testScenario(s, {
-            setPartial(value) { partial = value; },
+            async seedPartial() {
+                partial = true;
+                try {
+                    await seedLegacyPartialRebuild(s, restart, 18);
+                } finally { partial = false; }
+            },
+            seedOldRevert(cutoff) { return seedUnprovedRevert(s, cutoff, restart); },
             enforceWindow() { enforce = true; },
         });
     } finally {
-        try { assertStoreIsolation(host); } finally { await host.stop(); }
+        try { await host?.stopHost(); } finally { await mock.stop(); }
     }
 }
 
 test("a partial rebuild after manual compact keeps the unreached rows visible", async () => {
     await withSession("native-partial", async (s, controls) => {
         const before = state(s);
-        controls.setPartial(true);
-        await recomp(s, "Partial");
+        await controls.seedPartial();
         const after = state(s);
         expect(after.cut?.id).toBe(before.cut?.id);
         expect(after.summaries.at(-1)!.endMessage).toBeLessThan(before.summaries.at(-1)!.endMessage);
@@ -134,8 +148,7 @@ test("a committed revert after the early checkpoint restores the surviving rows 
 test("pressure after a partial rebuild leaves an unreached range larger than the window", async () => {
     await withSession("native-pressure", async (s, controls) => {
         const before = state(s);
-        controls.setPartial(true);
-        await recomp(s, "Partial");
+        await controls.seedPartial();
         const after = state(s);
         const first = after.seq.get(after.summaries.at(-1)!.endId)!;
         const last = before.seq.get(before.summaries.at(-1)!.endId)!;
@@ -145,7 +158,6 @@ test("pressure after a partial rebuild leaves an unreached range larger than the
         const gapTokens = estimateTokens(TURN_TEXT) * unreached.length;
         console.log(`over-window gap: ${unreached.length} long user rows, at least ${gapTokens} estimated tokens (window ${WINDOW})`);
         expect(gapTokens).toBeGreaterThan(WINDOW);
-        controls.setPartial(false);
         controls.enforceWindow();
         for (let index = 0; index < 8; index++) {
             const result = await probe(s, `native-pressure-${index}`);
@@ -153,4 +165,33 @@ test("pressure after a partial rebuild leaves an unreached range larger than the
             console.log(`over-window turn ${index}: sent=${result.sent}, newest summary end=${newest}`);
         }
     });
+}, 600_000);
+
+test("a complete rebuild recovers a session refused before the update", async () => {
+    await withSession("native-old-revert", async (s, controls) => {
+        const before = state(s);
+        expect(before.checkpoints).toHaveLength(2);
+        const early = before.checkpoints[0]!;
+        const firstEnd = before.seq.get(before.summaries[0]!.endId)!;
+        const target = before.conversation.find(row => row.type === "user" && row.seq > early.seq && row.seq <= firstEnd);
+        expect(target).toBeDefined();
+        await controls.seedOldRevert(target!.seq);
+        const seeded = state(s);
+        expect(seeded.cut?.id).toBe(early.id);
+        expect(seeded.summaries).toEqual(before.summaries);
+        expect(seeded.summaries.every(summary => !seeded.seq.has(summary.endId))).toBe(true);
+        const cached = readRows(join(s.host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), `
+            SELECT cached_m0_bytes IS NOT NULL AS present, cached_m0_last_baseline_end_message_id AS endId
+            FROM session_meta WHERE session_id = ?
+        `, s.sessionId);
+        expect(cached).toEqual([{ present: 1, endId: before.summaries.at(-1)!.endId }]);
+        const offset = log(s).length;
+        const refused = await probe(s, "native-old-revert-refused");
+        expect(refused.sent).toBe(0);
+        expect(log(s).slice(offset)).toMatch(/MC-S06.*Host checkpoint replay boundary is unavailable/);
+
+        expect(await recomp(s)).toContain("Magic Recomp — Complete");
+        expect(state(s).summaries.length).toBeGreaterThan(0);
+        expectRestoredHistory(await probe(s, "native-old-revert-recovered"));
+    }, true);
 }, 600_000);
