@@ -91,46 +91,6 @@ impl Near {
     }
 }
 
-/// The times [`summary_times`] found for a session's summaries, by sequence
-/// and range, kept in memory for the session: each takes a few indexed
-/// queries, and an old summary's messages and their times do not change.
-/// A summary whose range is not the one recorded (another summary at the
-/// same sequence after a revert) is looked up again.
-#[derive(Debug, Default)]
-pub(crate) struct NearestTimes(std::sync::Mutex<NearestBySequence>);
-
-/// Each summary sequence's range and the times found for it.
-type NearestBySequence = HashMap<i64, ((i64, i64), (u64, u64))>;
-
-impl NearestTimes {
-    fn lock(&self) -> std::sync::MutexGuard<'_, NearestBySequence> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    pub(crate) fn get(&self, sequence: i64, range: (i64, i64)) -> Option<(u64, u64)> {
-        self.lock()
-            .get(&sequence)
-            .filter(|(kept, _)| *kept == range)
-            .map(|(_, times)| *times)
-    }
-
-    pub(crate) fn keep(&self, sequence: i64, range: (i64, i64), times: (u64, u64)) {
-        self.lock().insert(sequence, (range, times));
-    }
-
-    /// Forget every summary `keep` says no: the session no longer has it.
-    pub(crate) fn retain(&self, keep: impl Fn(i64) -> bool) {
-        self.lock().retain(|sequence, _| keep(*sequence));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.lock().len()
-    }
-}
-
 /// The timed message `near` asks for in the message search index, as its
 /// number and time, in one indexed query. A message the source table records
 /// for another harness at that number is passed over. Inside a range the
@@ -437,17 +397,6 @@ mod tests {
         assert_eq!(near(Near::last_before(4)), Some((1, 100)));
         assert_eq!(near(Near::first_after(1)), Some((4, 400)));
         assert_eq!(near(Near::first_after(4)), None);
-    }
-
-    #[test]
-    fn nearest_times_are_kept_by_sequence_and_range() {
-        let kept = NearestTimes::default();
-        kept.keep(3, (10, 20), (1, 2));
-        assert_eq!(kept.get(3, (10, 20)), Some((1, 2)));
-        // Another summary at the same sequence, after a revert.
-        assert_eq!(kept.get(3, (10, 25)), None);
-        kept.retain(|sequence| sequence < 3);
-        assert_eq!(kept.len(), 0);
     }
 
     #[test]

@@ -298,7 +298,7 @@ fn lose_times(session: &mut Session) {
 /// A boundary message without a time of its own (no text in the search
 /// index) takes the nearest timed message's day: the first and last timed
 /// message inside the summary, else the nearest earlier, else the next
-/// later one. What a fold found this way is kept for the session.
+/// later one, looked up afresh each time.
 #[test]
 fn a_boundary_without_a_time_takes_the_nearest_timed_message() {
     let dir = scratch("head-dates-nearest");
@@ -319,8 +319,8 @@ fn a_boundary_without_a_time_takes_the_nearest_timed_message() {
     ] {
         assert!(m0.contains(heading), "{heading}: {m0}");
     }
-    assert_eq!(session.summaries.nearest_times().len(), 3);
-    // A later fold finds them kept, even when the index has lost them.
+    // Nothing found this way is kept: once the index loses those times,
+    // the next lookup finds no day.
     execute(&session, "DELETE FROM message_fts_rowid_map;");
     let mut rows: Vec<crate::context_db::StoredCompartment> = (1..=3)
         .map(|sequence| crate::context_db::StoredCompartment {
@@ -333,18 +333,9 @@ fn a_boundary_without_a_time_takes_the_nearest_timed_message() {
         })
         .collect();
     session.date_summaries(&mut rows, None);
-    let days: Vec<_> = rows
+    assert!(rows
         .iter()
-        .map(|row| (row.start_date.as_deref(), row.end_date.as_deref()))
-        .collect();
-    assert_eq!(
-        days,
-        [
-            (Some("2026-03-01"), Some("2026-03-01")),
-            (Some("2026-03-01"), Some("2026-03-01")),
-            (Some("2026-03-04"), Some("2026-03-04")),
-        ]
-    );
+        .all(|row| row.start_date.is_none() && row.end_date.is_none()));
     std::fs::remove_dir_all(dir).unwrap();
 
     // Before the session's first timed message: the next later one.
@@ -368,7 +359,6 @@ fn a_boundary_without_a_time_takes_the_nearest_timed_message() {
     build(&mut session, &settings).unwrap();
     let m0 = shown(&session, head::M0_ID);
     assert!(m0.contains("## 1-4 · Work 1"), "{m0}");
-    assert_eq!(session.summaries.nearest_times().len(), 0);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -474,5 +464,42 @@ fn nearest_message_dating_time() {
     };
     timed("first fold after a start");
     timed("later fold");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A day found by the nearest timed message is looked up afresh at every
+/// full rebuild: when a closer time arrives, a warm rebuild and a rebuild
+/// after a restart over the same stores both show the new day, the same
+/// bytes.
+#[test]
+fn an_approximated_day_follows_the_stores_at_every_full_rebuild() {
+    let dir = scratch("head-dates-approximated");
+    let (mut session, settings) = timed_head(&dir, |_| 0);
+    search_rows(&session, &[(3, DAY0)]);
+    build(&mut session, &settings).unwrap();
+    assert!(shown(&session, head::M0_ID).contains("## 5-8 · 2026-03-01 · Work 2"));
+    // A time inside summary 2 arrives; its boundaries stay untimed.
+    search_rows(&session, &[(6, DAY0 + 9 * 24 * 3_600_000)]);
+    session.fold_due = true;
+    build(&mut session, &settings);
+    let warm = shown(&session, head::M0_ID);
+    assert!(warm.contains("## 5-8 · 2026-03-10 · Work 2"), "{warm}");
+    let store = session.store.as_ref().unwrap();
+    store.save(&session.key, &session.durable()).unwrap();
+    let (mut restored, _, _, _, _) = fixture();
+    restored.db = session.db.clone();
+    restored.store = session.store.clone();
+    restored.features.summarizer = true;
+    restored.project = session.project.clone();
+    restored.load_summaries();
+    restored.restore(store.load(&session.key).unwrap());
+    restored.latest = session.latest.clone();
+    restored.latest_unknown = false;
+    restored.index.extend(session.index.entries().to_vec());
+    restored.index_ready = true;
+    assert_eq!(shown(&restored, head::M0_ID), warm);
+    restored.fold_due = true;
+    build(&mut restored, &settings);
+    assert_eq!(shown(&restored, head::M0_ID), warm);
     std::fs::remove_dir_all(dir).unwrap();
 }

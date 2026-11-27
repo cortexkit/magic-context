@@ -433,13 +433,13 @@ impl Session {
             .collect();
         // A boundary message with no time of its own: the nearest timed
         // message ([`crate::summary::dates::summary_times`]), from the saved
-        // times and the search index, one indexed query at a time, kept for
-        // the session.
+        // times and the search index, one indexed query at a time. It is an
+        // approximation, so it is looked up afresh at every render and never
+        // kept: when a better time arrives, the next full rebuild shows it.
         let undated: Vec<usize> = (0..rows.len())
             .filter(|&i| days[i].0.is_none() || days[i].1.is_none())
             .collect();
         if !undated.is_empty() {
-            let nearest = self.summaries.nearest_times();
             let mut resolve = |conn: Option<&rusqlite::Connection>| {
                 let times = crate::summary::dates::StoredTimes {
                     saved: |near| {
@@ -460,12 +460,11 @@ impl Session {
                 };
                 for &i in &undated {
                     let row = &rows[i];
-                    let range = (row.start_message, row.end_message);
-                    let found = nearest.get(row.sequence, range).or_else(|| {
-                        let found = crate::summary::dates::summary_times(&times, range.0, range.1)?;
-                        nearest.keep(row.sequence, range, found);
-                        Some(found)
-                    });
+                    let found = crate::summary::dates::summary_times(
+                        &times,
+                        row.start_message,
+                        row.end_message,
+                    );
                     if let Some((first, last)) = found {
                         let (start, end) = &mut days[i];
                         *start = start
