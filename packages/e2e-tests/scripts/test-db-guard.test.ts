@@ -6,7 +6,7 @@ import { createE2ETempDir } from "../src/temp-dir";
 import { openTestDb } from "../src/test-db";
 import { databaseOpenViolations } from "./test-db-guard";
 
-test("e2e SQLite handles use openTestDb or immediately set their own longer timeout", async () => {
+test("e2e SQLite handles use openTestDb or set a lock wait before their first use", async () => {
     const root = resolve(import.meta.dir, "..");
     const violations: string[] = [];
     let scanned = 0;
@@ -41,41 +41,78 @@ test("the guard reports named, renamed, default and namespace SQLite constructor
     }
 });
 
-test("only an allowlisted handle's first use may set its longer timeout", () => {
-    const path = "src/rust-harness.ts";
+test("each handle must set its own timeout before use, not in a conditional or callback", () => {
+    const path = "tests/example.test.ts";
     const prefix = 'import { Database } from "bun:sqlite";\nconst db = new Database(":memory:");\n';
-    expect(
-        databaseOpenViolations(
-            path,
-            `${prefix}try { db.exec("PRAGMA busy_timeout=30000"); db.query("SELECT 1"); } finally { db.close(); }`,
-        ),
-    ).toEqual([]);
+    for (const timeout of [5000, 30000]) {
+        expect(
+            databaseOpenViolations(
+                path,
+                `${prefix}try { db.exec("PRAGMA busy_timeout=${timeout}"); db.query("SELECT 1"); } finally { db.close(); }`,
+            ),
+        ).toEqual([]);
+    }
     for (const suffix of [
         'const other = new Database(":memory:"); other.exec("PRAGMA busy_timeout=30000"); db.query("SELECT 1");',
         'db.query("SELECT 1"); db.exec("PRAGMA busy_timeout=30000");',
         'db.exec("PRAGMA busy_timeout=0");',
-        'db.exec("PRAGMA busy_timeout=5000");',
+        'db.exec("PRAGMA busy_timeout=4999");',
         'const later = () => db.exec("PRAGMA busy_timeout=30000"); db.query("SELECT 1");',
         'if (false) db.exec("PRAGMA busy_timeout=30000"); db.query("SELECT 1");',
         "db.close();",
     ]) {
         expect(databaseOpenViolations(path, prefix + suffix).length).toBeGreaterThan(0);
     }
-    expect(
-        databaseOpenViolations(
-            "tests/not-allowlisted.test.ts",
-            `${prefix}db.exec("PRAGMA busy_timeout=30000");`,
-        ),
-    ).toHaveLength(1);
 });
 
-test("the helper, generated extension source, comments and unrelated Database classes are not violations", () => {
+test("the guard checks the SQLite wrapper, Node, Bun factory, and local helper opens", () => {
+    const path = "tests/example.test.ts";
+    const cases = [
+        [
+            'import { Database as ContextDb } from "../../plugin/src/shared/sqlite";',
+            "new ContextDb(path, { readonly: true })",
+        ],
+        ['import * as nodeSqlite from "node:sqlite";', "new nodeSqlite.DatabaseSync(path)"],
+        ['const { DatabaseSync: Db } = await import("node:sqlite");', "new Db(path)"],
+        ['const { Database } = require("bun:sqlite");', "Database.open(path)"],
+        [
+            'import { createSqliteTurnDatabase as connect } from "../../plugin/src/shared/sqlite.ts";',
+            "connect(path)",
+        ],
+    ];
+    for (const [importLine, open] of cases) {
+        const prefix = `${importLine}\nfunction readRows(path: string) {\n    const db = ${open};\n`;
+        const read = '    return db.prepare("SELECT 1").get();\n}';
+        expect(databaseOpenViolations(path, prefix + read)).toEqual([
+            `${path}:3: use openTestDb or set PRAGMA busy_timeout = 5000 on this handle before first use`,
+        ]);
+        expect(
+            databaseOpenViolations(path, `${prefix}    db.exec("PRAGMA busy_timeout = 5000");\n${read}`),
+        ).toEqual([]);
+    }
+});
+
+test("a reasoned no-wait comment exempts only the adjacent open", () => {
+    const path = "tests/contention.test.ts";
+    const source = [
+        'import { Database } from "bun:sqlite";',
+        '// sqlite-busy-timeout: no-wait -- This contender must fail immediately on a held lock.',
+        'const contender = new Database(path);',
+        '// sqlite-busy-timeout: no-wait --',
+        'const reader = new Database(path, { readonly: true });',
+    ].join("\n");
+    expect(databaseOpenViolations(path, source)).toEqual([
+        `${path}:5: use openTestDb or set PRAGMA busy_timeout = 5000 on this handle before first use`,
+    ]);
+});
+
+test("the guard checks the helper implementation, but ignores generated source, comments and unrelated classes", () => {
     expect(
         databaseOpenViolations(
             "src/test-db.ts",
-            'import { Database } from "bun:sqlite"; new Database(":memory:");',
+            'import { Database } from "bun:sqlite"; class TestDatabase extends Database {}\nnew TestDatabase(":memory:");',
         ),
-    ).toEqual([]);
+    ).toHaveLength(1);
     expect(
         databaseOpenViolations(
             "tests/example.test.ts",

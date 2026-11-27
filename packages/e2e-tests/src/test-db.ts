@@ -21,9 +21,9 @@ class TestDatabase extends Database {
  * is the last WAL connection, its cleanup can take an exclusive lock just
  * as a restarted host opens the store, before the host sets its busy timeout.
  *
- * Every test that opens a DB directly (reader or writer) must use this helper
- * unless it immediately sets its own longer timeout. The test-db guard checks
- * each constructor so a bare `new Database(...)` cannot reintroduce the flake.
+ * Open test readers and writers here, or set a timeout of at least five seconds
+ * before the handle's first use. For a deliberately fail-fast connection, put
+ * `// sqlite-busy-timeout: no-wait -- <reason>` directly above the open.
  */
 export function openTestDb(
     path: string,
