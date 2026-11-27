@@ -22,13 +22,13 @@ import {
     attributeRunnerWave,
     emptyRunnerWaveState,
     observeRunnerWave,
+    runnerWaveClosesAt,
     runnerWaveMembersText,
     runnerWaveProvenAccounts,
     runnerWaveStateSchema,
     runnerWaveTotals,
-    ZERO_READ_WAVE_LIFETIME_MS,
-    ZERO_READ_WAVE_SUMMARY_MS,
     type RunnerWaveState,
+    type RunnerZeroReadWave,
 } from "./cache-bust-runner-wave";
 import {
     emptyRunnerViewAttribution,
@@ -434,24 +434,44 @@ export async function scanRunnerFeed(args: {
         summary.bounded = true;
         return summary;
     }
+    let settlingWaveAt = Infinity;
     const ready = Object.entries(state.heads)
         .flatMap(([key, head]) => {
             const ordered = Object.entries(head.pending).sort(
                 (a, b) => a[1].row.occurred_at_ms - b[1].row.occurred_at_ms,
             );
             const barrier = ordered.findIndex(([, pending]) => pending.firstRun >= state.run);
+            if (barrier >= 0) for (const [, { row }] of ordered.slice(barrier)) {
+                if (heads.has(row.session) && row.provider === "anthropic" && row.model && row.prompt &&
+                    row.cache_read === 0 && (row.cache_write ?? 0) >= 20_000) {
+                    settlingWaveAt = Math.min(settlingWaveAt, row.occurred_at_ms);
+                    break;
+                }
+            }
             return ordered
                 .slice(0, barrier < 0 ? ordered.length : barrier)
                 .map(([id, pending]) => ({ key, id, head, row: pending.row }));
         })
         .sort((a, b) => a.row.occurred_at_ms - b.row.occurred_at_ms);
     const rebuildAlerts = new Map<string, RunnerAlert>();
-    const advanceWave = (at: number): void => {
-        const closed = advanceRunnerWave(state.wave, at);
-        if (closed) args.log?.(JSON.stringify({
-            kind: "runner_zero_read_wave_closed", startedAt: closed.startedAt,
-            at: closed.startedAt + ZERO_READ_WAVE_LIFETIME_MS, ...runnerWaveTotals(closed),
+    const closeWave = async (wave: RunnerZeroReadWave, at: number, supersededBy?: number): Promise<void> => {
+        const totals = runnerWaveTotals(wave);
+        args.log?.(JSON.stringify({
+            kind: "runner_zero_read_wave_closed", startedAt: wave.startedAt, at,
+            ...(supersededBy === undefined ? {} : { supersededBy }), ...totals,
         }));
+        if (state.sent[`runner-zero-read-wave:${wave.startedAt}`] === undefined ||
+            totals.sessions <= wave.summarizedMembers) return;
+        const member = wave.members.at(-1)!;
+        await args.emit({
+            id: `runner-zero-read-wave-closed:${wave.startedAt}`, session: member.session,
+            at, class: "zero_read_wave", rewrittenTokens: totals.written, urgency: "normal", analyzer: "",
+            detail: `The zero_read_wave that began at ${new Date(wave.startedAt).toISOString()} closed. Final totals: ${totals.sessions} sessions, ${totals.written} tokens written.`,
+        });
+    };
+    const advanceWave = async (at: number): Promise<void> => {
+        const closed = advanceRunnerWave(state.wave, at);
+        if (closed) await closeWave(closed, runnerWaveClosesAt(closed));
     };
     for (const { id, head, row } of ready) {
         if (clock() >= deadline) {
@@ -460,17 +480,17 @@ export async function scanRunnerFeed(args: {
         }
         const facts = heads.get(row.session);
         if (!facts || row.occurred_at_ms > now) continue;
-        delete head.pending[id];
-        if (!row.prompt) {
-            summary.skipped++;
-            continue;
+        // A row still stabilizing can extend the wave past its current deadline.
+        // Don't judge later rows against a closed wave before that row is ready.
+        if (state.wave.open) {
+            const closesAt = runnerWaveClosesAt(state.wave.open);
+            if (settlingWaveAt < closesAt && row.occurred_at_ms >= closesAt) break;
         }
-        if (row.provider !== "anthropic") {
-            summary.not_metered++;
-            continue;
-        }
-        if (row.cache_read === undefined || row.cache_write === undefined || !row.model) {
-            summary.skipped++;
+        if (!row.prompt || row.provider !== "anthropic" ||
+            row.cache_read === undefined || row.cache_write === undefined || !row.model) {
+            delete head.pending[id];
+            if (row.prompt && row.provider !== "anthropic") summary.not_metered++;
+            else summary.skipped++;
             continue;
         }
         const stepFacts = runnerStepFacts(row);
@@ -483,13 +503,16 @@ export async function scanRunnerFeed(args: {
             ...(stepFacts ? { facts: stepFacts } : {}),
         };
         const previous = head.last;
+        // Sending a closing summary saves the state file. Leave this step pending
+        // so a restart can still judge it if the process stops during delivery.
+        if (previous && step.at > previous.at) await advanceWave(step.at);
+        delete head.pending[id];
         if (previous && step.at <= previous.at) continue;
         head.last = step;
         head.seen[id] = { at: step.at, read: step.read, write: step.write, cursor: row.cursor };
         const viewAttribution = head.viewAttribution ??= emptyRunnerViewAttribution();
         observeRunnerViewStep(viewAttribution, facts.decisions, step.at);
         if (!previous) continue;
-        advanceWave(step.at);
         const decided = classifyRunnerFeedStep(previous, step, facts.decisions, { viewAttribution }, row.cause);
         const classified: RunnerClassification = decided.classification;
         // Compare Astrocyte's cause with the log-timing guess it replaced.
@@ -501,10 +524,6 @@ export async function scanRunnerFeed(args: {
         if (waveResult.member) {
             attributeRunnerWave(classified, state.wave.open!.startedAt, waveResult.member);
         }
-        if (waveResult.superseded) args.log?.(JSON.stringify({
-            kind: "runner_zero_read_wave_closed", startedAt: waveResult.superseded.startedAt,
-            at: step.at, supersededBy: waveResult.opened!.startedAt, ...runnerWaveTotals(waveResult.superseded),
-        }));
         if (waveResult.opened) {
             args.log?.(JSON.stringify({ kind: "runner_zero_read_wave_opened", startedAt: waveResult.opened.startedAt, members: waveResult.opened.members, ...runnerWaveTotals(waveResult.opened) }));
             // Attribute earlier members' saved summary rows to the opened wave as well.
@@ -577,12 +596,12 @@ export async function scanRunnerFeed(args: {
             const proof = accounts
                 ? `The account change is proven by the runner's account facts: every member's account changed (${accounts}).`
                 : "The feed carries no account, so this is not proven. A tool or system change for many sessions looks the same from here.";
-            wave.lastSummaryAt = now;
             await emit({
                 ...alert, id: `runner-zero-read-wave:${wave.startedAt}`, class: "zero_read_wave",
                 rewrittenTokens: runnerWaveTotals(wave).written,
                 detail: `A zero_read_wave began at ${new Date(wave.startedAt).toISOString()}. Two sessions lost their whole cache within ${seconds} seconds of each other. Members so far: ${runnerWaveMembersText(wave.members)}. This is what an account that stopped being given looks like: a limit, a hold or a lost sign-in. ${proof} Ask the runner's owner which account stopped being given at about ${new Date(wave.startedAt).toISOString()}.`,
             });
+            if (waveResult.superseded) await closeWave(waveResult.superseded, step.at, wave.startedAt);
         }
         if (classified.class === "unexplained" && classified.rewrittenTokens >= 20_000)
             await emit(alert);
@@ -651,21 +670,7 @@ export async function scanRunnerFeed(args: {
         state.sent[alert.id] = alert.at;
         await args.emit(alert);
     }
-    if (!summary.bounded) advanceWave(now);
-    const wave = state.wave.open;
-    if (wave && wave.members.length > wave.summarizedMembers &&
-        now - (wave.lastSummaryAt ?? now) >= ZERO_READ_WAVE_SUMMARY_MS) {
-        const members = wave.members.slice(wave.summarizedMembers);
-        const totals = runnerWaveTotals(wave);
-        wave.summarizedMembers = wave.members.length;
-        wave.lastSummaryAt = now;
-        const member = members.at(-1)!;
-        if (now - member.at <= args.wakeAge) await args.emit({
-            id: `runner-zero-read-wave-summary:${wave.startedAt}:${now}`, session: member.session,
-            at: now, class: "zero_read_wave", rewrittenTokens: totals.written, urgency: "normal", analyzer: "",
-            detail: `The zero_read_wave that began at ${new Date(wave.startedAt).toISOString()} has new members: ${runnerWaveMembersText(members)}. Running totals: ${totals.sessions} sessions, ${totals.written} tokens written.`,
-        });
-    }
+    if (!summary.bounded) await advanceWave(Math.min(now, settlingWaveAt));
     // A view can be accepted several scans before the next metered row. Save
     // the acceptance in this monitor's state now: the module log it was read
     // from can rotate before that row arrives, and the row's rewrite would then

@@ -97,6 +97,17 @@ export interface RunnerCacheFacts {
     viewAttribution?: RunnerViewAttributionState;
 }
 
+export function runnerIdleExpiry(
+    previousAt: number,
+    currentAt: number,
+    facts: Pick<RunnerCacheFacts, "cacheTtlMs" | "lastTouchAt" | "previousCompletedAt"> = {},
+): { idleMs: number; ttlMs: number } | undefined {
+    const lastTouch = Math.max(previousAt, facts.lastTouchAt ?? -Infinity, facts.previousCompletedAt ?? -Infinity);
+    const idleMs = currentAt - lastTouch;
+    const ttlMs = facts.cacheTtlMs ?? 3_600_000;
+    return idleMs > ttlMs ? { idleMs, ttlMs } : undefined;
+}
+
 /** Providers refresh the cached prompt when a request starts, so a start-to-start gap needs no expiry margin. */
 export function classifyRunnerStep(
     previous: RunnerMeterStep,
@@ -107,7 +118,6 @@ export function classifyRunnerStep(
     const views = facts.viewAttribution ?? emptyRunnerViewAttribution();
     observeRunnerViewStep(views, decisions, previous.at);
     observeRunnerViewStep(views, decisions, current.at);
-    const cacheTtlMs = facts.cacheTtlMs ?? 3_600_000;
     const previousTotal = previous.read + previous.write;
     const window = decisions.filter(
         (event) => event.at > (facts.previousCompletedAt ?? previous.at) && event.at <= current.at,
@@ -163,16 +173,12 @@ export function classifyRunnerStep(
             causes(event).some((cause) => ["SurfaceChange", "ModelChange"].includes(cause)),
     );
     if (plan) return result("plan_changed", plan.line ?? plan.detail);
-    const lastTouch = Math.max(
-        previous.at,
-        facts.lastTouchAt ?? -Infinity,
-        facts.previousCompletedAt ?? -Infinity,
-    );
-    if (current.at - lastTouch > cacheTtlMs) {
+    const expiry = runnerIdleExpiry(previous.at, current.at, facts);
+    if (expiry) {
         const applied = creditRunnerViewsOnExpiry(views, current.at);
         return result(
             "expired",
-            `idle ${current.at - lastTouch}ms exceeds lifetime ${cacheTtlMs}ms${applied ? `; ${applied}` : ""}`,
+            `idle ${expiry.idleMs}ms exceeds lifetime ${expiry.ttlMs}ms${applied ? `; ${applied}` : ""}`,
         );
     }
     const view = creditRunnerViewRewrite(views, decisions, current.at);

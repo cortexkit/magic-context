@@ -11,6 +11,9 @@ import { loadSentinelState, saveSentinelState } from "./cache-bust-sentinel";
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const T0 = Date.parse("2026-10-01T05:00:00Z");
+const NOV_WAVE = Date.parse("2026-11-26T19:08:06Z");
+const NOV_PREVIOUS = Date.parse("2026-11-26T14:08:33Z");
+const NOV_LATE = Date.parse("2026-11-26T23:52:59Z");
 const dirs: string[] = [];
 afterEach(() => {
     for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -25,6 +28,16 @@ function pair(session: string, at: number, previous = T0 - MINUTE): RunnerFeedRo
     return [row(session, previous, 100_000, 0), row(session, at)];
 }
 const opening = () => [...pair("alpha", T0), ...pair("beta", T0 + 2 * MINUTE), ...pair("gamma", T0 + 3 * MINUTE)];
+const novemberOpening = () => [
+    ...pair("alpha", NOV_WAVE, NOV_WAVE - MINUTE),
+    ...pair("beta", NOV_WAVE + 2 * MINUTE, NOV_WAVE - MINUTE),
+];
+function accountMove(session: string, previous: number, at: number, cacheTtlMs?: number, completed = previous): RunnerFeedRow[] {
+    return [
+        { ...row(session, previous, 100_000, 0), account_ref: "a".repeat(64), cache_ttl_ms: cacheTtlMs, finished_at_ms: completed },
+        { ...row(session, at), account_ref: "b".repeat(64), cause: "account_or_model_changed", started_at_ms: at },
+    ];
+}
 function source(rows: RunnerFeedRow[]): RunnerMeterSource {
     let first = true;
     return { id: "astrocyte", read: async () => {
@@ -116,7 +129,7 @@ test("a session that read normally after T0 and then reads zero is a new urgent 
 });
 
 test("a fresh burst while an older wave is open opens a new wave with one wake", async () => {
-    const later = T0 + 3 * HOUR;
+    const later = T0 + 8 * MINUTE;
     const s = fixture();
     await s.start();
     await s.feed([
@@ -125,9 +138,12 @@ test("a fresh burst while an older wave is open opens a new wave with one wake",
         ...pair("third", later + 6 * MINUTE, later - 3 * MINUTE)], later + 7 * MINUTE);
     // The first uncovered rewrite still wakes on its own; the second opens the
     // new wave; the third joins it silently.
-    expect(s.alerts.map((alert) => [alert.session, alert.class])).toEqual([
+    expect(s.alerts.filter((alert) => alert.urgency === "high").map((alert) => [alert.session, alert.class])).toEqual([
         ["alpha", "unexplained"], ["beta", "zero_read_wave"],
         ["first", "unexplained"], ["second", "zero_read_wave"],
+    ]);
+    expect(s.alerts.filter((alert) => alert.urgency === "normal")).toMatchObject([
+        { class: "zero_read_wave", rewrittenTokens: 300_000 },
     ]);
     expect(s.args.state.wave.open?.startedAt).toBe(later);
     expect(s.args.state.wave.open?.members.map((member) => member.session)).toEqual(["first", "second", "third"]);
@@ -136,7 +152,7 @@ test("a fresh burst while an older wave is open opens a new wave with one wake",
 });
 
 test("a second rewrite of an open wave's member stays its own urgent event", async () => {
-    const later = T0 + 3 * HOUR;
+    const later = T0 + 8 * MINUTE;
     const s = fixture();
     await s.start();
     await s.feed([row("alpha", later - MINUTE, 100_000, 0), row("alpha", later),
@@ -167,6 +183,87 @@ test("expiry wins over the wave, while model changes, small writes and nonzero r
     expect(noWave.args.state.wave.open).toBeUndefined();
 });
 
+test("an account move cannot make an already expired cache a November wave member", async () => {
+    const expiredBeforeClose = accountMove("gamma", NOV_PREVIOUS, NOV_WAVE + 3 * MINUTE, HOUR);
+    const expiredLate = accountMove("delta", NOV_PREVIOUS, NOV_LATE);
+    const s = fixture([...novemberOpening(), ...expiredBeforeClose], NOV_WAVE + 3 * MINUTE);
+    await s.start();
+    expect(s.args.state.wave.open?.members.map((member) => member.session)).toEqual(["alpha", "beta"]);
+    await s.feed([...pair("alpha", NOV_LATE - 1000, NOV_LATE - MINUTE), ...expiredLate], NOV_LATE);
+    expect(s.args.state.wave.open).toBeUndefined();
+    expect(s.args.state.wave.candidates.map((member) => member.session)).toEqual(["alpha"]);
+
+    const analyzed = await analyzeRunnerFeed(source([...novemberOpening(), ...expiredBeforeClose]), s.args.heads, "gamma");
+    expect(analyzed.at(-1)?.classification?.class).toBe("scope_changed");
+});
+
+test("account moves use the prior request's reported cache lifetime and finish time", async () => {
+    const short = accountMove("gamma", NOV_WAVE - 3 * MINUTE, NOV_WAVE + 3 * MINUTE, 5 * MINUTE);
+    const warm = accountMove("delta", NOV_WAVE - 3 * MINUTE, NOV_WAVE + 3 * MINUTE, 5 * MINUTE, NOV_WAVE - 2 * MINUTE);
+    const longer = accountMove("epsilon", NOV_WAVE - HOUR, NOV_WAVE + 3 * MINUTE, 2 * HOUR);
+    const s = fixture([...novemberOpening(), ...short, ...warm, ...longer], NOV_WAVE + 4 * MINUTE);
+    await s.start();
+    expect(s.args.state.wave.open?.members.map((member) => member.session)).toEqual(["alpha", "beta", "delta", "epsilon"]);
+});
+
+test("the November wave stops taking members fifteen minutes after its newest member", async () => {
+    const newest = NOV_WAVE + 9 * MINUTE;
+    const closes = newest + 15 * MINUTE;
+    const s = fixture(novemberOpening(), NOV_WAVE + 2 * MINUTE);
+    await s.start();
+    await s.feed(pair("gamma", newest, NOV_WAVE - MINUTE), newest);
+    await s.feed([], closes - 1);
+    expect(s.args.state.wave.open?.members).toHaveLength(3);
+    await s.feed(pair("delta", closes, NOV_WAVE - MINUTE), closes);
+    expect(s.args.state.wave.open).toBeUndefined();
+    expect(s.alerts.at(-1)).toMatchObject({ session: "delta", class: "unexplained", urgency: "high" });
+    expect(s.alerts.at(-1)?.detail).not.toContain("zero_read_wave is open");
+    expect(s.logs.map((line) => JSON.parse(line)).filter((line) => line.kind === "runner_zero_read_wave_closed"))
+        .toMatchObject([{ startedAt: NOV_WAVE, at: closes, sessions: 3 }]);
+});
+
+test("the closing summary is the only follow-up and counts all members, including same-scan joins", async () => {
+    const s = fixture([...novemberOpening(), ...pair("gamma", NOV_WAVE + 3 * MINUTE, NOV_WAVE - MINUTE)], NOV_WAVE + 3 * MINUTE);
+    await s.start();
+    expect(s.alerts.at(-1)).toMatchObject({ class: "zero_read_wave", urgency: "high", rewrittenTokens: 200_000 });
+    const [before, after] = pair("delta", NOV_WAVE + 9 * MINUTE, NOV_WAVE - MINUTE);
+    await s.feed([before!, { ...after!, cache_write: 123_456, prompt: 123_456 }], NOV_WAVE + 10 * MINUTE);
+    await s.feed([], NOV_WAVE + 24 * MINUTE - 1);
+    expect(s.alerts).toHaveLength(2);
+    await s.feed([], NOV_WAVE + 24 * MINUTE);
+    expect(s.alerts).toHaveLength(3);
+    expect(s.alerts.at(-1)).toMatchObject({ class: "zero_read_wave", urgency: "normal", rewrittenTokens: 423_456 });
+    expect(s.alerts.at(-1)?.detail).toContain("4 sessions, 423456 tokens written");
+    await s.feed([], NOV_WAVE + 93 * MINUTE);
+    await s.feed([], NOV_LATE);
+    expect(s.alerts).toHaveLength(3);
+
+    const unchanged = fixture(novemberOpening(), NOV_WAVE + 2 * MINUTE);
+    await unchanged.start();
+    await unchanged.feed([], NOV_WAVE + 17 * MINUTE);
+    expect(unchanged.args.state.wave.open).toBeUndefined();
+    expect(unchanged.alerts).toHaveLength(2);
+});
+
+test("a member delivered after the wall-clock deadline joins by step time, but an out-of-window step does not", async () => {
+    const initialClose = NOV_WAVE + 17 * MINUTE;
+    const inside = initialClose - 1000;
+    const finalClose = inside + 15 * MINUTE;
+    const s = fixture(novemberOpening(), NOV_WAVE + 2 * MINUTE);
+    await s.start();
+    expect(s.alerts.at(-1)).toMatchObject({ class: "zero_read_wave", urgency: "high" });
+    await s.feed([
+        ...pair("gamma", inside, NOV_WAVE - MINUTE),
+        ...pair("delta", finalClose + 1000, NOV_WAVE - MINUTE),
+    ], finalClose + 1000);
+    expect(s.alerts.slice(2).map((alert) => [alert.session, alert.class, alert.urgency])).toEqual([
+        ["gamma", "zero_read_wave", "normal"], ["delta", "unexplained", "high"],
+    ]);
+    const observations = Object.values(s.args.state.heads).flatMap((head) => head.summary);
+    expect(observations.find((step) => step.at === inside)?.class).toBe("zero_read_wave");
+    expect(observations.find((step) => step.at === finalClose + 1000)?.class).toBe("unexplained");
+});
+
 test("the exact twenty-thousand-token boundaries qualify, including direct prompt tokens", async () => {
     const rows = ["alpha", "beta", "gamma"].flatMap((session, i) => [
         { ...row(session, T0 - MINUTE, 19_000, 0), prompt: 20_000 }, row(session, T0 + i * MINUTE, 0, 20_000),
@@ -195,47 +292,25 @@ test("accepted views, provider-forgot rides and plan changes keep their cause ou
     expect(classes).toContain("plan_changed");
 });
 
-test("normal summaries list new members and totals no more often than every thirty minutes", async () => {
-    const s = fixture(opening(), T0 + 3 * MINUTE);
-    await s.start();
-    await s.feed(pair("delta", T0 + 9 * MINUTE), T0 + 10 * MINUTE);
-    expect(s.alerts).toHaveLength(2);
-    await s.feed([], T0 + 33 * MINUTE - 1);
-    expect(s.alerts).toHaveLength(2);
-    await s.feed([], T0 + 33 * MINUTE);
-    expect(s.alerts.at(-1)).toMatchObject({ class: "zero_read_wave", urgency: "normal", rewrittenTokens: 400_000 });
-    expect(s.alerts.at(-1)!.detail).toContain("session=delta");
-    expect(s.alerts.at(-1)!.detail).toContain("4 sessions, 400000 tokens written");
-    await s.feed(pair("epsilon", T0 + 35 * MINUTE), T0 + 36 * MINUTE);
-    await s.feed([], T0 + 63 * MINUTE - 1);
-    expect(s.alerts).toHaveLength(3);
-    await s.feed([], T0 + 63 * MINUTE);
-    expect(s.alerts).toHaveLength(4);
-    expect(s.alerts.at(-1)!.detail).toContain("session=epsilon");
-    expect(s.alerts.at(-1)!.detail).not.toContain("session=delta");
-    expect(s.alerts.at(-1)!.detail).toContain("5 sessions, 500000 tokens written");
-    await s.feed([], T0 + 65 * MINUTE);
-    expect(s.alerts).toHaveLength(4);
-});
-
-test("a wave closes at six hours even without feed rows, logs once, and the next wave starts from nothing", async () => {
+test("a wave closes even without feed rows, logs once, and the next wave starts from nothing", async () => {
+    const closes = T0 + 18 * MINUTE;
     const s = fixture();
     await s.start();
-    await s.feed([], T0 + 6 * HOUR - 1);
+    await s.feed([], closes - 1);
     expect(s.args.state.wave.open).toBeDefined();
-    await s.feed([], T0 + 6 * HOUR);
+    await s.feed([], closes);
     expect(s.args.state.wave).toEqual({ candidates: [] });
-    await s.feed(pair("delta", T0 + 6 * HOUR + MINUTE, T0 + 6 * HOUR), T0 + 6 * HOUR + MINUTE);
+    await s.feed(pair("delta", closes + MINUTE, closes), closes + MINUTE);
     expect(s.alerts.at(-1)).toMatchObject({ session: "delta", class: "unexplained", urgency: "high" });
     expect(s.args.state.wave.open).toBeUndefined();
-    await s.feed([...pair("epsilon", T0 + 6 * HOUR + 2 * MINUTE, T0 + 6 * HOUR),
-        ...pair("zeta", T0 + 6 * HOUR + 3 * MINUTE, T0 + 6 * HOUR)], T0 + 6 * HOUR + 3 * MINUTE);
-    expect(s.args.state.wave.open?.startedAt).toBe(T0 + 6 * HOUR + MINUTE);
+    await s.feed([...pair("epsilon", closes + 2 * MINUTE, closes),
+        ...pair("zeta", closes + 3 * MINUTE, closes)], closes + 3 * MINUTE);
+    expect(s.args.state.wave.open?.startedAt).toBe(closes + MINUTE);
     const logs = s.logs.map((line) => JSON.parse(line));
     expect(logs.filter((line) => line.kind === "runner_zero_read_wave_opened")).toHaveLength(2);
     expect(logs.filter((line) => line.kind === "runner_zero_read_wave_member")).toHaveLength(6);
     expect(logs.filter((line) => line.kind === "runner_zero_read_wave_closed")).toMatchObject([
-        { startedAt: T0, at: T0 + 6 * HOUR, sessions: 3, written: 300_000 },
+        { startedAt: T0, at: closes, sessions: 3, written: 300_000 },
     ]);
 });
 
@@ -246,7 +321,7 @@ test("candidate sessions expire after ten minutes and closed waves keep no membe
     expect(s.args.state.wave).toEqual({ candidates: [] });
 });
 
-test("wave candidates, members and summary timing survive a watcher state-file restart; old files load", async () => {
+test("wave candidates, members and the closing summary survive a watcher state-file restart; old files load", async () => {
     const dir = createTestTempDirFromPath(join(tmpdir(), "runner-wave-"));
     dirs.push(dir);
     const path = join(dir, "sentinel.json");
@@ -263,12 +338,15 @@ test("wave candidates, members and summary timing survive a watcher state-file r
     restart();
     await s.feed(pair("delta", T0 + 9 * MINUTE), T0 + 10 * MINUTE);
     restart();
-    await s.feed([], T0 + 33 * MINUTE);
+    // The sentinel was down at the deadline, so the next scan closes the saved wave.
+    await s.feed([], T0 + 93 * MINUTE);
     expect(s.alerts.map((alert) => alert.urgency)).toEqual(["high", "high", "normal"]);
+    expect(s.alerts.at(-1)).toMatchObject({ rewrittenTokens: 400_000, at: T0 + 24 * MINUTE });
     restart();
-    await s.feed([row("alpha", T0 + 34 * MINUTE)], T0 + 35 * MINUTE);
+    await s.feed([row("alpha", T0 + 93 * MINUTE, 100_000, 0), row("alpha", T0 + 94 * MINUTE)], T0 + 95 * MINUTE);
+    expect(s.alerts.map((alert) => alert.urgency)).toEqual(["high", "high", "normal", "high"]);
     expect(s.alerts.at(-1)).toMatchObject({ class: "unexplained", urgency: "high" });
-    expect(s.args.state.wave.open?.members).toHaveLength(4);
+    expect(s.args.state.wave.open).toBeUndefined();
     const old = { ...emptyRunnerState() } as Partial<ReturnType<typeof emptyRunnerState>>;
     delete old.wave;
     writeFileSync(path, JSON.stringify({ version: 1, sessions: {}, windows: {}, runner: old }));

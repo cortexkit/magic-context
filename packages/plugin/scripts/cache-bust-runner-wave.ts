@@ -1,9 +1,8 @@
 import { z } from "zod";
-import type { RunnerClassification, RunnerMeterStep } from "./cache-bust-runner-classification";
+import { runnerIdleExpiry, type RunnerClassification, type RunnerMeterStep } from "./cache-bust-runner-classification";
 
 export const ZERO_READ_WAVE_WINDOW_MS = 10 * 60_000;
-export const ZERO_READ_WAVE_LIFETIME_MS = 6 * 3_600_000;
-export const ZERO_READ_WAVE_SUMMARY_MS = 30 * 60_000;
+const ZERO_READ_WAVE_QUIET_MS = 15 * 60_000;
 
 const time = z.number().finite().nonnegative();
 const memberSchema = z.object({
@@ -23,7 +22,6 @@ export const runnerWaveStateSchema = z.object({
         startedAt: time,
         members: z.array(memberSchema),
         summarizedMembers: time,
-        lastSummaryAt: time.optional(),
     }).optional(),
 });
 export type RunnerWaveMember = z.infer<typeof memberSchema>;
@@ -31,10 +29,15 @@ export type RunnerWaveState = z.infer<typeof runnerWaveStateSchema>;
 export type RunnerZeroReadWave = NonNullable<RunnerWaveState["open"]>;
 export const emptyRunnerWaveState = (): RunnerWaveState => ({ candidates: [] });
 
+export function runnerWaveClosesAt(wave: RunnerZeroReadWave): number {
+    const newest = wave.members.reduce((latest, member) => Math.max(latest, member.at), wave.startedAt);
+    return newest + ZERO_READ_WAVE_QUIET_MS;
+}
+
 /** Advance in step order, then to scan time only once the backlog is drained. */
 export function advanceRunnerWave(state: RunnerWaveState, at: number): RunnerZeroReadWave | undefined {
     state.candidates = state.candidates.filter((member) => member.at >= at - ZERO_READ_WAVE_WINDOW_MS);
-    if (!state.open || at < state.open.startedAt + ZERO_READ_WAVE_LIFETIME_MS) return;
+    if (!state.open || at < runnerWaveClosesAt(state.open)) return;
     const closed = state.open;
     delete state.open;
     state.candidates = [];
@@ -57,6 +60,11 @@ export function observeRunnerWave(
     const accountChange = classification.class === "scope_changed" && classification.cause === "account_or_model_changed";
     if ((classification.class !== "unexplained" && !accountChange) || current.read !== 0 || current.write < 20_000 ||
         (previous.prompt ?? previous.read + previous.write) < 20_000 || previous.model !== current.model) return {};
+    // A change of account can be real even when there is no warm cache left to lose.
+    if (runnerIdleExpiry(previous.at, current.facts?.started_at_ms ?? current.at, {
+        cacheTtlMs: previous.facts?.cache_ttl_ms,
+        previousCompletedAt: previous.facts?.finished_at_ms,
+    })) return {};
     const before = previous.facts?.account_ref;
     const after = current.facts?.account_ref;
     const member: RunnerWaveMember = {
