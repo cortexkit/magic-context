@@ -26,10 +26,9 @@ function add(status: string, time = NOW - 1_000, error = "failure code 42", task
     db.query("INSERT INTO subagent_invocations (session_id, harness, subagent, task, started_at, ended_at, status, error) VALUES (?, 'opencode', ?, ?, ?, ?, ?, ?)")
         .run(`session-${serial}`, subagent, task, time - 100, time, status, error);
 }
-// Inserts one attempt with explicit session, task and parent link, and returns its id.
-function attempt(fields: { session: string; status: string; time: number; error?: string | null; task?: string | null; parent?: number | null; subagent?: string }): number {
-    const row = db.query("INSERT INTO subagent_invocations (session_id, harness, subagent, task, started_at, ended_at, status, error, parent_invocation_id) VALUES (?, 'opencode', ?, ?, ?, ?, ?, ?, ?) RETURNING id")
-        .get(fields.session, fields.subagent ?? "historian", fields.task ?? null, fields.time - 100, fields.time, fields.status, fields.error ?? null, fields.parent ?? null) as { id: number };
+function attempt(fields: { session: string; status: string; time: number; error?: string | null; task?: string | null; parent?: number | null; subagent?: string; harness?: string; provider?: string; model?: string }): number {
+    const row = db.query("INSERT INTO subagent_invocations (session_id, harness, subagent, task, started_at, ended_at, status, error, parent_invocation_id, provider_id, model_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id")
+        .get(fields.session, fields.harness ?? "opencode", fields.subagent ?? "historian", fields.task ?? null, fields.time - 100, fields.time, fields.status, fields.error ?? null, fields.parent ?? null, fields.provider ?? null, fields.model ?? null) as { id: number };
     return row.id;
 }
 // The existing cases judge rows the moment they end; the settle window has its own test.
@@ -137,6 +136,46 @@ test("an unlinked fallback in another session or outside the start window recove
     expect(alerts).toHaveLength(1);
     // Both failures still count, so neither unrelated fallback recovered one.
     expect(alerts[0]?.count).toBe(2);
+});
+
+const failedTurnOne = {
+    session: "module-session", status: "failed", task: "turn_one", time: NOW - 60_000,
+    provider: "google", model: "antigravity-gemini-4-hydrogen",
+};
+const completedTurnOne = {
+    ...failedTurnOne, status: "completed", time: NOW - 55_000,
+    provider: "anthropic", model: "claude-sonnet-5-5",
+};
+
+test.each(["provider_error", "invalid_turn_one_reply", "transient", "output_limit"])(
+    "a module turn_one %s recovered on another route raises no alert", async (error) => {
+        attempt({ ...failedTurnOne, error });
+        attempt(completedTurnOne);
+        expect((await run()).alerts).toHaveLength(0);
+    },
+);
+
+test("a module turn_one failure with no completed fallback still alerts", async () => {
+    attempt({ ...failedTurnOne, error: "provider_error" });
+    attempt({ ...completedTurnOne, status: "failed", error: "output_limit" });
+    expect((await run()).alerts).toContainEqual(expect.objectContaining({ rule: "new_class", class: "provider_error" }));
+});
+
+test.each([
+    ["another session", { session: "other-session" }],
+    ["another harness", { harness: "pi" }],
+    ["the same route", { provider: failedTurnOne.provider, model: failedTurnOne.model }],
+    ["outside the start window", { time: failedTurnOne.time + 121_000 }],
+] as const)("a completed module turn_one (%s) does not recover the failure", async (_label, overrides) => {
+    attempt({ ...failedTurnOne, error: "provider_error" });
+    attempt({ ...completedTurnOne, ...overrides });
+    expect((await run(NOW + 65_000)).alerts).toContainEqual(expect.objectContaining({ rule: "new_class", class: "provider_error" }));
+});
+
+test.each(["permanent", "APIError: provider_error"])("a recovered turn_one with %s still alerts as a new class", async (error) => {
+    attempt({ ...failedTurnOne, error });
+    attempt(completedTurnOne);
+    expect((await run()).alerts).toContainEqual(expect.objectContaining({ rule: "new_class", class: error }));
 });
 
 test("a failure is judged only after the settle window, once its fallback has finished", async () => {

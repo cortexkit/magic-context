@@ -20,9 +20,8 @@ const AGENT_ID = "agent_b613e5cf2ee55b8c";
 // later. Rows are judged only once they are this old, which gives the fallback
 // time to finish before its outcome is checked.
 const DEFAULT_SETTLE_MS = 5 * 60_000;
-// Some fallback rows carry no parent link. Such a row still counts as a
-// primary's fallback when it has task `fallback`, the same subagent and session,
-// and starts between 5 seconds before and this long after the primary ends.
+// With no parent link, a fallback must start between 5 seconds before and this
+// long after the preceding attempt ends.
 const FALLBACK_START_WINDOW_MS = 120_000;
 // Failures a working fallback makes routine: an exhausted or rate-limited
 // provider; the summarizer refusing before sending because the prompt is
@@ -33,6 +32,9 @@ const FALLBACK_START_WINDOW_MS = 120_000;
 // the alert rules even when a fallback recovered it.
 const RECOVERABLE_ERROR =
     /account pool has no account|quota|rate[ _-]?limit|too many requests|\b429\b|resource_exhausted|usage limit|producer_prompt_exceeds_window|prompt timed out after/i;
+// The module records fixed classes, not provider prose. Compare the whole
+// value so a class name mentioned in a provider message does not excuse it.
+const RECOVERABLE_TURN_ONE_ERRORS = new Set(["transient", "provider_error", "output_limit", "invalid_turn_one_reply"]);
 
 type Row = {
     id: number;
@@ -40,6 +42,8 @@ type Row = {
     harness: string;
     subagent: string;
     task: string | null;
+    provider_id: string | null;
+    model_id: string | null;
     started_at: number;
     ended_at: number;
     status: string;
@@ -177,7 +181,7 @@ function budgetOutcome(db: Database, row: Row, now: number): BudgetOutcome {
 }
 
 /**
- * Ids of routine failures (see RECOVERABLE_ERROR) that a completed fallback attempt
+ * Ids of routine failures that a completed fallback attempt
  * recovered. The run produced its result on a fallback model, so the earlier
  * failures are expected and not worth a wake. A chain can fail on several models
  * before one completes, for example when two models share one exhausted account
@@ -188,18 +192,30 @@ function budgetOutcome(db: Database, row: Row, now: number): BudgetOutcome {
  * attempt leaves all its failures eligible.
  */
 export function recoveredByFallback(rows: Row[]): Set<number> {
+    const isModuleTurnOne = (row: Row) =>
+        row.subagent === "historian" && row.task === "turn_one" && row.parent_invocation_id === null &&
+        row.provider_id !== null && row.model_id !== null;
     const isRoutineFailure = (row: Row) =>
-        (row.status === "failed" || row.status === "timed_out") && RECOVERABLE_ERROR.test(row.error ?? "");
+        (row.status === "failed" || row.status === "timed_out") &&
+        (RECOVERABLE_ERROR.test(row.error ?? "") || (isModuleTurnOne(row) && RECOVERABLE_TURN_ONE_ERRORS.has(row.error ?? "")));
+    // The module writes each first-turn attempt as its own unlinked row. A
+    // nearby attempt on another route in the same session and harness can be
+    // its fallback; another request on the same route is not evidence of one.
+    const isModuleFallback = (row: Row, candidate: Row) =>
+        row.status === "failed" && isModuleTurnOne(row) && isModuleTurnOne(candidate) &&
+        candidate.harness === row.harness &&
+        (candidate.provider_id !== row.provider_id || candidate.model_id !== row.model_id) &&
+        (candidate.started_at > row.started_at || (candidate.started_at === row.started_at && candidate.id > row.id));
     const nextAttempts = (row: Row) =>
         rows.filter(
             (candidate) =>
                 candidate.parent_invocation_id === row.id ||
                 (candidate.parent_invocation_id === null &&
-                    candidate.task === "fallback" &&
                     candidate.subagent === row.subagent &&
                     candidate.session_id === row.session_id &&
                     candidate.started_at >= row.ended_at - 5_000 &&
-                    candidate.started_at <= row.ended_at + FALLBACK_START_WINDOW_MS),
+                    candidate.started_at <= row.ended_at + FALLBACK_START_WINDOW_MS &&
+                    (candidate.task === "fallback" || isModuleFallback(row, candidate))),
         );
     // True when a completed attempt follows this failure further down its chain.
     // `seen` guards against a malformed chain that loops.
@@ -304,7 +320,7 @@ export async function runFailureSentinel(options: FailureSentinelOptions): Promi
         if (!existsSync(options.db)) throw new Error(`context database missing: ${options.db}`);
         db = new Database(options.db, { readonly: true });
         db.exec("PRAGMA busy_timeout = 3000");
-        const fields = "id, session_id, harness, subagent, task, started_at, ended_at, status, error, parent_invocation_id";
+        const fields = "id, session_id, harness, subagent, task, provider_id, model_id, started_at, ended_at, status, error, parent_invocation_id";
         const settledBefore = now - (options.settleMs ?? DEFAULT_SETTLE_MS);
         const next = db.query(`SELECT ${fields} FROM subagent_invocations WHERE ended_at IS NOT NULL AND ended_at <= ? AND (ended_at > ? OR (ended_at = ? AND id > ?)) ORDER BY ended_at, id LIMIT ?`)
             .all(settledBefore, state.cursor.ended_at, state.cursor.ended_at, state.cursor.id, MAX_NEW + 1) as Row[];
