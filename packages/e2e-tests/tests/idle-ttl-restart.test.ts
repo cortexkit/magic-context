@@ -902,7 +902,8 @@ forEachHost(import.meta.url, "idle TTL head replay", (host) => {
 			).toBeGreaterThanOrEqual(RUST_MODE ? 1 : 2);
 			const beforeAbort = clock();
 			const count = h.requests().length;
-			// Hold an active stream so the abort precedes any clean terminal reply.
+			// Keep the started stream from completing until the host reports the abort.
+			const releaseReply = Promise.withResolvers<void>();
 			h.mock.enqueue(
 				h instanceof PiTestHarness
 					? {
@@ -915,73 +916,87 @@ forEachHost(import.meta.url, "idle TTL head replay", (host) => {
 					: {
 							text: "not served",
 							usage: { input_tokens: 0, output_tokens: 0 },
-							streamHoldMs: 3_000,
+							streamHoldUntil: releaseReply.promise,
 						},
 			);
-			const aborted = send("abort a usage-less attempt").catch((error) =>
-				String(error),
-			);
-			await h.waitFor(() => h.requests().length > count, {
-				label: "usage-less abort reaches provider",
-			});
-			if (h instanceof TestHarness) {
-				expect(
-					(
-						await fetch(`${h.serverUrl}/session/${session}/abort`, {
-							method: "POST",
-						})
-					).ok,
-				).toBe(true);
-			} else if (h instanceof PiTestHarness) {
-				// Exercise the real failure record. The pinned Pi RPC abort
-				// waits indefinitely for idle in this held-stream drive; its
-				// distinct "aborted" stop reason is covered by the message_end
-				// unit fixture rather than claiming a real abort completed here.
-			} else {
-				const oc = (
-					h as unknown as { opencode: { url: string; password: string } }
-				).opencode;
-				await OpenCode.make({
-					baseUrl: oc.url,
-					headers: {
-						authorization: `Basic ${btoa(`opencode:${oc.password}`)}`,
-					},
-				}).session.interrupt({ sessionID: session });
-			}
-			await aborted;
-			await h.waitForMockQuiescence();
 			let assistantStates: unknown;
-			if (h instanceof TestHarness) {
-				const messages = (await (
-					await fetch(`${h.serverUrl}/session/${session}/message`)
-				).json()) as { info: Record<string, unknown> }[];
-				assistantStates = messages
-					.filter((message) => message.info.role === "assistant")
-					.map((message) => message.info);
-			} else if (h instanceof PiTestHarness) {
-				assistantStates = (await h.getMessages())
-					.filter((message) => message.role === "assistant")
-					.map(({ stopReason, errorMessage, timestamp, usage }) => ({
-						stopReason,
-						errorMessage,
-						timestamp,
-						usage,
-					}));
-			} else {
-				const env = (
-					h as unknown as { opencode: { env: { OPENCODE_DB: string } } }
-				).opencode.env;
-				const db = openTestDb(join(h.dataDir, "opencode", env.OPENCODE_DB));
-				try {
-					assistantStates = db
-						.prepare(
-							"SELECT data FROM session_message WHERE session_id = ? AND type = 'assistant' ORDER BY id",
-						)
-						.all(session);
-				} finally {
-					db.close();
+			try {
+				const aborted = send("abort a usage-less attempt").then(
+					() => undefined,
+					(error: unknown) => String(error),
+				);
+				await h.waitFor(() => h.requests().length > count, {
+					label: "usage-less abort reaches provider",
+				});
+				if (h instanceof TestHarness) {
+					const response = await fetch(
+						`${h.serverUrl}/session/${session}/abort`,
+						{ method: "POST" },
+					);
+					expect(response.ok).toBe(true);
+					expect(await aborted).toContain("MessageAbortedError");
+					const messages = (await (
+						await fetch(`${h.serverUrl}/session/${session}/message`)
+					).json()) as { info: Record<string, unknown> }[];
+					assistantStates = messages
+						.filter((message) => message.info.role === "assistant")
+						.map((message) => message.info);
+				} else if (h instanceof PiTestHarness) {
+					// Exercise the real failure record. The pinned Pi RPC abort
+					// waits indefinitely for idle in this held-stream drive; its
+					// distinct "aborted" stop reason is covered by the message_end
+					// unit fixture rather than claiming a real abort completed here.
+					await aborted;
+					assistantStates = (await h.getMessages())
+						.filter((message) => message.role === "assistant")
+						.map(({ stopReason, errorMessage, timestamp, usage }) => ({
+							stopReason,
+							errorMessage,
+							timestamp,
+							usage,
+						}));
+				} else {
+					const oc = (
+						h as unknown as {
+							opencode: {
+								url: string;
+								password: string;
+								env: { OPENCODE_DB: string };
+							};
+						}
+					).opencode;
+					await OpenCode.make({
+						baseUrl: oc.url,
+						headers: {
+							authorization: `Basic ${btoa(`opencode:${oc.password}`)}`,
+						},
+					}).session.interrupt({ sessionID: session });
+					await aborted;
+					// OpenCode 2's wait call returns on idle even when the assistant failed.
+					const db = openTestDb(
+						join(h.dataDir, "opencode", oc.env.OPENCODE_DB),
+						{ readonly: true },
+					);
+					try {
+						const rows = db
+							.prepare(
+								"SELECT data FROM session_message WHERE session_id = ? AND type = 'assistant' ORDER BY seq",
+							)
+							.all(session) as { data: string }[];
+						assistantStates = rows;
+						const latestAssistant = JSON.parse(rows.at(-1)?.data ?? "null");
+						expect(latestAssistant).toMatchObject({
+							finish: "error",
+							error: { type: "aborted" },
+						});
+					} finally {
+						db.close();
+					}
 				}
+			} finally {
+				releaseReply.resolve();
 			}
+			await h.waitForMockQuiescence();
 			const inventory = assertContained(h);
 			console.log(
 				"USAGE_LESS_CLOCK",
