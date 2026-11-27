@@ -1,3 +1,4 @@
+import { clearRecompStaging } from "../../features/magic-context/compartment-storage";
 import {
     applyStrippedPlaceholderDelta,
     getNoteNudgeAnchors,
@@ -12,6 +13,7 @@ import {
     getMaxTagNumberBySession,
     getTagsBySession,
 } from "../../features/magic-context/storage-tags";
+import { repairMissingHistoryBoundary } from "../../hooks/magic-context/history-boundary-repair";
 import { clearNoteNudgeTriggerOnly } from "../../hooks/magic-context/note-nudger";
 import { forgetUnpublishedAutoSearchNoHint } from "../../shared/auto-search-lifecycle";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
@@ -27,8 +29,15 @@ type StagedRevert =
     | { cutoff: string; host: string; suffix: V2RevertSuffix }
     | { cutoff: string; unavailable: string };
 
+interface CommittedRevert {
+    sessionID: string;
+    host: string;
+    removed: ReadonlySet<string>;
+}
+
 export class V2RevertMessageCleanup {
     private readonly staged = new BoundedSessionMap<StagedRevert>(MAX_STAGED_REVERTS);
+    private pendingHistory: CommittedRevert[] = [];
 
     constructor(private readonly openStoreReader: () => V2StoreReader) {}
 
@@ -65,7 +74,12 @@ export class V2RevertMessageCleanup {
         this.staged.clear();
     }
 
-    pruneOnCommit(db: Database, sessionID: string, to: unknown): boolean {
+    forgetSession(sessionID: string): void {
+        this.discardStageProof(sessionID);
+        this.pendingHistory = this.pendingHistory.filter((proof) => proof.sessionID !== sessionID);
+    }
+
+    pruneOnCommit(db: Database, sessionID: string, to: unknown, retireHistory: boolean): boolean {
         const staged = this.staged.peek(sessionID);
         this.discardStageProof(sessionID);
         const noteSkippedCleanup = (reason: string): false => {
@@ -92,8 +106,45 @@ export class V2RevertMessageCleanup {
         }
         if (!removed) return noteSkippedCleanup("retained predecessor is not visible at commit");
         if (!removed.size) return noteSkippedCleanup("all staged rows still exist");
+        if (retireHistory) {
+            // Keep separate bounded proofs: several reverts can commit while
+            // another process owns the lease, and each can remove distinct IDs.
+            if (this.pendingHistory.length === MAX_STAGED_REVERTS) this.pendingHistory.shift();
+            this.pendingHistory.push({ sessionID, host: staged.host, removed });
+        }
         pruneMessages(db, sessionID, removed);
         return true;
+    }
+
+    retireProvenHistory(db: Database, sessionID: string, reader?: V2StoreReader) {
+        const ownProofs = this.pendingHistory.filter((proof) => proof.sessionID === sessionID);
+        if (ownProofs.length === 0) return undefined;
+        const source = reader ?? this.openStoreReader();
+        try {
+            const host = source.hostIdentity();
+            const current = ownProofs.filter((proof) => proof.host === host);
+            this.pendingHistory = this.pendingHistory.filter(
+                (proof) => proof.sessionID !== sessionID || proof.host === host,
+            );
+            if (current.length === 0) return undefined;
+            const removed = new Set<string>();
+            for (const proof of current) for (const id of proof.removed) removed.add(id);
+            const result = repairMissingHistoryBoundary({
+                db,
+                sessionId: sessionID,
+                isInHostStore: (id) => source.sequenceForId(sessionID, id) !== undefined,
+                removedByCommittedRevert: removed,
+                onRetire: () => clearRecompStaging(db, sessionID),
+            });
+            if (result.kind !== "unresolved") {
+                this.pendingHistory = this.pendingHistory.filter(
+                    (proof) => proof.sessionID !== sessionID,
+                );
+            }
+            return result.kind === "intact" ? undefined : result;
+        } finally {
+            if (!reader) source.close();
+        }
     }
 }
 

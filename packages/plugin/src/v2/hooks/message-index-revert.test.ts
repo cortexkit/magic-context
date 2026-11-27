@@ -1,5 +1,9 @@
 import { expect, mock, spyOn, test } from "bun:test";
 import {
+    acquireCompartmentLease,
+    releaseCompartmentLease,
+} from "../../features/magic-context/compartment-lease";
+import {
     appendCompartments,
     getCompartments,
 } from "../../features/magic-context/compartment-storage";
@@ -31,6 +35,7 @@ import {
     freezeTemporalDecisions,
     getTemporalDecisions,
 } from "../../features/magic-context/temporal-decisions";
+import { registerActiveCompartmentRun } from "../../hooks/magic-context/compartment-runner";
 import * as rustModeTransform from "../../hooks/magic-context/rust-mode-transform";
 import { getServedRecordForTest } from "../../hooks/magic-context/served-check";
 import { setBootQuietPeriodForTests } from "../../plugin/boot-quiet";
@@ -365,6 +370,113 @@ async function revertFixture(seed: number) {
         commit: (to = cutoff) => bus.emit(commitEvent(f.session, to)),
     };
 }
+
+test.each([
+    ["all summaries", false],
+    ["later summaries", true],
+] as const)("committed revert retires %s and their cached history", async (_, keepOlder) => {
+    const { f, cutoff, stage, commit } = await revertFixture(1127);
+    try {
+        if (keepOlder) f.compartment(f.rows.length - 3);
+        f.compartment(f.rows.length - 1);
+        await f.pass();
+        const before = getCompartments(f.db, f.session);
+        expect(getOrCreateSessionMeta(f.db, f.session).cachedM0Bytes).not.toBeNull();
+        await stage();
+        f.revertBefore(cutoff);
+        await commit();
+        expect(getCompartments(f.db, f.session)).toEqual(keepOlder ? before.slice(0, 1) : []);
+        expect(getOrCreateSessionMeta(f.db, f.session).cachedM0Bytes).toBeNull();
+        expect(getOrCreateSessionMeta(f.db, f.session).cachedM1Bytes).toBeNull();
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test.each([
+    "lease",
+    "active run",
+] as const)("committed revert preserves its summary deletion proof until a managed pass after a busy %s", async (busy) => {
+    const { f, cutoff, stage, commit } = await revertFixture(1128);
+    const holder = "another historian";
+    const run = Promise.withResolvers<void>();
+    const release =
+        busy === "lease"
+            ? () => releaseCompartmentLease(f.db, f.session, holder)
+            : () => run.resolve();
+    try {
+        f.compartment(f.rows.length - 1);
+        await f.pass();
+        const before = getCompartments(f.db, f.session);
+        if (busy === "lease") expect(acquireCompartmentLease(f.db, f.session, holder)).toBeTruthy();
+        const active =
+            busy === "active run"
+                ? registerActiveCompartmentRun(f.session, run.promise, "incremental")
+                : undefined;
+        await stage();
+        f.revertBefore(cutoff);
+        await commit();
+        expect(getCompartments(f.db, f.session)).toEqual(before);
+        release();
+        await active?.promise;
+        f.user("continue after the committed revert", 1_000);
+        await f.pass();
+        expect(getCompartments(f.db, f.session)).toEqual([]);
+    } finally {
+        release();
+        await f.cleanup();
+    }
+});
+
+test("a missing summary end alone is not a committed revert proof", async () => {
+    const { f, cutoff, commit } = await revertFixture(1129);
+    try {
+        f.compartment(f.rows.length - 1);
+        await f.pass();
+        const before = getCompartments(f.db, f.session);
+        const cached = getOrCreateSessionMeta(f.db, f.session).cachedM0Bytes;
+        expect(cached).not.toBeNull();
+        f.revertBefore(cutoff);
+        await commit();
+        expect(getCompartments(f.db, f.session)).toEqual(before);
+        expect(getOrCreateSessionMeta(f.db, f.session).cachedM0Bytes).toEqual(cached);
+    } finally {
+        await f.cleanup();
+    }
+});
+
+test("committed revert retires a stale summary published before the historian releases its lease", async () => {
+    const { f, cutoff, stage, commit } = await revertFixture(1130);
+    const holder = "publishing historian";
+    try {
+        const removedEnd = f.rows.at(-1)!.id;
+        const start = f.rows[0]!.id;
+        const end = f.rows.length;
+        expect(acquireCompartmentLease(f.db, f.session, holder)).toBeTruthy();
+        await stage();
+        f.revertBefore(cutoff);
+        await commit();
+        // Publication passed its boundary check before the host cut the suffix.
+        appendCompartments(f.db, f.session, [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: end,
+                startMessageId: start,
+                endMessageId: removedEnd,
+                title: "Late summary",
+                content: "History published with a now-removed end.",
+            },
+        ]);
+        releaseCompartmentLease(f.db, f.session, holder);
+        f.user("continue after the writer released its lease", 1_000);
+        await f.pass();
+        expect(getCompartments(f.db, f.session)).toEqual([]);
+    } finally {
+        releaseCompartmentLease(f.db, f.session, holder);
+        await f.cleanup();
+    }
+});
 
 test("revert proof preserves absent plugin-owned replay state and legacy tool owner forms", async () => {
     const { f, cutoff, read, stage, commit } = await revertFixture(990);

@@ -1994,12 +1994,11 @@ export async function registerContext(context: V2Context) {
                                 event.data.revert?.messageID,
                             );
                         }
-                        if (
-                            event.type === "session.revert.cleared" ||
-                            event.type === "session.deleted"
-                        ) {
+                        if (event.type === "session.revert.cleared") {
                             revertMessageCleanup.discardStageProof(sessionID);
                         }
+                        if (event.type === "session.deleted")
+                            revertMessageCleanup.forgetSession(sessionID);
                         if (event.type === "session.revert.committed") {
                             dropServedRecord(sessionID, "host_edit");
                             if (db) {
@@ -2014,10 +2013,15 @@ export async function registerContext(context: V2Context) {
                                                 indexDb,
                                                 sessionID,
                                                 event.data?.to,
+                                                !compactionOff && !rustModeModuleClient,
                                             )
                                         ) {
                                             tagger.cleanup(sessionID);
                                             transform?.invalidateRustWireState(sessionID);
+                                            revertMessageCleanup.retireProvenHistory(
+                                                indexDb,
+                                                sessionID,
+                                            );
                                         }
                                     } catch (error) {
                                         sessionLog(
@@ -3302,7 +3306,8 @@ export async function registerContext(context: V2Context) {
                 // owns its own.
                 const boundaryRepair =
                     !rustModeModuleClient && db && !compactionOff
-                        ? checkHistoryBoundary(db, reader, draft.sessionID)
+                        ? (revertMessageCleanup.retireProvenHistory(db, draft.sessionID, reader) ??
+                          checkHistoryBoundary(db, reader, draft.sessionID))
                         : undefined;
                 if (
                     boundaryRepair?.kind === "repaired" ||

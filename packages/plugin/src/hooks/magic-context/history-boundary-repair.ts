@@ -231,8 +231,62 @@ export function repairMissingHistoryBoundary(args: {
     scope?: "store" | "active-branch";
     /** Queue historian recovery in the same transaction that deletes stale summaries. */
     onRetire?: (retired: readonly HistoryBoundary[], anchor: HistoryBoundary | null) => void;
+    /** Exact host row IDs that a committed revert proved it removed. */
+    removedByCommittedRevert?: ReadonlySet<string>;
 }): HistoryBoundaryRepair {
     const { db, sessionId, isInHostStore, scope = "store" } = args;
+    const removed = args.removedByCommittedRevert;
+    if (removed) {
+        const firstRemoved = removed.values().next().value;
+        if (firstRemoved === undefined) return { kind: "intact" };
+        const busy = {
+            kind: "unresolved",
+            reason: "busy",
+            missingEndMessageId: firstRemoved,
+        } as const;
+        const holderId = crypto.randomUUID();
+        // Check under the lease even if no summary matches yet: an in-flight
+        // historian can still publish an end that the host just removed.
+        if (getActiveCompartmentRun(sessionId) || !acquireCompartmentLease(db, sessionId, holderId))
+            return busy;
+        try {
+            const boundaries = readStoreBoundaries(db, sessionId);
+            const first = boundaries.findIndex(({ endMessageId }) => removed.has(endMessageId));
+            if (first < 0) return { kind: "intact" };
+            const affected = boundaries[first]!;
+            const previous = boundaries[first - 1];
+            let anchor: HistoryAnchor | null = null;
+            if (previous) {
+                const row = db
+                    .prepare(
+                        "SELECT end_message AS endMessage FROM compartments WHERE session_id = ? AND sequence = ?",
+                    )
+                    .get(sessionId, previous.sequence) as { endMessage: number } | undefined;
+                if (!row) return busy;
+                // Older summaries were not proved affected, even if their end
+                // ID is unavailable. Keep them and retire from the first match.
+                anchor = { ...previous, endMessage: row.endMessage };
+            }
+            const dropped = dropCompartmentsAfter(db, sessionId, anchor, holderId, false, () =>
+                args.onRetire?.(boundaries.slice(first), anchor),
+            );
+            if (dropped === null) return busy;
+            invalidateAutoEmbedSession(sessionId);
+            forgetCachedPrefix(sessionId);
+            sessionLog(
+                sessionId,
+                `committed revert history repair: removed compartments ${dropped.join(",")} and cleared the cached history; removed boundary ${affected.endMessageId}`,
+            );
+            return {
+                kind: "repaired",
+                missingEndMessageId: affected.endMessageId,
+                anchorEndMessageId: anchor?.endMessageId ?? "",
+                droppedSequences: dropped,
+            };
+        } finally {
+            releaseCompartmentLeaseBestEffort(db, sessionId, holderId);
+        }
+    }
     const compartments: HistoryBoundary[] =
         scope === "active-branch"
             ? (db

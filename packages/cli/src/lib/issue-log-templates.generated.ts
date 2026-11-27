@@ -553,6 +553,7 @@ const TEMPLATE_DATA = [
 "auto-search: decision outcome=\x01 lanes=\x01 nearMisses=\x01 threshold=\x01 pool=\x01 rows=\x01 workerStarted=\x01 peek=\x01 elapsedMs=\x01\x020s",
 "auto-search: decision outcome=\x01 lanes=\x01 nearMisses=\x01 threshold=\x01 pool=\x01 rows=\x01 workerStarted=\x01 peek=\x01 elapsedMs=\x01",
 "channel2 ceiling nudge delivery failed after its claim was no longer owned; lease state left unchanged: \x01",
+"committed revert history repair: removed compartments \x01 and cleared the cached history; removed boundary \x01\x021i",
 "historian failure: source=chunk-coverage reason=\"chunk coverage ends at \x01 but chunk end is \x01\" chunkRange=\x01-\x01",
 "raw_fallback_over_context_limit proxy_bytes=\x01 proxy_tokens=\x01 limit=\x01 early_abort=true serialization_failed=\x01",
 "channel2 ceiling nudge delivery failed after its claim was no longer owned; lease state left unchanged:",
