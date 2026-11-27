@@ -122,7 +122,21 @@ pub(crate) struct Background {
 
 enum Command {
     Work(SessionRef, u64),
+    Historian(Box<crate::summary::telemetry::Finished>),
+    #[cfg(test)]
+    HistorianFence(tokio::sync::oneshot::Sender<Option<Result<(), String>>>),
     Stop,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct HistorianWriter(mpsc::Sender<Command>);
+
+impl HistorianWriter {
+    pub(crate) fn record(&self, run: Box<crate::summary::telemetry::Finished>) {
+        if self.0.send(Command::Historian(run)).is_err() {
+            tracing::warn!("ck-mc: historian telemetry not written: background writer stopped");
+        }
+    }
 }
 
 impl Drop for Background {
@@ -154,7 +168,37 @@ impl Background {
             .name("mc-message-index".into())
             .spawn(move || {
                 let mut db = None;
-                while let Ok(Command::Work(key, instance)) = rx.recv() {
+                #[cfg(test)]
+                let mut last_historian_write = None;
+                while let Ok(command) = rx.recv() {
+                    let (key, instance) = match command {
+                        Command::Work(key, instance) => (key, instance),
+                        Command::Stop => break,
+                        #[cfg(test)]
+                        Command::HistorianFence(done) => {
+                            let _ = done.send(last_historian_write.take());
+                            continue;
+                        }
+                        Command::Historian(run) => {
+                            let result = (|| {
+                                if db.is_none() {
+                                    db = Some(ContextDb::open_background(&path)?);
+                                }
+                                db.as_ref()
+                                    .unwrap()
+                                    .with_connection(|conn| run.insert(conn))
+                                    .map_err(|error| error.to_string())
+                            })();
+                            if let Err(error) = &result {
+                                tracing::warn!(%error, "ck-mc: historian telemetry not written");
+                            }
+                            #[cfg(test)]
+                            {
+                                last_historian_write = Some(result);
+                            }
+                            continue;
+                        }
+                    };
                     let (mut mark, generation, mut activity) = {
                         let mut state = own.state.lock().unwrap();
                         while state.paused {
@@ -297,6 +341,17 @@ impl Background {
                 p.error = Some("search worker stopped".into());
             }
         }
+    }
+
+    pub(crate) fn historian_writer(&self) -> HistorianWriter {
+        HistorianWriter(self.tx.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn historian_idle(&self) -> Option<Result<(), String>> {
+        let (done, answer) = tokio::sync::oneshot::channel();
+        assert!(self.tx.send(Command::HistorianFence(done)).is_ok());
+        answer.await.expect("historian writer fence")
     }
 
     pub fn forget(&self, key: &SessionRef) {

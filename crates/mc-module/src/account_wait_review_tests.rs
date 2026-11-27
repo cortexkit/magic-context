@@ -279,6 +279,7 @@ fn turn_two_job() -> turn_two::Job {
         project: "project".into(),
         project_root: Some("/project".into()),
         continuation: run::Continuation {
+            telemetry: None,
             prompts: crate::summary::prompts::SummaryPrompts::bundled(),
             keep_child: false,
             child: crate::client::Child {

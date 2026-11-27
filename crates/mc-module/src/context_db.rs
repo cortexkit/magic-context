@@ -662,6 +662,26 @@ impl ContextDb {
         recall: &Recall,
         now_ms: i64,
     ) -> Result<usize, String> {
+        self.publish_summaries_with_receipt(
+            harness,
+            session,
+            compartments,
+            publication,
+            recall,
+            now_ms,
+        )
+        .map(|stored| stored.candidates)
+    }
+
+    pub(crate) fn publish_summaries_with_receipt(
+        &self,
+        harness: &str,
+        session: &str,
+        compartments: &[ValidatedCompartment],
+        publication: Option<&turn_one::Publication>,
+        recall: &Recall,
+        now_ms: i64,
+    ) -> Result<PublishedSummaries, String> {
         let mut connection = self.lock();
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -704,7 +724,7 @@ impl ContextDb {
                 ids.push(transaction.last_insert_rowid());
             }
         }
-        store_recall(
+        let events = store_recall(
             &transaction,
             harness,
             session,
@@ -736,7 +756,11 @@ impl ContextDb {
         if !recall.observations.is_empty() {
             self.changed(crate::app_read::Change::global_memories());
         }
-        Ok(candidates)
+        Ok(PublishedSummaries {
+            ids,
+            events,
+            candidates,
+        })
     }
 
     /// Run `apply` on the connection, for a caller that manages its own
@@ -1530,6 +1554,12 @@ pub(crate) fn normalize_primer_question(question: &str) -> String {
         .to_owned()
 }
 
+pub(crate) struct PublishedSummaries {
+    pub(crate) ids: Vec<i64>,
+    pub(crate) events: usize,
+    candidates: usize,
+}
+
 fn store_recall(
     tx: &rusqlite::Transaction,
     harness: &str,
@@ -1538,7 +1568,7 @@ fn store_recall(
     ids: &[i64],
     recall: &Recall,
     now_ms: i64,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<usize> {
     if let Some(project) = recall
         .project
         .as_deref()
@@ -1553,13 +1583,14 @@ fn store_recall(
             params![session, harness, project, now_ms],
         )?;
     }
+    let mut events = 0;
     for event in &recall.events {
         // `at_compartment` is 1-based into the run's summaries.
         let id = event
             .at_compartment
             .and_then(|at| at.checked_sub(1))
             .and_then(|index| ids.get(index as usize).copied());
-        tx.execute(
+        events += tx.execute(
             "INSERT INTO compartment_events (session_id, compartment_id, kind, at_compartment, fields_json, created_at, harness) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 session,
@@ -1597,11 +1628,11 @@ fn store_recall(
     let (Some(primer), Some(first), Some(last)) =
         (&recall.primer, compartments.first(), compartments.last())
     else {
-        return Ok(());
+        return Ok(events);
     };
     let question = primer.question.trim();
     if question.is_empty() {
-        return Ok(());
+        return Ok(events);
     }
     let origin = primer
         .origin
@@ -1631,5 +1662,5 @@ fn store_recall(
             now_ms,
         ],
     )?;
-    Ok(())
+    Ok(events)
 }

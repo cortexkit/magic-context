@@ -994,6 +994,11 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         self.search_idle(session).await.map_err(ModuleError::Tool)
     }
 
+    #[cfg(test)]
+    pub(crate) async fn historian_idle(&self) -> Option<Result<(), String>> {
+        self.inner.search.as_ref().unwrap().historian_idle().await
+    }
+
     /// Drain foreground work only. Background indexing is fenced separately
     /// when a test needs search results rather than an applied compaction view.
     pub async fn idle_foreground(&self, session: &SessionRef) -> Result<(), ModuleError> {
@@ -2926,7 +2931,20 @@ fn start_summary<C: RunnerClient + Router + Send + Sync + 'static>(
     let counted = inner.runs.start(session);
     let inner = Arc::clone(inner);
     tokio::spawn(async move {
-        let result = run::run(inner.client.as_ref(), inner.db.as_deref(), &request).await;
+        let telemetry = inner.search.as_ref().map(|writer| {
+            crate::summary::telemetry::Record::start(
+                writer.historian_writer(),
+                request.session.clone(),
+                request.trigger,
+            )
+        });
+        let result = run::run_tracked(
+            inner.client.as_ref(),
+            inner.db.as_deref(),
+            &request,
+            telemetry,
+        )
+        .await;
         if let Some(worker) = worker.upgrade() {
             let _ = worker.send(Job::SummaryFinished(Box::new(result), counted));
         }
@@ -2967,6 +2985,8 @@ fn start_turn_two<C: RunnerClient + Router + Send + Sync + 'static>(
                 let _ = worker.send(Job::AccountWait(wait));
             }
         }
+        // Queue telemetry before tests or maintenance can observe that this turn has ended.
+        drop(job);
         drop(counted);
         *inner.summaries_running.lock().expect("summary count") -= 1;
     });

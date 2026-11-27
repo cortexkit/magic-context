@@ -76,6 +76,9 @@ pub mod expand;
 /// The memories a history head may show, and the one selection that picks them.
 pub mod head_memories;
 mod health;
+#[cfg(test)]
+#[path = "../../../packages/dashboard/src-tauri/src/historian_telemetry.rs"]
+mod historian_telemetry_reader;
 pub mod index;
 pub mod injection;
 pub mod js_text;

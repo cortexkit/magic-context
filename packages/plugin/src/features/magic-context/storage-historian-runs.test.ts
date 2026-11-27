@@ -10,6 +10,8 @@ import {
     tallyFactsByCategory,
 } from "./storage-historian-runs";
 import { clearSession } from "./storage-meta-session";
+import { deleteSessionScopedRows } from "./storage-session-tables";
+import { recordSubagentInvocation } from "./storage-subagent-invocations";
 
 let tempHome: string;
 let prevDataHome: string | undefined;
@@ -191,4 +193,48 @@ test("clearSession deletes a session's historian_runs", () => {
                 .get("ses-clear") as { c: number }
         ).c,
     ).toBe(0);
+});
+
+test("session cleanup removes both historian tables for the selected non-OpenCode harness", () => {
+    const db = openDatabase();
+    for (const harness of ["pi", "opencode"] as const) {
+        for (const sessionId of ["deleted", "swept", "kept"]) {
+            const subagentInvocationId = recordSubagentInvocation(db, {
+                sessionId,
+                harness,
+                subagent: "historian",
+                task: "turn_one",
+                providerId: "test-provider",
+                modelId: "test-model",
+                startedAt: 1,
+                endedAt: 2,
+                status: "completed",
+                inputTokens: 1,
+                outputTokens: 1,
+                cacheReadTokens: 0,
+                cacheWriteTokens: 0,
+            });
+            expect(
+                recordHistorianRun(db, {
+                    sessionId,
+                    harness,
+                    subagentInvocationId,
+                    runKind: "incremental",
+                    status: "success",
+                }),
+            ).not.toBeNull();
+        }
+    }
+
+    clearSession(db, "deleted", false, true, "pi");
+    db.transaction(() => deleteSessionScopedRows(db, ["swept"], "pi")).immediate();
+
+    for (const table of ["historian_runs", "subagent_invocations"]) {
+        expect(db.prepare(`SELECT harness, session_id FROM ${table} ORDER BY 1, 2`).all()).toEqual([
+            { harness: "opencode", session_id: "deleted" },
+            { harness: "opencode", session_id: "kept" },
+            { harness: "opencode", session_id: "swept" },
+            { harness: "pi", session_id: "kept" },
+        ]);
+    }
 });

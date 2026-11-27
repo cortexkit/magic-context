@@ -309,6 +309,7 @@ impl Router for Client {
 
 pub(crate) fn job() -> Request {
     Request {
+        trigger: None,
         limits: crate::reads::Limits::default(),
         session: SessionRef::new("runner", "pi", "head"),
         child_harness: None,

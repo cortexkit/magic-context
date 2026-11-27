@@ -350,6 +350,7 @@ async fn account_wait_ends_when_a_run_is_served() {
             &client,
             &settings,
             Ok(Some(run::Summarized {
+                telemetry: None,
                 validated: Default::default(),
                 source: Default::default(),
                 publication: None,
@@ -377,6 +378,7 @@ async fn account_wait_an_older_refusal_after_a_served_run_is_ignored() {
             &client,
             &settings,
             Ok(Some(run::Summarized {
+                telemetry: None,
                 validated: Default::default(),
                 source: Default::default(),
                 publication: None,

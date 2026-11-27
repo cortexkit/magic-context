@@ -209,9 +209,17 @@ async fn turn_one_call_sets_creating_send_label() {
         deadline: tokio::time::Instant::now() + Duration::from_secs(1),
         attribution: None,
     };
-    call(&client, &child(), "first", "prompt", &call_on, &mut None)
-        .await
-        .unwrap();
+    call(
+        &client,
+        &child(),
+        "first",
+        "prompt",
+        &call_on,
+        &mut None,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         client.sends.lock().unwrap()[0].1.session_class.as_deref(),
         Some("summary")

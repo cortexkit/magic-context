@@ -6,6 +6,7 @@ fn job(child_harness: &str) -> Job {
         project: "project".into(),
         project_root: Some("/project".into()),
         continuation: Continuation {
+            telemetry: None,
             prompts: crate::summary::prompts::SummaryPrompts::bundled(),
             keep_child: false,
             child: Child {
@@ -405,16 +406,50 @@ async fn each_paid_summary_request_has_one_distinct_usage_id() {
     let mut client = Client::new(vec![active()], vec![]);
     client.lose_first_ack = true;
     client.reports_usage = true;
-    let summary = run::run(&client, Some(&db), &first).await.unwrap().unwrap();
+    let client = std::sync::Arc::new(client);
+    let writer = crate::search::background::Background::new(
+        client.clone(),
+        db.path.clone(),
+        db.message_index.clone(),
+    );
+    let record = crate::summary::telemetry::Record::start(
+        writer.historian_writer(),
+        first.session.clone(),
+        None,
+    );
+    let mut summary = run::run_tracked(client.as_ref(), Some(&db), &first, Some(record))
+        .await
+        .unwrap()
+        .unwrap();
+    let stored = db
+        .publish_summaries_with_receipt(
+            &first.session.harness,
+            &first.session.session,
+            &summary.validated.compartments,
+            summary.publication.as_ref(),
+            &crate::context_db::Recall::default(),
+            10,
+        )
+        .unwrap();
+    let telemetry = summary.telemetry.take().unwrap();
+    telemetry.published(&summary.validated, &stored.ids, stored.events, None);
     job.continuation = summary.continuation.unwrap();
+    job.continuation.telemetry = Some(telemetry);
     let carrier = Carrier::of(&job);
     carrier
-        .send(&client, &db, &carrier.child, "stage", "prompt", "system")
+        .send(
+            client.as_ref(),
+            &db,
+            &carrier.child,
+            "stage",
+            "prompt",
+            "system",
+        )
         .await
         .unwrap();
     carrier
         .send(
-            &client,
+            client.as_ref(),
             &db,
             "check-child",
             "stable-check",
@@ -423,24 +458,47 @@ async fn each_paid_summary_request_has_one_distinct_usage_id() {
         )
         .await
         .unwrap();
-    let sends = client.sends.lock().unwrap();
-    assert_eq!(sends.len(), 4);
-    assert_eq!(sends[0].1.send_id, sends[1].1.send_id);
-    let bodies = client.report_bodies.lock().unwrap();
-    for body in bodies.iter() {
-        eprintln!("{body}");
+    {
+        let sends = client.sends.lock().unwrap();
+        assert_eq!(sends.len(), 4);
+        assert_eq!(sends[0].1.send_id, sends[1].1.send_id);
+        let bodies = client.report_bodies.lock().unwrap();
+        for body in bodies.iter() {
+            eprintln!("{body}");
+        }
+        assert_eq!(bodies.len(), 3);
+        for (body, suffix) in bodies.iter().zip(["turn1", "turn2", "check:stable-check"]) {
+            assert_eq!(body["decision_id"], carrier.decision_id);
+            assert_eq!(
+                body["usage"]["run_id"],
+                format!("{}:{suffix}", carrier.child)
+            );
+            assert_eq!(body["usage"]["input_tokens"], 100);
+            assert_eq!(body["usage"]["cached_input_tokens"], 20);
+            assert_eq!(body["usage"]["output_tokens"], 10);
+        }
     }
-    assert_eq!(bodies.len(), 3);
-    for (body, suffix) in bodies.iter().zip(["turn1", "turn2", "check:stable-check"]) {
-        assert_eq!(body["decision_id"], carrier.decision_id);
-        assert_eq!(
-            body["usage"]["run_id"],
-            format!("{}:{suffix}", carrier.child)
-        );
-        assert_eq!(body["usage"]["input_tokens"], 100);
-        assert_eq!(body["usage"]["cached_input_tokens"], 20);
-        assert_eq!(body["usage"]["output_tokens"], 10);
-    }
+    drop(carrier);
+    drop(job);
+    writer.historian_idle().await.unwrap().unwrap();
+    db.with_connection(|conn| {
+        let (winner, requests): (i64, i64) = conn.query_row(
+            "SELECT subagent_invocation_id, json_extract(facts_by_category_json, '$.requests') FROM historian_runs WHERE status='success'",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        let session = &first.session.session;
+        let rows = crate::historian_telemetry_reader::get_subagent_invocations(conn, session).unwrap();
+        assert_eq!(requests, 3);
+        assert_eq!(rows.len(), 3, "the lost ack and same-ID re-send are one invocation");
+        for task in ["turn_one", "turn_two", "fact_check"] {
+            let row = rows.iter().find(|row| row.task.as_deref() == Some(task)).unwrap();
+            assert_eq!(row.harness, first.session.harness);
+            assert_eq!((row.input_tokens, row.cache_read_tokens, row.output_tokens), (100, 20, 10));
+            assert_eq!(row.status, "completed");
+            assert_eq!(row.parent_invocation_id, (task != "turn_one").then_some(winner));
+            assert_eq!(row.id == winner, task == "turn_one");
+        }
+    });
 }
 
 #[tokio::test]

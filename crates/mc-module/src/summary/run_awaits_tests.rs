@@ -636,6 +636,7 @@ async fn attempt_on(
         "prompt",
         &call_on,
         &mut Vec::new(),
+        None,
     )
     .await
     .map_err(|failure| match failure {

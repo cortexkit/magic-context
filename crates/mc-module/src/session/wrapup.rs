@@ -261,6 +261,8 @@ impl Session {
             lift: None,
             emergency: usage >= 95.0,
         });
-        Some(self.begin_summary(settings, from, until, false, until == target_until))
+        let mut request = self.begin_summary(settings, from, until, false, until == target_until);
+        request.trigger = Some("wrapup");
+        Some(request)
     }
 }

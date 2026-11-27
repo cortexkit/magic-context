@@ -40,6 +40,7 @@ pub(super) fn job(authority: Option<Authority>) -> Job {
         project: PROJECT.into(),
         project_root: Some("/project".into()),
         continuation: Continuation {
+            telemetry: None,
             prompts: crate::summary::prompts::SummaryPrompts::bundled(),
             keep_child: false,
             child: crate::client::Child {

@@ -33,6 +33,7 @@ fn session(agent_id: Option<&str>) -> Session {
 
 fn continuation() -> run::Continuation {
     run::Continuation {
+        telemetry: None,
         prompts: crate::summary::prompts::SummaryPrompts::bundled(),
         keep_child: false,
         child: crate::client::Child {

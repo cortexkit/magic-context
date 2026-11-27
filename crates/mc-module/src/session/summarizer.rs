@@ -312,7 +312,14 @@ impl Session {
         if lift_floor {
             self.floor_lifted_for = prompt.map(|(_, mid)| mid);
         }
-        Some(self.begin_summary(settings, from, until, force, false))
+        let mut request = self.begin_summary(settings, from, until, force, false);
+        request.trigger = decision.map(|reason| match reason {
+            trigger::Reason::Proactive => "proactive",
+            trigger::Reason::CommitClusters => "commit_clusters",
+            trigger::Reason::TailSize => "tail_size",
+            trigger::Reason::Force => "force",
+        });
+        Some(request)
     }
 
     /// Manual and automatic summaries share their request, routing and publication path.
@@ -344,6 +351,7 @@ impl Session {
         run::Request {
             limits: self.limits,
             session: self.key.clone(),
+            trigger: None,
             // Retries and turn two belong to one summary attempt; keep them
             // on one harness even if Setup changes during the run.
             child_harness: self.child_harness.clone(),
@@ -662,6 +670,9 @@ impl Session {
             }
         };
         if summarized.validated.compartments.is_empty() {
+            if let Some(telemetry) = &summarized.telemetry {
+                telemetry.ended_early(None);
+            }
             if let Some(reservation) = reservation {
                 self.drain.release(reservation);
             }
@@ -801,6 +812,9 @@ impl Session {
     }
 
     fn give_up_publication(&mut self, publication: PendingPublication) {
+        if let Some(telemetry) = &publication.result.telemetry {
+            telemetry.stale();
+        }
         tracing::warn!(
             session = %self.key.session,
             error = %publication.error,
@@ -904,7 +918,7 @@ impl Session {
         now_ms: i64,
     ) -> Result<(), String> {
         if let Some(db) = &self.db {
-            db.publish_summaries(
+            let stored = db.publish_summaries_with_receipt(
                 &self.key.harness,
                 &self.key.session,
                 &publication.result.validated.compartments,
@@ -912,6 +926,18 @@ impl Session {
                 &publication.recall,
                 now_ms,
             )?;
+            if let Some(telemetry) = &publication.result.telemetry {
+                telemetry.published(
+                    &publication.result.validated,
+                    &stored.ids,
+                    stored.events,
+                    publication
+                        .result
+                        .publication
+                        .as_ref()
+                        .map(|p| p.send.publication_id.as_str()),
+                );
+            }
         }
         Ok(())
     }
@@ -924,6 +950,7 @@ impl Session {
         let run::Summarized {
             validated,
             continuation,
+            telemetry,
             ..
         } = summarized;
         self.no_progress = None;
@@ -951,7 +978,12 @@ impl Session {
                 "ck-mc: session: no second summary turn: the session has no memory level it can write to"
             );
         }
-        continuation.filter(|_| self.db.is_some())
+        continuation
+            .filter(|_| self.db.is_some())
+            .map(|mut continuation| {
+                continuation.telemetry = telemetry;
+                continuation
+            })
     }
 
     async fn show_publication<C: RunnerClient>(

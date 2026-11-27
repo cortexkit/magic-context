@@ -67,6 +67,7 @@ pub const KEPT_CHILD_DAYS: u32 = 7;
 pub struct Request {
     pub limits: crate::reads::Limits,
     pub session: SessionRef,
+    pub(crate) trigger: Option<&'static str>,
     /// Snapshot the child's route when the run starts. Later Setup updates
     /// affect the next run, never a child or continuation already in flight.
     pub child_harness: Option<String>,
@@ -113,6 +114,7 @@ pub struct Request {
 #[derive(Clone, Debug)]
 pub struct Summarized {
     pub validated: ValidatedChunk,
+    pub(crate) telemetry: Option<super::telemetry::Record>,
     /// The raw messages this publication covers, before any change to a view.
     pub(crate) source: PublicationSource,
     /// The first turn's send and publication record, stored with the
@@ -168,6 +170,7 @@ impl PublicationSource {
 #[derive(Clone, Debug)]
 pub struct Continuation {
     pub child: Child,
+    pub(crate) telemetry: Option<super::telemetry::Record>,
     pub model: ModelRef,
     pub decision_id: String,
     pub output_tokens: u64,
@@ -237,6 +240,35 @@ pub async fn run<C: RunnerClient + Router>(
     client: &C,
     db: Option<&ContextDb>,
     job: &Request,
+) -> Result<Option<Summarized>, SummaryError> {
+    run_tracked(client, db, job, None).await
+}
+
+pub(crate) async fn run_tracked<C: RunnerClient + Router>(
+    client: &C,
+    db: Option<&ContextDb>,
+    job: &Request,
+    telemetry: Option<super::telemetry::Record>,
+) -> Result<Option<Summarized>, SummaryError> {
+    let mut result = run_inner(client, db, job, telemetry.as_ref()).await;
+    if let Some(telemetry) = telemetry {
+        match &mut result {
+            Ok(Some(summary)) => {
+                telemetry.reply(&summary.validated);
+                summary.telemetry = Some(telemetry);
+            }
+            Ok(None) => telemetry.ended_early(None),
+            Err(error) => telemetry.ended_early(Some(error)),
+        }
+    }
+    result
+}
+
+async fn run_inner<C: RunnerClient + Router>(
+    client: &C,
+    db: Option<&ContextDb>,
+    job: &Request,
+    telemetry: Option<&super::telemetry::Record>,
 ) -> Result<Option<Summarized>, SummaryError> {
     // The same deadline covers preparation, retries and route fallbacks.
     let deadline = tokio::time::Instant::now() + RUN_TIMEOUT;
@@ -319,9 +351,7 @@ pub async fn run<C: RunnerClient + Router>(
                 }
             }
         };
-        // Routing picks the model per attempt and ck-mc keeps no other record
-        // of it, so this line is the only place to see which model wrote a
-        // session's summaries.
+        // Include the decision here so the runner's own route log can be matched.
         tracing::info!(
             session = %job.session.session,
             model = %answer.route.route_key(),
@@ -361,8 +391,16 @@ pub async fn run<C: RunnerClient + Router>(
             keep_child: job.keep_subagents,
             attribution,
         };
-        let outcome =
-            summarize_on(client, job, &entries, &call, records.as_ref(), &mut usage).await;
+        let outcome = summarize_on(
+            client,
+            job,
+            &entries,
+            &call,
+            records.as_ref(),
+            &mut usage,
+            telemetry,
+        )
+        .await;
         let reported = match &outcome {
             Ok(_) => Outcome::Completed,
             // The prompt never went out: this model's window cannot hold it.
@@ -579,6 +617,7 @@ async fn summarize_on<C: RunnerClient>(
     call: &Call<'_>,
     records: Option<&Records<'_>>,
     usage: &mut Vec<(String, StepUsage)>,
+    telemetry: Option<&super::telemetry::Record>,
 ) -> Result<Option<Summarized>, Failure> {
     let (target, window, system) = (call.target, call.window, call.system);
     // Facts carry anchors only when memory is on: with memory off the
@@ -618,6 +657,14 @@ async fn summarize_on<C: RunnerClient>(
     };
     // The first message is always taken, even past the budget.
     let input = truncate_to(&chunk.input, fitted.chunk_tokens, window.counter);
+    if let Some(telemetry) = telemetry {
+        telemetry.chunk(
+            chunk.validation.start_index,
+            chunk.validation.end_index,
+            chunk.messages,
+            &input,
+        );
+    }
     let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
         seed_examples: &fitted.seed_examples,
         session_references: &fitted.session_references,
@@ -690,7 +737,8 @@ async fn summarize_on<C: RunnerClient>(
         ),
         None => None,
     };
-    let (reply, answered_in) = attempt(client, job, &label, &prompt, call, usage).await?;
+    let (reply, answered_in) =
+        attempt(client, job, &label, &prompt, call, usage, telemetry).await?;
     // An invalid reply fails this model; the run moves on to the next one.
     let hashes = super::hashes::by_ordinal(entries);
     let mut validated = turn_one::parse_reply(&reply)
@@ -699,7 +747,12 @@ async fn summarize_on<C: RunnerClient>(
             validate_historian_output(&xml, &chunk.validation, &prior, options)
                 .map_err(|error| error.message)
         })
-        .map_err(|error| Failure::Failed(format!("invalid turn-one reply: {error}")))?;
+        .map_err(|error| {
+            if let Some(telemetry) = telemetry {
+                telemetry.invalid_reply();
+            }
+            Failure::Failed(format!("invalid turn-one reply: {error}"))
+        })?;
     super::hashes::sanitize(&mut validated.compartments, &hashes);
     let publication = send
         .clone()
@@ -719,6 +772,7 @@ async fn summarize_on<C: RunnerClient>(
             },
         });
     let continuation = send.as_ref().filter(|_| anchored).map(|send| Continuation {
+        telemetry: None,
         child: answered_in,
         model: target.model.clone(),
         decision_id: target.decision_id.clone(),
@@ -738,6 +792,7 @@ async fn summarize_on<C: RunnerClient>(
     });
     let source = PublicationSource::new(job.from, validated.unprocessed_from, entries);
     Ok(Some(Summarized {
+        telemetry: None,
         validated,
         source,
         publication,
@@ -777,6 +832,7 @@ async fn attempt<C: RunnerClient>(
     prompt: &str,
     call_on: &Call<'_>,
     usage: &mut Vec<(String, StepUsage)>,
+    telemetry: Option<&super::telemetry::Record>,
 ) -> Result<(String, Child), Failure> {
     let mut retry = 0;
     let mut paid_failure = None;
@@ -803,8 +859,27 @@ async fn attempt<C: RunnerClient>(
         // retry after a lost answer finds the run already started.
         let send_id = child.session.session.clone();
         let mut spent = None;
-        let result = call(client, &child, &send_id, prompt, call_on, &mut spent).await;
+        let mut observed = telemetry.map(|_| ObservedSend::default());
+        let result = call(
+            client,
+            &child,
+            &send_id,
+            prompt,
+            call_on,
+            &mut spent,
+            observed.as_mut(),
+        )
+        .await;
         let paid = spent.is_some();
+        if let Some((telemetry, observed)) = telemetry.zip(observed) {
+            telemetry.observed(
+                super::telemetry::Pass::One,
+                &call_on.target.model,
+                observed,
+                paid,
+                result.as_ref().err().map(CallError::telemetry_class),
+            );
+        }
         if let Some(spent) = spent {
             let root = summary_run_id(&send_id);
             let id = if retry == 0 {
@@ -901,6 +976,7 @@ async fn call<C: RunnerClient>(
     prompt: &str,
     call_on: &Call<'_>,
     usage: &mut Option<StepUsage>,
+    observed: Option<&mut ObservedSend>,
 ) -> Result<String, CallError> {
     let target = call_on.target;
     let how = Model {
@@ -919,7 +995,7 @@ async fn call<C: RunnerClient>(
         plan: None,
         attribution: call_on.attribution,
     };
-    let reply = send_and_wait_inner(client, child, send_id, prompt, &how, usage, None)
+    let reply = send_and_wait_inner(client, child, send_id, prompt, &how, usage, observed)
         .await?
         .completed()?;
     if reply.length_capped {
@@ -1020,6 +1096,16 @@ enum CallError {
     RetryAt { next_ms: u64, error: String },
 }
 
+impl CallError {
+    fn telemetry_class(&self) -> &'static str {
+        match self {
+            Self::Summary(error) => super::telemetry::summary_error_class(error),
+            Self::HostRefused(_) => "host_refused",
+            Self::RetryAt { .. } => "transient",
+        }
+    }
+}
+
 impl From<SummaryError> for CallError {
     fn from(error: SummaryError) -> Self {
         Self::Summary(error)
@@ -1074,6 +1160,10 @@ pub(crate) struct ObservedSend {
     pub finished: bool,
     pub terminal_usage: bool,
     pub usage: Option<cortexkit_role_llm_runner::usage::RunUsage>,
+    pub sent_at: Option<i64>,
+    pub never_delivered: bool,
+    pub not_sent: usize,
+    pub error_class: Option<&'static str>,
 }
 
 /// The same send, retaining the runner's receipt and exact aggregate usage.
@@ -1193,13 +1283,14 @@ async fn send_and_wait_inner<C: RunnerClient>(
     let reply = loop {
         if tokio::time::Instant::now() >= how.deadline {
             if pending {
-                return Err(
-                    queued_timeout(client, child, submission.as_deref(), how.send)
-                        .await
-                        .into(),
-                );
+                let error = queued_timeout(client, child, submission.as_deref(), how.send).await;
+                observe_withdrawal(reported.as_deref_mut(), &error);
+                return Err(error.into());
             }
             return Err(SummaryError::Failed(TIMED_OUT.into()).into());
+        }
+        if let Some(observed) = reported.as_deref_mut() {
+            observed.sent_at.get_or_insert_with(now_ms);
         }
         let reply =
             match tokio::time::timeout_at(how.deadline, client.send_child(child, request.clone()))
@@ -1225,13 +1316,17 @@ async fn send_and_wait_inner<C: RunnerClient>(
                     }
                     return Err(SummaryError::Uncertain(send_error(&error)).into());
                 }
-                Ok(Err(error)) => return Err(send_refused(&error, how.send).into()),
+                Ok(Err(error)) => {
+                    if let Some(observed) = reported.as_deref_mut() {
+                        observed.never_delivered = true;
+                    }
+                    return Err(send_refused(&error, how.send).into());
+                }
                 Err(_) => {
-                    return Err(
-                        queued_timeout(client, child, submission.as_deref(), how.send)
-                            .await
-                            .into(),
-                    )
+                    let error =
+                        queued_timeout(client, child, submission.as_deref(), how.send).await;
+                    observe_withdrawal(reported.as_deref_mut(), &error);
+                    return Err(error.into());
                 }
             };
         if let Some(observed) = reported.as_deref_mut() {
@@ -1246,6 +1341,10 @@ async fn send_and_wait_inner<C: RunnerClient>(
             }
         }
         if reply.state == send_states::NOT_DELIVERED {
+            if let Some(observed) = reported.as_deref_mut() {
+                observed.not_sent += 1;
+                observed.sent_at = None;
+            }
             // A host that refused the words themselves (an unreadable
             // attachment, invalid host configuration, an unsupported host
             // version, a managed policy) refuses the same send again on every
@@ -1302,6 +1401,9 @@ async fn send_and_wait_inner<C: RunnerClient>(
             states::ACTIVE | send_states::PENDING | send_states::FINISHED
         )
     }) else {
+        if let Some(observed) = reported.as_deref_mut() {
+            observed.never_delivered = true;
+        }
         return Err(format!("the runner did not start a run: {}", reply.state).into());
     };
     let result = wait_for(
@@ -1311,15 +1413,32 @@ async fn send_and_wait_inner<C: RunnerClient>(
         how.deadline,
         how.send,
         usage,
-        reported,
+        reported.as_deref_mut(),
     )
-    .await?;
+    .await;
+    if let Err(error) = &result {
+        observe_withdrawal(reported.as_deref_mut(), error);
+    }
+    let result = result?;
     if result.state != states::COMPLETED {
+        if let Some(observed) = reported.as_deref_mut() {
+            // Runner and provider error messages/codes can quote the prompt.
+            // Persist only recognized classes, never fields from the response.
+            observed.error_class = match result.error.as_ref().map(|error| error.class.as_str()) {
+                Some("transient") => Some("transient"),
+                Some("permanent") => Some("permanent"),
+                Some("provider") => Some("provider_error"),
+                _ => None,
+            };
+        }
         if result.state == states::ERROR
             && result.error.as_ref().is_some_and(|error| {
                 error.class == cortexkit_role_llm_runner::errors::run_error_classes::HANDOVER_FAILED
             })
         {
+            if let Some(observed) = reported.as_deref_mut() {
+                observed.never_delivered = true;
+            }
             let cause = result
                 .error
                 .as_ref()
@@ -1336,6 +1455,9 @@ async fn send_and_wait_inner<C: RunnerClient>(
         // A runner that queued the send refuses it at the run's own
         // admission, and says so in the error the run ends with.
         if let Some(wait) = AccountWait::of_ended_run(&result, how.send, now_ms()) {
+            if let Some(observed) = reported.as_deref_mut() {
+                observed.never_delivered = true;
+            }
             if AccountWait::of_person(&result, how.send, now_ms()).is_some() {
                 cancel_waiting(client, child, &run_id).await;
             }
@@ -1360,6 +1482,9 @@ async fn send_and_wait_inner<C: RunnerClient>(
                 .as_ref()
                 .is_some_and(|error| error.class == "host_refused")
         {
+            if let Some(observed) = reported {
+                observed.never_delivered = true;
+            }
             return Err(CallError::HostRefused(failure));
         }
         if result.state == states::MAX_STEPS {
@@ -1390,6 +1515,15 @@ async fn send_and_wait_inner<C: RunnerClient>(
         step_capped: false,
         failure: String::new(),
     })
+}
+
+fn observe_withdrawal(observed: Option<&mut ObservedSend>, error: &SummaryError) {
+    if let Some(observed) = observed {
+        observed.never_delivered = matches!(
+            error,
+            SummaryError::NeverRan(_) | SummaryError::AccountWait(_)
+        );
+    }
 }
 
 async fn queued_timeout<C: RunnerClient>(

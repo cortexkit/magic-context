@@ -105,6 +105,7 @@ async fn log_summary_events() {
     }))
     .unwrap();
     let result = run::Summarized {
+        telemetry: None,
         validated: crate::summary::validate::ValidatedChunk {
             compartments: vec![compartment],
             ..Default::default()

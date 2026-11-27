@@ -1792,7 +1792,7 @@ fn events_block_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r#"(?s)<events>(.*?)</events>"#).unwrap())
 }
 
-const HISTORIAN_CATEGORIES: &[&str] = &[
+pub(super) const HISTORIAN_CATEGORIES: &[&str] = &[
     "PROJECT_RULES",
     "ARCHITECTURE",
     "CONSTRAINTS",

@@ -17,6 +17,7 @@ pub mod prompt;
 pub mod prompts;
 pub mod render;
 pub mod run;
+pub(crate) mod telemetry;
 pub mod trigger;
 pub mod two_pass;
 pub mod validate;

@@ -165,6 +165,7 @@ struct Carrier {
     /// are attributed to, with the owning session as their parent.
     alfonso: Option<String>,
     project: Option<String>,
+    telemetry: Option<crate::summary::telemetry::Record>,
 }
 
 impl Carrier {
@@ -183,6 +184,7 @@ impl Carrier {
             keep_child: job.continuation.keep_child,
             alfonso: job.agent_id.clone(),
             project: Some(job.project.clone()),
+            telemetry: job.continuation.telemetry.clone(),
         }
     }
 
@@ -246,6 +248,9 @@ impl Carrier {
             keep_child,
             alfonso: None,
             project: None,
+            // Recovered stages belong to an earlier publication, not to the
+            // run whose second turn happens to recover them.
+            telemetry: None,
         })
     }
 
@@ -316,15 +321,43 @@ impl Carrier {
             }),
         };
         let mut usage: Option<StepUsage> = None;
-        let result = run::send_and_wait(
-            client,
-            &self.child(child),
-            send_id,
-            prompt.text,
-            &how,
-            &mut usage,
-        )
-        .await;
+        let result = if let Some(telemetry) = &self.telemetry {
+            use crate::summary::telemetry::{summary_error_class, Pass};
+            let mut observed = run::ObservedSend::default();
+            let result = run::send_and_wait_recorded(
+                client,
+                &self.child(child),
+                send_id,
+                prompt.text,
+                &how,
+                &mut usage,
+                &mut observed,
+            )
+            .await
+            .and_then(|ended| ended.completed().map_err(SummaryError::from));
+            let error = match &result {
+                Ok(reply) if reply.length_capped => Some("output_limit"),
+                Ok(_) => None,
+                Err(error) => Some(summary_error_class(error)),
+            };
+            let pass = if how.send == SendKind::FactCheck {
+                Pass::FactCheck
+            } else {
+                Pass::Two
+            };
+            telemetry.observed(pass, &self.model, observed, usage.is_some(), error);
+            result
+        } else {
+            run::send_and_wait(
+                client,
+                &self.child(child),
+                send_id,
+                prompt.text,
+                &how,
+                &mut usage,
+            )
+            .await
+        };
         if let Some(usage) = usage
             .as_ref()
             .filter(|_| !matches!(result, Err(SummaryError::Uncertain(_))))
@@ -1216,7 +1249,8 @@ impl<C: RunnerClient> Resolver<'_, C> {
                     envelope::apply_decided_prefix(&fact.content, decision.decided)
                 };
                 let owner = self.new_owner(fact, decision, workspace);
-                self.db
+                let receipt = self
+                    .db
                     .with_connection(|conn| {
                         applier::admit(
                             conn,
@@ -1239,8 +1273,13 @@ impl<C: RunnerClient> Resolver<'_, C> {
                             },
                         )
                     })
-                    .map(|_| Ok(()))
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string())?;
+                if receipt.state == "applied" && receipt.inserted.is_some() {
+                    if let Some(telemetry) = &self.carrier.telemetry {
+                        telemetry.promoted(&fact.publication);
+                    }
+                }
+                Ok(Ok(()))
             }
             "covered" => self
                 .covered(fact, reservation, &key, decision, workspace)

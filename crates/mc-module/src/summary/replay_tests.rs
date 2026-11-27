@@ -903,6 +903,7 @@ async fn second_turn(
         project: project.to_owned(),
         project_root: None,
         continuation: Continuation {
+            telemetry: None,
             child: Child {
                 session: SessionRef::new(RUNNER, HARNESS, child.clone()),
                 project_root: None,

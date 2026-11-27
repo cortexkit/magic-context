@@ -342,13 +342,10 @@ impl Session {
             floor_mid = %floor.mid,
             "ck-mc: session: summarizing toward the last entry without part numbers before any view"
         );
-        Some(Some(self.begin_summary(
-            settings,
-            from,
-            until,
-            emergency,
-            until >= through_floor,
-        )))
+        let mut request =
+            self.begin_summary(settings, from, until, emergency, until >= through_floor);
+        request.trigger = Some("numbers_unknown");
+        Some(Some(request))
     }
 
     /// Nothing through the numbers floor, nor in later history outside the

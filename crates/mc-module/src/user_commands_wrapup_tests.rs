@@ -236,6 +236,7 @@ fn publication(session: &Session, from: u64, until: u64) -> run::Summarized {
     .unwrap();
     let source = run::PublicationSource::new(from, until, session.index.entries());
     run::Summarized {
+        telemetry: None,
         validated: crate::summary::validate::ValidatedChunk {
             compartments: vec![compartment],
             ..Default::default()
