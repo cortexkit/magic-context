@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	jest,
+	spyOn,
+} from "bun:test";
 import { createHash } from "node:crypto";
 import * as embeddingModule from "@magic-context/core/features/magic-context/memory/embedding";
 import type { UnifiedSearchResult } from "@magic-context/core/features/magic-context/search";
@@ -190,6 +198,18 @@ for (const scenario of replayScenarios) {
 }
 
 describe("runAutoSearchHintForPi", () => {
+	let clock: ReturnType<typeof spyOn<typeof performance, "now">> | undefined;
+	function useSearchClock() {
+		jest.useFakeTimers({ doNotFake: ["setImmediate", "performance"] });
+		const started = Date.now();
+		clock = spyOn(performance, "now").mockImplementation(
+			() => Date.now() - started,
+		);
+	}
+
+	const flushSearch = () =>
+		new Promise<void>((resolve) => setImmediate(resolve));
+
 	let snapshotSpy: ReturnType<
 		typeof spyOn<typeof embeddingModule, "getProjectEmbeddingSnapshot">
 	>;
@@ -200,6 +220,9 @@ describe("runAutoSearchHintForPi", () => {
 		).mockReturnValue(autoSearchTestSnapshot(baseOptions.projectPath));
 	});
 	afterEach(() => {
+		clock?.mockRestore();
+		clock = undefined;
+		jest.useRealTimers();
 		snapshotSpy.mockRestore();
 		clearAutoSearchForPiSession("ses-auto");
 		clearAutoSearchForPiSession("ses-auto-2");
@@ -807,21 +830,32 @@ describe("runAutoSearchHintForPi", () => {
 
 	it("persists a sticky no-hint decision after serving a deadline skip", async () => {
 		const db = createTestDb();
-		const spy = spyOn(searchModule, "searchAutoHint").mockImplementation(
-			() => new Promise<UnifiedSearchResult[]>(() => undefined),
-		);
+		useSearchClock();
+		const entered = Promise.withResolvers<void>();
+		const spy = spyOn(searchModule, "searchAutoHint").mockImplementation(() => {
+			entered.resolve();
+			return new Promise<UnifiedSearchResult[]>(() => undefined);
+		});
 		try {
 			const messages = [userMessage("explain the historian cache wiring", 1)];
-			const started = Date.now();
-			await runAutoSearchHintForPi({
+			let done = false;
+			const pending = runAutoSearchHintForPi({
 				sessionId: "ses-auto",
 				db,
 				messages,
 				options: baseOptions,
+			}).then(() => {
+				done = true;
 			});
-			const elapsed = Date.now() - started;
-
-			expect(elapsed).toBeLessThan(4_000);
+			await Promise.race([entered.promise, pending]);
+			expect(spy).toHaveBeenCalledTimes(1);
+			jest.advanceTimersByTime(999);
+			await flushSearch();
+			expect(done).toBe(false);
+			jest.advanceTimersByTime(1);
+			await flushSearch();
+			expect(done).toBe(true);
+			await pending;
 			expect(getAutoSearchHintDecisions(db, "ses-auto")[0]?.reason).toBe(
 				"timeout",
 			);
@@ -842,9 +876,15 @@ describe("runAutoSearchHintForPi", () => {
 
 	it("does not serve a synchronous search result after the whole-operation deadline", async () => {
 		const db = createTestDb();
+		useSearchClock();
+		let searchSignal: AbortSignal | undefined;
 		const spy = spyOn(searchModule, "searchAutoHint").mockImplementation(
-			async () => {
-				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3100);
+			async (_db, _session, _project, _prompt, options) => {
+				searchSignal = options?.signal;
+				expect(searchSignal?.aborted).toBe(false);
+				// A synchronous search can overrun without letting the timer callback run.
+				jest.setSystemTime(Date.now() + 1_000);
+				expect(searchSignal?.aborted).toBe(false);
 				return [memoryResult()];
 			},
 		);
@@ -857,9 +897,8 @@ describe("runAutoSearchHintForPi", () => {
 				messages,
 				entryIds: ["user"],
 				options: baseOptions,
-				ensureProjectRegistered: () =>
-					new Promise((resolve) => setTimeout(resolve, 2900)),
 			});
+			expect(searchSignal?.aborted).toBe(true);
 			expect(JSON.stringify(messages)).toBe(before);
 			expect(getAutoSearchHintDecisions(db, "ses-auto")[0]?.reason).toBe(
 				"timeout",
