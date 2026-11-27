@@ -239,10 +239,15 @@ const forcedError: RenderCase = {
     ],
     throwOnEvaluable: true,
 };
+const equalReply = { ...BASE, tailHygiene, dreamerProgress };
+const unchanged = {
+    snapshots: [equalReply, equalReply, equalReply],
+    trackText: ["10.0% / 65%", "1K / 10K", "Dreamer verify: 2/5 processed", "Hygiene"],
+} satisfies RenderCase;
 let results: RenderResult[];
 
 beforeAll(() => {
-    const cases = [...removals.map(({ render }) => render), updated, forcedError];
+    const cases = [...removals.map(({ render }) => render), updated, forcedError, unchanged];
     const script = join(import.meta.dir, "../../../scripts/render-compiled-sidebar.ts");
     const child = Bun.spawnSync(["bun", "--conditions=browser", script], {
         stdin: new TextEncoder().encode(JSON.stringify(cases)),
@@ -289,5 +294,16 @@ describe("compiled sidebar refresh", () => {
         expect(frames).toHaveLength(1);
         expect(frames[0]).toMatch(/Hygiene +50\.0% · 250\/500/);
         expect(error).toBe("forced error reading tailHygiene.evaluable during refresh");
+    });
+
+    test("retains the Context, Dreamer and Hygiene elements across equal refreshes", () => {
+        const { frames, error, textIds } = results[removals.length + 2];
+        expect(error).toBeUndefined();
+        expect(frames).toHaveLength(3);
+        expect(textIds).toHaveLength(3);
+        expect(textIds?.map((frame) => frame.map((ids) => ids.length))).toEqual(
+            frames.map(() => unchanged.trackText.map(() => 1)),
+        );
+        expect(textIds?.slice(1)).toEqual([textIds?.[0], textIds?.[0]]);
     });
 });

@@ -1,3 +1,4 @@
+import type { CliRenderer, Renderable } from "@opentui/core";
 import { plugin } from "bun";
 import { join } from "node:path";
 import { runtimeModuleId, TUI_RUNTIME_SPECIFIERS } from "../src/shared/tui-runtime-specifiers";
@@ -11,15 +12,16 @@ export type RenderCase = {
     snapshots: [SnapshotReply, ...SnapshotReply[]];
     collapsed?: boolean;
     throwOnEvaluable?: boolean;
+    trackText?: string[];
 };
-export type RenderResult = { frames: string[]; error?: string };
+export type RenderResult = { frames: string[]; error?: string; textIds?: number[][][] };
 type TestRender = (
     node: () => unknown,
     options: { width: number; height: number },
 ) => Promise<{
     renderOnce(): Promise<void>;
     captureCharFrame(): string;
-    renderer: { destroy(): void; requestRender(): void };
+    renderer: Pick<CliRenderer, "destroy" | "requestRender" | "root">;
 }>;
 type SlotRegistry = {
     register(plugin: {
@@ -58,10 +60,25 @@ const { ErrorBoundary } = loaded.get("solid-js") as unknown as {
     ErrorBoundary(props: { children: unknown; fallback: (error: unknown) => null }): unknown;
 };
 
+function captureTextIds(root: Renderable, labels: string[]): number[][] {
+    const ids = labels.map(() => [] as number[]);
+    function visit(node: Renderable) {
+        if ("plainText" in node) {
+            for (const [index, label] of labels.entries()) {
+                if (node.plainText === label) ids[index].push(node.num);
+            }
+        }
+        for (const child of node.getChildren()) visit(child);
+    }
+    visit(root);
+    return ids;
+}
+
 async function renderRefresh({
     snapshots,
     collapsed,
     throwOnEvaluable,
+    trackText,
 }: RenderCase): Promise<RenderResult> {
     process.env.OPENCODE_TUI_PREFERENCES_FILE = join(
         import.meta.dir,
@@ -78,6 +95,7 @@ async function renderRefresh({
         });
     let completed = nextDraw();
     const result: RenderResult = { frames: [] };
+    if (trackText) result.textIds = [];
     let setup: Awaited<ReturnType<TestRender>> | undefined;
     const context = {
         renderer: {
@@ -157,6 +175,7 @@ async function renderRefresh({
             if (result.error !== undefined) break;
             await setup.renderOnce();
             result.frames.push(setup.captureCharFrame().trimEnd());
+            if (trackText) result.textIds?.push(captureTextIds(setup.renderer.root, trackText));
         }
     } catch (error) {
         recordError(error);
