@@ -1053,3 +1053,39 @@ fn counted(tokens: u64) -> super::line::Counted {
         text: super::line::text_hash(&tokens.to_string()),
     }
 }
+
+/// With a counter that charges joined text more than any plan can allow
+/// for, the plans stop at [`BODY_PLANS`] and the oldest shown summaries then
+/// give up one form at a time until the joined body fits: the bound holds
+/// and the work stays bounded.
+#[test]
+fn past_the_plan_cap_the_oldest_steps_down_until_the_body_fits() {
+    let comps = session(300, 25, mixed_score);
+    let budget = 5_000usize;
+    // Any text of three or more pieces counts one token over the budget;
+    // a heading pair, as the joint is measured on, counts as usual.
+    let count = |text: &str| {
+        if text.matches("\n\n").count() >= 2 {
+            budget + 1
+        } else {
+            chars(text)
+        }
+    };
+    let rendered = render_history(&comps, budget as f64, count);
+    assert_eq!(rendered.plans, BODY_PLANS);
+    assert!(rendered.body_tokens[..BODY_PLANS]
+        .iter()
+        .all(|&tokens| tokens as usize > budget));
+    assert!(count(&rendered.text) <= budget);
+    assert!(
+        rendered.text.matches("\n\n").count() <= 1,
+        "{}",
+        rendered.text
+    );
+    assert!(!rendered.items.is_empty());
+    // What is left is the newest of what the last plan showed.
+    let oldest_left = rendered.items.iter().map(|item| item.0).min().unwrap();
+    assert!(rendered.plan.forms[..oldest_left]
+        .iter()
+        .all(|&form| form == NOT_SHOWN));
+}

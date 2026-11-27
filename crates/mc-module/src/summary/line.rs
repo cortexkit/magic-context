@@ -418,6 +418,13 @@ fn search(
 /// next newer one is touched, until the total fits. The floor's titles are
 /// among the oldest shown, so they go first. With every summary hidden the
 /// total is zero, so the result always fits.
+///
+/// Only the oldest shown summary ever changes, so the total is kept as the
+/// cost of a block at that end plus the cost of everything after it, which
+/// stays as it is and is summed once: the block is the oldest shown summary
+/// and the run of titles right after it, which it can join under one day
+/// heading. Each step looks up a few costs instead of every shown piece
+/// again, and the total is counted in full once, at the end.
 fn step_down(
     summaries: &[Summary],
     mut forms: Vec<u8>,
@@ -425,18 +432,132 @@ fn step_down(
     costs: &mut impl Costs,
     options: Options,
 ) -> (Vec<u8>, Vec<Vec<usize>>, u64) {
-    let limit = options.limit(budget);
-    for index in 0..forms.len() {
+    // The shown summaries, oldest first; a position is an index into this.
+    let order: Vec<usize> = (0..forms.len())
+        .filter(|&index| forms[index] < NOT_SHOWN)
+        .collect();
+    let count = order.len();
+    let joins = |forms: &[u8], a: usize, b: usize| {
+        let (a, b) = (order[a], order[b]);
+        options.day_headers
+            && forms[a] == TITLE
+            && forms[b] == TITLE
+            && summaries[a].day.is_some()
+            && summaries[a].day == summaries[b].day
+    };
+    // The last position of the run of titles from each position on.
+    let mut run_end: Vec<usize> = (0..count).collect();
+    for position in (0..count.saturating_sub(1)).rev() {
+        if joins(&forms, position, position + 1) {
+            run_end[position] = run_end[position + 1];
+        }
+    }
+    // The line costs of the titles, summed up to each position.
+    let mut lines = vec![0u64; count + 1];
+    for (position, &index) in order.iter().enumerate() {
+        let line = if forms[index] == TITLE {
+            costs.group_line(index)
+        } else {
+            0
+        };
+        lines[position + 1] = lines[position] + line;
+    }
+    // What the positions from each start of a run (or a summary that is
+    // not a title) on cost, and their pieces.
+    let mut after = vec![(0u64, 0usize); count + 1];
+    for start in (0..count).rev() {
+        if start > 0 && joins(&forms, start - 1, start) {
+            continue;
+        }
+        let end = run_end[start];
+        let (cost, pieces) = if forms[order[start]] == TITLE {
+            run_cost(costs, &order, &lines, start, end)
+        } else {
+            (costs.piece(order[start], forms[order[start]]), 1)
+        };
+        after[start] = (cost + after[end + 1].0, pieces + after[end + 1].1);
+    }
+    for front in 0..count {
+        let index = order[front];
+        // The block: this summary and the run of titles right after it.
+        let next_is_title = front + 1 < count && forms[order[front + 1]] == TITLE;
+        let end = if next_is_title {
+            run_end[front + 1]
+        } else {
+            front
+        };
         while forms[index] < NOT_SHOWN {
             forms[index] += 1;
-            let (groups, total) = cost_within(summaries, &forms, costs, options, limit);
-            if total as f64 <= budget {
+            let (block, pieces) = if next_is_title && joins(&forms, front, front + 1) {
+                let header = costs.group_header(&order[front..=end]);
+                let line = costs.group_line(index);
+                (
+                    header + line + lines[end + 1] - lines[front + 1],
+                    end - front + 2,
+                )
+            } else {
+                let (own, own_pieces) = match forms[index] {
+                    NOT_SHOWN => (0, 0),
+                    form => (costs.piece(index, form), 1),
+                };
+                let (rest, rest_pieces) = if next_is_title {
+                    run_cost(costs, &order, &lines, front + 1, end)
+                } else {
+                    (0, 0)
+                };
+                (own + rest, own_pieces + rest_pieces)
+            };
+            let (rest, rest_pieces) = after[end + 1];
+            let pieces = pieces + rest_pieces;
+            let joints = (costs.joint() * pieces.saturating_sub(1) as f64).ceil() as u64;
+            if (block + rest + joints) as f64 <= budget {
+                let (groups, total) = cost_of(summaries, &forms, costs, options);
+                debug_assert_eq!(total, block + rest + joints);
                 return (forms, groups, total);
             }
         }
     }
     let (groups, total) = cost_of(summaries, &forms, costs, options);
     (forms, groups, total)
+}
+
+/// What the titles at positions `from..=to` of `order` cost as one run, and
+/// how many pieces they are: a title on its own, or a day heading and a
+/// line each. `lines` holds the titles' line costs summed by position.
+fn run_cost(
+    costs: &mut impl Costs,
+    order: &[usize],
+    lines: &[u64],
+    from: usize,
+    to: usize,
+) -> (u64, usize) {
+    if from == to {
+        (costs.piece(order[from], TITLE), 1)
+    } else {
+        (
+            costs.group_header(&order[from..=to]) + lines[to + 1] - lines[from],
+            to - from + 2,
+        )
+    }
+}
+
+/// Give the oldest summary `plan` shows one shorter form (or leave it out),
+/// with the plan's day groups and total brought up to date, as one step of
+/// [`step_down`]. Returns whether any summary was shown.
+pub(crate) fn step_oldest(
+    plan: &mut Plan,
+    summaries: &[Summary],
+    costs: &mut impl Costs,
+    options: Options,
+) -> bool {
+    let Some(index) = plan.forms.iter().position(|&form| form < NOT_SHOWN) else {
+        return false;
+    };
+    plan.forms[index] += 1;
+    let (groups, total) = cost_of(summaries, &plan.forms, costs, options);
+    plan.joints = joints_cost(&plan.forms, &groups, costs);
+    (plan.groups, plan.total) = (groups, total);
+    true
 }
 
 /// The forms, day groups and total cost at one stretch factor, the total

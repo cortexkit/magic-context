@@ -425,12 +425,20 @@ pub(crate) struct RenderedHistory {
     /// replay harness read it; a fold needs the text and the items.
     #[cfg_attr(not(test), allow(dead_code))]
     pub plan: line::Plan,
-    /// The joined body's real tokens after each plan: more than one when
-    /// the blank lines between pieces took the first body over the budget
-    /// and the forms were chosen again. Read by tests and the harness.
+    /// The joined body's real tokens after each plan or step: more than one
+    /// when the blank lines between pieces took the first body over the
+    /// budget and the forms were chosen again. Read by tests and the
+    /// harness.
     #[cfg_attr(not(test), allow(dead_code))]
     pub body_tokens: Vec<u64>,
+    /// How many plans were made, at most [`BODY_PLANS`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub plans: usize,
 }
+
+/// How many times the forms are chosen at most for one render. Past that,
+/// the oldest shown summary steps down one form at a time instead.
+pub(crate) const BODY_PLANS: usize = 6;
 
 /// Render the history block for `history_budget_tokens` (no `<session-history>`
 /// wrapper — callers add their own framing), counting each piece with
@@ -441,7 +449,9 @@ pub(crate) struct RenderedHistory {
 /// few headings, to the budget. Joined text can count a little differently,
 /// so the joined body is counted for real, and while it is over the budget
 /// the forms are chosen again with pieces that much smaller, from the same
-/// counts. The body therefore fits the budget, or is empty.
+/// counts, at most [`BODY_PLANS`] times; after that the oldest shown summary
+/// gives up one form at a time. The body therefore fits the budget, or is
+/// empty.
 pub(crate) fn render_history(
     compartments: &[DecayRenderCompartment],
     history_budget_tokens: f64,
@@ -553,39 +563,35 @@ fn render_rows(
     }
     let mut target = budget;
     let mut body_tokens = Vec::new();
+    let mut plan = line::plan(&summaries, target, &mut costs, options);
+    let mut plans = 1;
     loop {
-        let mut plan = line::plan(&summaries, target, &mut costs, options);
-        let (mut text, mut items) = join_plan(&plan, rows, indices, &mut costs);
+        let (text, items) = join_plan(&plan, rows, indices, &mut costs);
         let tokens = count(&text);
         body_tokens.push(tokens);
         let over = tokens as f64 - budget;
-        // The new plan's pieces must come out `over` below this plan's, not
-        // only below this target: a plan's pieces usually fall short of
-        // its target, and the excess beyond them stays about the same. The
-        // target falls by at least one token a plan, and a plan never
-        // costs more than its target, so this ends: at the latest when no
-        // piece fits any more.
-        let next = target.min(plan.total as f64) - over.ceil().max(1.0);
-        if over > 0.0 && !items.is_empty() && next >= 1.0 {
-            target = next;
-            continue;
+        if over <= 0.0 || items.is_empty() {
+            return RenderedHistory {
+                text,
+                items,
+                plan,
+                body_tokens,
+                plans,
+            };
         }
-        if over > 0.0 && !items.is_empty() {
-            // Only a counter that charges joined text far more than its
-            // pieces gets here: nothing shown fits once joined.
-            text.clear();
-            items.clear();
-            plan.forms.fill(NOT_SHOWN);
-            plan.groups.clear();
-            (plan.total, plan.joints) = (0, 0);
-            body_tokens.push(count(&text));
+        if plans < BODY_PLANS {
+            // The new plan's pieces must come out `over` below this plan's,
+            // not only below this target: a plan's pieces usually fall short
+            // of its target, and the excess beyond them stays about the same.
+            target = (target.min(plan.total as f64) - over.ceil()).max(1.0);
+            plan = line::plan(&summaries, target, &mut costs, options);
+            plans += 1;
+        } else {
+            // Joining still counts more than the plans allowed for: the
+            // oldest shown summary gives up one form, as in the plan's step
+            // down, until the joined body fits or nothing is shown.
+            line::step_oldest(&mut plan, &summaries, &mut costs, options);
         }
-        return RenderedHistory {
-            text,
-            items,
-            plan,
-            body_tokens,
-        };
     }
 }
 

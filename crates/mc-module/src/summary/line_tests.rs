@@ -1054,3 +1054,70 @@ fn filling_spends_what_is_left_on_the_newest_hidden_titles() {
     }
     assert!(filled > 0);
 }
+
+/// Costs that count every lookup.
+struct Looked<'t> {
+    forms: &'t dyn Fn(usize, u8) -> u64,
+    lookups: usize,
+}
+
+impl Costs for Looked<'_> {
+    fn piece(&mut self, index: usize, form: u8) -> u64 {
+        self.lookups += 1;
+        (self.forms)(index, form)
+    }
+    fn group_line(&mut self, _: usize) -> u64 {
+        self.lookups += 1;
+        10
+    }
+    fn group_header(&mut self, _: &[usize]) -> u64 {
+        self.lookups += 1;
+        1
+    }
+}
+
+/// Stepping down looks each cost up a number of times linear in the
+/// summaries, not once per summary per step: every summary tied at a high
+/// score on one day, so the floor brings all the old ones back as titles
+/// (5% of a budget of 200 a summary), with the newest summary too large for
+/// what is left. Two newest sizes: one far over the budget (stepped down
+/// itself after every title is gone) and one just under it (part of the
+/// titles go).
+#[test]
+fn stepping_down_looks_costs_up_a_linear_number_of_times() {
+    for newest_share in [None, Some(0.97)] {
+        for n in [1_000usize, 4_000] {
+            let budget = (n * 200) as f64;
+            let newest = newest_share.map_or(10_000_000, |share| (share * budget) as u64);
+            let forms = move |index: usize, form: u8| match form {
+                TITLE => 10,
+                _ if index == n - 1 => newest,
+                _ => 10_000_000,
+            };
+            let summaries: Vec<Summary> = (0..n)
+                .map(|_| Summary {
+                    score: 95.0,
+                    scored: true,
+                    day: Some("2026-03-01"),
+                })
+                .collect();
+            let mut costs = Looked {
+                forms: &forms,
+                lookups: 0,
+            };
+            let plan = plan(&summaries, budget, &mut costs, no_fill());
+            let at = format!("{n} summaries, newest {newest}");
+            assert!(plan.total as f64 <= budget, "{at}");
+            assert!(
+                plan.forms[..n / 3].iter().all(|&form| form == NOT_SHOWN),
+                "{at}"
+            );
+            assert!(
+                costs.lookups <= 60 * n,
+                "{at}: {} lookups, {} a summary",
+                costs.lookups,
+                costs.lookups / n
+            );
+        }
+    }
+}
