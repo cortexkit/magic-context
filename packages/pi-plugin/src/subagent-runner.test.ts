@@ -4,6 +4,7 @@ import {
 	describe,
 	expect,
 	it,
+	jest,
 	mock,
 	spyOn,
 } from "bun:test";
@@ -74,6 +75,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	jest.useRealTimers();
 	__setPiHarnessKindForTesting(undefined);
 	__test.resetHostToolState();
 	closeDatabase();
@@ -4409,21 +4411,27 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		expect(result.meta?.mappingMessages).toEqual([message]);
 	});
 
-	it("does not send SIGKILL when child exits after SIGTERM before escalation timeout", async () => {
+	it("does not send SIGKILL when child exits after SIGTERM before escalation timeout", () => {
+		jest.useFakeTimers({ doNotFake: ["setImmediate"] });
 		const child = createMockChild();
 
 		__test.terminateChild(child as never);
+		jest.advanceTimersByTime(1_999);
+		expect(child.killSignals).toEqual(["SIGTERM"]);
 		child.emitExit(0, null);
-		await new Promise((resolve) => setTimeout(resolve, 2100));
+		jest.advanceTimersByTime(1);
 
 		expect(child.killSignals).toEqual(["SIGTERM"]);
 	});
 
-	it("sends SIGKILL when child remains alive past escalation timeout", async () => {
+	it("sends SIGKILL when child remains alive past escalation timeout", () => {
+		jest.useFakeTimers({ doNotFake: ["setImmediate"] });
 		const child = createMockChild();
 
 		__test.terminateChild(child as never);
-		await new Promise((resolve) => setTimeout(resolve, 2100));
+		jest.advanceTimersByTime(1_999);
+		expect(child.killSignals).toEqual(["SIGTERM"]);
+		jest.advanceTimersByTime(1);
 
 		expect(child.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
 	});

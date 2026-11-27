@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, jest, mock, spyOn, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -130,7 +130,11 @@ async function flushMicrotasks(): Promise<void> {
 	await Promise.resolve();
 }
 
-function createEventStreamChild() {
+function createEventStreamChild(
+	scheduleClose = (close: () => void) => {
+		setTimeout(close, 0);
+	},
+) {
 	const events = new EventEmitter();
 	const stdout = new PassThrough();
 	const stderr = new PassThrough();
@@ -151,7 +155,7 @@ function createEventStreamChild() {
 			stdout.end();
 			stderr.end();
 			stdin.end();
-			setTimeout(() => events.emit("close", 0, null), 0);
+			scheduleClose(() => events.emit("close", 0, null));
 		},
 	};
 }
@@ -163,6 +167,7 @@ arguments:
 {"action":"archive","reason":"与全局用户画像重复","ids":[6]}`;
 
 afterEach(() => {
+	jest.useRealTimers();
 	__test.reset();
 	if (db) {
 		closeQuietly(db);
@@ -185,6 +190,9 @@ describe("Pi dreamer wiring", () => {
 				try {
 					let client!: CapturedDreamClient;
 					const models: string[] = [];
+					const primaryOutput = Promise.withResolvers<void>();
+					const flushChild = () =>
+						new Promise<void>((resolve) => setImmediate(resolve));
 					__test.setStartDreamScheduleTimerFactory(async (registration) => {
 						client = registration.client as CapturedDreamClient;
 						return () => {};
@@ -199,13 +207,13 @@ describe("Pi dreamer wiring", () => {
 								},
 								spawnImpl: mock((_command, args) => {
 									models.push(String(args[args.indexOf("--model") + 1]));
-									const child = createEventStreamChild();
+									const child = createEventStreamChild(setImmediate);
 									child.kill.mockImplementation(() => {
 										child.emitClose();
 										return true;
 									});
 									const primary = models.length === 1;
-									setTimeout(() => {
+									setImmediate(() => {
 										if (!primary) {
 											const message = {
 												role: "assistant",
@@ -241,7 +249,8 @@ describe("Pi dreamer wiring", () => {
 													delta: "x",
 												},
 											});
-									}, 0);
+										primaryOutput.resolve();
+									});
 									return child as never;
 								}) as never,
 							}),
@@ -258,8 +267,8 @@ describe("Pi dreamer wiring", () => {
 					const child = (await client.session.create({
 						body: { title: "magic-context-dream-classify-memories" },
 					})) as { id: string };
+					jest.useFakeTimers({ doNotFake: ["setImmediate"] });
 					const startedAt = Date.now();
-					// Leave the fallback ample time even when another suite deschedules this worker.
 					const timeoutMs = streaming ? 500 : 5_000;
 					const run = promptSyncWithValidatedOutputRetry(
 						client as never,
@@ -284,13 +293,30 @@ describe("Pi dreamer wiring", () => {
 								extractLatestAssistantText(messages),
 						},
 					);
-					if (streaming) {
-						let caught: unknown;
-						try {
-							await run;
-						} catch (error) {
+					let finished = false;
+					let caught: unknown;
+					const settled = run.then(
+						() => {
+							finished = true;
+						},
+						(error) => {
 							caught = error;
-						}
+							finished = true;
+						},
+					);
+					// Start spending the attempt budget only after the child's initial
+					// protocol events have reached the stream parser.
+					await Promise.race([primaryOutput.promise, settled]);
+					await flushChild();
+					expect(finished).toBe(false);
+					expect(models).toEqual(["test/primary"]);
+					jest.advanceTimersByTime(streaming ? 499 : 59);
+					await flushChild();
+					expect(finished).toBe(false);
+					expect(models).toEqual(["test/primary"]);
+					jest.advanceTimersByTime(1);
+					await settled;
+					if (streaming) {
 						expect((caught as Error).message).toBe(
 							"prompt timed out after 500ms",
 						);
@@ -298,12 +324,11 @@ describe("Pi dreamer wiring", () => {
 							"provider_timeout",
 						);
 						expect(models).toEqual(["test/primary"]);
-						expect(Date.now() - startedAt).toBeGreaterThanOrEqual(450);
+						expect(Date.now() - startedAt).toBe(500);
 					} else {
 						expect((await run).validated).toBe("fallback answer");
 						expect(models).toEqual(["test/primary", "test/fallback"]);
-						expect(Date.now() - startedAt).toBeGreaterThanOrEqual(55);
-						expect(Date.now() - startedAt).toBeLessThan(4_000);
+						expect(Date.now() - startedAt).toBe(60);
 						expect(
 							getSubagentInvocations(db, `git:silent-${harness}`),
 						).toMatchObject([
