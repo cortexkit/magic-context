@@ -110,9 +110,10 @@ describe("runManagedRecomp clears stale emergency recovery", () => {
 });
 
 describe("recomp message helpers", () => {
-    it("isRecompFailure detects Failed/Skipped headings only", () => {
+    it("isRecompFailure detects Failed, Skipped and Paused headings", () => {
         expect(isRecompFailure("## Magic Recomp — Failed\n\nreason")).toBe(true);
         expect(isRecompFailure("## Magic Recomp — Skipped")).toBe(true);
+        expect(isRecompFailure("## Magic Recomp — Paused")).toBe(true);
         expect(isRecompFailure("## Magic Recomp — Complete\n\nRebuilt 5")).toBe(false);
         expect(isRecompFailure("## Magic Recomp — Partial\n\nRemaining 40-99")).toBe(false);
     });

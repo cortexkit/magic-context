@@ -78,9 +78,9 @@ export interface ManagedRecompContext {
 }
 
 /** The runner's outcome messages are headed "## Magic Recomp — <Status>".
- *  Failed/Skipped wrote nothing. */
+ *  Failed, Skipped and Paused did not publish a rebuild. */
 export function isRecompFailure(message: string): boolean {
-    return /—\s*(Failed|Skipped)/.test(message);
+    return /—\s*(Failed|Skipped|Paused)/.test(message);
 }
 
 /** A SKIP (vs a true failure): the run no-op'd because the compartment-state

@@ -299,10 +299,13 @@ export type UserFacingTextStyle = "markdown" | "plain";
 export function renderUserFacingFailure(
     key: UserFacingFailureKey,
     style: UserFacingTextStyle = "markdown",
+    overrides?: { sentence?: string; action?: string },
 ): string {
     const failure = USER_FACING_FAILURES[key];
-    const action = style === "plain" ? failure.action.replaceAll("`", "") : failure.action;
-    return `${failure.sentence} ${action} (${failure.code})`;
+    const sentence = overrides?.sentence ?? failure.sentence;
+    const action = overrides?.action ?? failure.action;
+    const styledAction = style === "plain" ? action.replaceAll("`", "") : action;
+    return `${sentence}${styledAction ? ` ${styledAction}` : ""} (${failure.code})`;
 }
 
 export function userFacingFailureCode(key: UserFacingFailureKey): string {
