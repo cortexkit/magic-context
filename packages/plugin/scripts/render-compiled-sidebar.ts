@@ -1,5 +1,7 @@
 import type { CliRenderer, Renderable } from "@opentui/core";
 import { plugin } from "bun";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runtimeModuleId, TUI_RUNTIME_SPECIFIERS } from "../src/shared/tui-runtime-specifiers";
 import { getRpcClient } from "../src/tui-compiled/data/context-db";
@@ -74,17 +76,11 @@ function captureTextIds(root: Renderable, labels: string[]): number[][] {
     return ids;
 }
 
-async function renderRefresh({
-    snapshots,
-    collapsed,
-    throwOnEvaluable,
-    trackText,
-}: RenderCase): Promise<RenderResult> {
-    process.env.OPENCODE_TUI_PREFERENCES_FILE = join(
-        import.meta.dir,
-        "../src/tui/slots/fixtures",
-        collapsed ? "sidebar-collapsed.json" : "unused/prefs.jsonc",
-    );
+async function renderRefresh(
+    { snapshots, throwOnEvaluable, trackText }: RenderCase,
+    prefs: string,
+): Promise<RenderResult> {
+    process.env.OPENCODE_TUI_PREFERENCES_FILE = prefs;
     const directory = import.meta.dir;
     const sessionID = snapshots[0].sessionId;
     let response = snapshots[0];
@@ -108,29 +104,28 @@ async function renderRefresh({
     } satisfies Pick<V2TuiContext, "renderer"> & { data: Pick<V2TuiContext["data"], "listen"> };
     const slot = await mountV1Sidebar(context as unknown as V2TuiContext, directory);
     if (!slot) throw new Error("compiled sidebar runtime not available");
-    const rpc = getRpcClient();
-    if (!rpc) throw new Error("sidebar RPC client not initialized");
-    rpc.call = async <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
-        if (method !== "sidebar-snapshot" || params.sessionId !== response.sessionId) {
-            throw new Error(`unexpected sidebar RPC: ${method} for ${String(params.sessionId)}`);
-        }
-        return response as T;
-    };
-    const last = snapshots.at(-1);
-    if (throwOnEvaluable && last?.tailHygiene) {
-        Object.defineProperty(last.tailHygiene, "evaluable", {
-            get() {
-                throw new TypeError("forced error reading tailHygiene.evaluable during refresh");
-            },
-        });
-    }
-
     let timer: ReturnType<typeof setTimeout> | undefined;
     function recordError(error: unknown) {
         result.error ??= error instanceof Error ? error.message : String(error);
         resolveDraw();
     }
     try {
+        const rpc = getRpcClient();
+        if (!rpc) throw new Error("sidebar RPC client not initialized");
+        rpc.call = async <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
+            if (method !== "sidebar-snapshot" || params.sessionId !== response.sessionId) {
+                throw new Error(`unexpected sidebar RPC: ${method} for ${String(params.sessionId)}`);
+            }
+            return response as T;
+        };
+        const last = snapshots.at(-1);
+        if (throwOnEvaluable && last?.tailHygiene) {
+            Object.defineProperty(last.tailHygiene, "evaluable", {
+                get() {
+                    throw new TypeError("forced error reading tailHygiene.evaluable during refresh");
+                },
+            });
+        }
         setup = await testRender(
             () => {
                 const registry = createSolidSlotRegistry(
@@ -188,7 +183,18 @@ async function renderRefresh({
 }
 
 const inputs = JSON.parse(await Bun.stdin.text()) as RenderCase[];
+const prefsRoot = await mkdtemp(join(tmpdir(), "mc-sidebar-render-"));
 const results: RenderResult[] = [];
-for (const entry of inputs) results.push(await renderRefresh(entry));
+try {
+    const expanded = join(prefsRoot, "expanded.json");
+    const collapsed = join(prefsRoot, "collapsed.json");
+    await writeFile(expanded, "{}");
+    await writeFile(collapsed, '{"magic-context":{"startCollapsed":true,"rememberCollapsed":false}}');
+    for (const entry of inputs) {
+        results.push(await renderRefresh(entry, entry.collapsed ? collapsed : expanded));
+    }
+} finally {
+    await rm(prefsRoot, { recursive: true, force: true });
+}
 process.stdout.write(JSON.stringify(results));
 process.exit(0);
