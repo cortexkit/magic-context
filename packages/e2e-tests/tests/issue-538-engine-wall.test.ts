@@ -303,7 +303,8 @@ describe("issue 538: engine rejects oversized prompts before any model call", ()
             // The rejected request did not supply an overflow signal or refresh
             // the clock. An expired provider cache alone is no reason to change the
             // part of the request the provider had cached: resending the same bytes
-            // costs the same and keeps signed thinking valid.
+            // costs the same, and a provider that signs a model's thinking blocks
+            // against the bytes before them rejects those blocks once that changes.
             expect(expired).toMatchObject({
                 cacheExpired: true,
                 executeDecisions: 0,

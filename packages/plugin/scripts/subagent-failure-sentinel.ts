@@ -183,7 +183,7 @@ function budgetOutcome(db: Database, row: Row, now: number): BudgetOutcome {
 /**
  * Ids of routine failures that a completed fallback attempt
  * recovered. The run produced its result on a fallback model, so the earlier
- * failures are expected and not worth a wake. A chain can fail on several models
+ * failures are expected and not worth an alert. A chain can fail on several models
  * before one completes, for example when two models share one exhausted account
  * pool, so recovery follows the chain to the completed attempt. Only routine
  * failures are excused. A non-routine step on the way, such as a fallback that
