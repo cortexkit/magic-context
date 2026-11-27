@@ -108,7 +108,8 @@ function respondToHiddenRun(
 	host: Host,
 	seq: number,
 	kind: RunKind,
-	delayMs = 0,
+	// When given, the hidden run's first model answer is held until this settles.
+	until?: Promise<unknown>,
 ): string {
 	const notice = `HIDDEN_NOTICE_${kind}_${seq}`;
 	let steps = 0;
@@ -125,10 +126,14 @@ function respondToHiddenRun(
 						arguments: "{}",
 					},
 				],
-				delayMs,
+				until,
 				usage,
 			};
-		return { text: notice, delayMs: kind === "historian" ? delayMs : 0, usage };
+		return {
+			text: notice,
+			until: kind === "historian" ? until : undefined,
+			usage,
+		};
 	});
 	return notice;
 }
@@ -158,6 +163,9 @@ async function openFixture() {
 
 test("hidden runs do not signal root completion or wake the holder or user", async () => {
 	const { host } = await openFixture();
+	// Releases the held model answer; also called on failure so the mock's
+	// request does not stay open while the host stops.
+	let releaseHiddenAnswer = () => {};
 	try {
 		const client = hostClient(host);
 		await waitForPluginActive(client, host.cwd, probeName);
@@ -174,7 +182,13 @@ test("hidden runs do not signal root completion or wake the holder or user", asy
 		});
 		let holderID: string | undefined;
 		for (const [seq, kind] of runKinds.entries()) {
-			const notice = respondToHiddenRun(host, seq, kind, 1500);
+			// The hidden run's model answer is held until the user's own turn has
+			// finished, so the order of the two completions does not depend on how
+			// fast the host handles a turn.
+			const afterUserTurn = new Promise<void>((resolve) => {
+				releaseHiddenAnswer = resolve;
+			});
+			const notice = respondToHiddenRun(host, seq, kind, afterUserTurn);
 			const offset = drive.events().length;
 			const requestsBefore = host.mock.requests().length;
 			const run = drive.start(seq, user.id, kind);
@@ -196,6 +210,13 @@ test("hidden runs do not signal root completion or wake the holder or user", asy
 			const messages = async (sessionID: string) =>
 				(await client.message.list({ sessionID })).data.map((row) => row.id);
 			const whileRunning = await messages(user.id);
+			await waitFor("the user's turn success", () =>
+				drive
+					.events()
+					.slice(offset)
+					.some((e) => e.id === user.id && e.type === succeeded),
+			);
+			releaseHiddenAnswer();
 			const result = await run.done();
 			expect(result).toMatchObject({ ok: true, text: notice });
 			await waitFor("hidden execution success", () =>
@@ -274,6 +295,7 @@ test("hidden runs do not signal root completion or wake the holder or user", asy
 		console.error(host.stderr().slice(-5000), host.pluginLog().slice(-5000));
 		throw error;
 	} finally {
+		releaseHiddenAnswer();
 		await host.stop();
 	}
 }, 120_000);

@@ -80,6 +80,12 @@ export interface MockResponse {
     /** Delay before responding (simulate slow historian). */
     delayMs?: number;
     /**
+     * Hold the response until this settles (after any `delayMs`). A test uses it
+     * to answer only after another event has happened, where a fixed delay would
+     * race that event on a slow machine.
+     */
+    until?: Promise<unknown>;
+    /**
      * Anthropic streams only: send the headers and `message_start` at once, then
      * hold the rest of the answer this long, sending a `ping` event every
      * `STREAM_PING_INTERVAL_MS`. Simulates a slow model that keeps its stream
@@ -308,6 +314,7 @@ export class MockProvider {
             if (scripted.delayMs && scripted.delayMs > 0) {
                 await Bun.sleep(scripted.delayMs);
             }
+            if (scripted.until) await scripted.until;
             // Record completion after any scripted delay. Tests can therefore
             // prove request overlap without making wall-clock claims.
             captured.responseCompletedAt = Date.now();
