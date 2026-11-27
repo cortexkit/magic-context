@@ -380,8 +380,9 @@ export async function oc2ContextFixture(
                 logs: logs.mock.calls.slice(before).map((args) => args.map(String).join(" ")),
             };
         },
-        async generate(question: string) {
+        async generate(question: string, editInput?: (draft: SessionContext) => void) {
             const draft = inputDraft();
+            editInput?.(draft);
             draft.messages.push({ role: "user", content: [{ type: "text", text: question }] });
             await hooks.get("generate")!(draft);
             return draft;

@@ -1929,6 +1929,22 @@
             ]
         },
         {
+            "path": "tests/opencode2/storage-notice-boundaries.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "Tests emitted storage notices across the real OpenCode 2 side-question, fork, and tool-step boundaries.",
+            "contract_refs": [
+                "S2-MIGRATION",
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/storage-refusal-reason.test.ts",
             "tier": "excluded",
             "invocation": {

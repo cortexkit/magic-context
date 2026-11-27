@@ -7,7 +7,9 @@ import {
     dropStorageNotices,
     formatStorageRecoveryNotice,
     formatStorageRefusalNotice,
+    isCopiedStorageNotice,
     STORAGE_NOTICE_PREFIX,
+    storageNoticeHasNewInput,
 } from "./storage-notice";
 import { hostServesRowById } from "./store";
 import type { V2Message } from "./types";
@@ -86,7 +88,52 @@ describe("storage notices", () => {
         expect(messages).toHaveLength(1);
     });
 
-    it("keep a synthetic Magic Context message that is not a storage notice", async () => {
+    it("removes a host fork copy whole but keeps an unrecorded original, typed prefix, and mixed message", async () => {
+        const copy = {
+            id: "msg_forkevent_6",
+            type: "synthetic",
+            seq: 6,
+            session_id: "ses_fork",
+            data: { text: recovery },
+        } as const;
+        const typed = { ...copy, id: "msg_forkevent_5", type: "user", seq: 5 } as const;
+        const unrecorded = { ...copy, id: "msg_withoutSuffix" };
+        const other = {
+            ...copy,
+            id: "msg_forkevent_7",
+            seq: 7,
+            data: { text: "Other native synthetic" },
+        };
+        const mixed = user(copy.id, recovery);
+        mixed.content.push({ type: "text", text: "Additional content supplied to the draft" });
+        const kept = [
+            user(typed.id, recovery),
+            user(unrecorded.id, recovery),
+            user(other.id, other.data.text),
+            mixed,
+        ];
+        const messages = [user(copy.id, recovery), ...kept];
+        const find = (id: string) =>
+            [copy, typed, unrecorded, other].find((r) => r.id === id) ?? null;
+        expect(
+            await dropStorageNotices(messages, isAdmitted, (id) => isCopiedStorageNotice(find(id))),
+        ).toBe(1);
+        expect(messages).toEqual(kept);
+    });
+
+    it("does not recognize a fork ID whose suffix differs from its stored sequence", () => {
+        const row = {
+            id: "msg_forkevent_6",
+            type: "synthetic",
+            seq: 6,
+            session_id: "ses_fork",
+            data: { text: recovery },
+        } as const;
+        expect(isCopiedStorageNotice(row)).toBe(true);
+        expect(isCopiedStorageNotice({ ...row, seq: 8 })).toBe(false);
+    });
+
+    it("keeps a synthetic Magic Context message that is not a storage notice", async () => {
         const messages = [user("msg_n1", "Channel 2 reminder")];
         expect(await dropStorageNotices(messages, isAdmitted)).toBe(0);
     });
@@ -114,5 +161,47 @@ describe("stored storage notice rows", () => {
         expect(restoreRow(other, { providerID: "p", id: "m" })).toHaveLength(1);
         const typed = row("user", refusal);
         expect(restoreRow(typed, { providerID: "p", id: "m" })).toHaveLength(1);
+    });
+});
+
+describe("real input beside a released storage notice", () => {
+    const tool: V2Message = {
+        role: "tool",
+        content: [{ type: "text", text: "A real tool result" }],
+    };
+    const seqs: Record<string, number | undefined> = {
+        oldUser: 1,
+        oldReply: 2,
+        newUser: 5,
+        liveTool: 6,
+        explicitTool: 7,
+    };
+    const seq = (id: string) => seqs[id];
+
+    it("keeps both a live id-less tool result and a tool result with a row id", () => {
+        expect(storageNoticeHasNewInput([assistant("liveTool", "Tool call"), tool], 4, seq)).toBe(
+            true,
+        );
+        expect(
+            storageNoticeHasNewInput(
+                [assistant("liveTool", "Tool call"), { ...tool, id: "explicitTool" }],
+                4,
+                seq,
+            ),
+        ).toBe(true);
+    });
+
+    it("does not re-run an interrupted user prompt or its settled tool result", () => {
+        expect(storageNoticeHasNewInput([user("oldUser", "Interrupted")], 4, seq)).toBe(false);
+        expect(storageNoticeHasNewInput([assistant("oldReply", "Stopped"), tool], 4, seq)).toBe(
+            false,
+        );
+        expect(
+            storageNoticeHasNewInput(
+                [user("oldUser", "Interrupted"), user("newUser", "A new prompt")],
+                4,
+                seq,
+            ),
+        ).toBe(true);
     });
 });

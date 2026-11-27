@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { isStorageNoticeText } from "../hooks/storage-notice";
+import { isStoredStorageNotice } from "../hooks/storage-notice";
 import type { V2Message } from "../hooks/types";
 import type { StoreRow } from "../store-reader";
 import { hostMediaAsset } from "./host-media";
@@ -140,11 +140,10 @@ export function restoreRow(
     // own window, and an id-less row is never tagged or dropped as history.
     if (row.type === "system")
         return [{ role: "system", content: [{ type: "text", text: data.text ?? "" }] }];
-    // Magic Context's own storage notices are for the user and are dropped from
-    // every request the context hook serves, so a restored copy is dropped too, and
-    // boundary lookups see the row as one the request never carries.
+    // The user can see storage notices in the conversation. History restoration
+    // must leave them out of model requests just as the context hook does.
     if (row.type === "synthetic") {
-        if (isStorageNoticeText(data.text)) return [];
+        if (isStoredStorageNotice(row)) return [];
         // OpenCode stores this as a distinct row type. Mark the restored text so
         // turn counting does not treat it as a human prompt. The payload adapter
         // removes this internal flag before handing the request to the host.

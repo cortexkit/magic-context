@@ -270,7 +270,9 @@ import {
     formatStorageRecoveryNotice,
     formatStorageRefusalNotice,
     hasStorageNoticeShape,
+    isCopiedStorageNotice,
     STORAGE_NOTICE_PREFIX,
+    storageNoticeHasNewInput,
 } from "./storage-notice";
 import {
     createV2RawMessageProvider,
@@ -639,6 +641,7 @@ export async function cacheV2SessionDirectory(
 interface V2ContextPass {
     sessionID: SessionContext["sessionID"];
     refused: boolean;
+    storageNoticeWake?: boolean;
 }
 
 const contextPass = new AsyncLocalStorage<V2ContextPass>();
@@ -1278,6 +1281,53 @@ export async function registerContext(context: V2Context) {
     const openStoreReader = () =>
         readerPool.open(gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"));
     const revertMessageCleanup = new V2RevertMessageCleanup(openStoreReader);
+    const dropRequestStorageNotices = (draft: SessionContext) =>
+        dropStorageNotices(
+            draft.messages,
+            (id) => isAdmittedSynthetic(context, draft.sessionID, id),
+            (id) => {
+                const reader = openStoreReader();
+                try {
+                    return isCopiedStorageNotice(reader.messageById(draft.sessionID, id));
+                } finally {
+                    reader.close();
+                }
+            },
+        );
+    const shouldRefuseStorageNoticeStep = (draft: SessionContext, noticeID: string): boolean => {
+        let reader: V2StoreReader | undefined;
+        try {
+            const source = (reader = openStoreReader());
+            const idle = source.latestIdle(draft.sessionID)?.seq ?? -1;
+            const notice = source.sequenceForId(draft.sessionID, noticeID);
+            if (notice === undefined) {
+                sessionLog(draft.sessionID, "v2 storage notice step refused: notice row missing");
+                return true;
+            }
+            if (notice <= idle) return true;
+            const tail = draft.messages.at(-1);
+            if (tail?.role !== "user" && tail?.role !== "tool") return true;
+            // A host checkpoint can look like a user message, but only represents old history.
+            if (
+                tail.role === "user" &&
+                tail.id &&
+                tail.id === source.latestCompaction(draft.sessionID)?.id
+            )
+                return true;
+            return !storageNoticeHasNewInput(draft.messages, idle, (id) =>
+                source.sequenceForId(draft.sessionID, id),
+            );
+        } catch (error) {
+            sessionLog(
+                draft.sessionID,
+                "v2 storage notice step refused: the settled turn boundary is unknown",
+                error,
+            );
+            return true;
+        } finally {
+            reader?.close();
+        }
+    };
     const createHiddenExecutor = async (database: NonNullable<typeof db>) => {
         await cleanupLegacyOnce(database);
         return createV2HiddenCompletionExecutor(
@@ -2729,7 +2779,10 @@ export async function registerContext(context: V2Context) {
             onRustEngineReconnectRefusal: (refusal) => rustRefusalRecovery?.arm(refusal),
             ...createHostSeams(context, readAllForConversion, pagedRead, liveModels),
         }));
-    const runManagedContext = async (draft: SessionContext): Promise<"managed" | "skipped"> => {
+    const runManagedContext = async (
+        draft: SessionContext,
+        pass: V2ContextPass,
+    ): Promise<"managed" | "skipped"> => {
         // Learn the host's message and attachment classes, so attachments on rows restored
         // after a host checkpoint can be rebuilt in the host's own shape.
         rememberHostMedia(draft.messages);
@@ -2787,21 +2840,34 @@ export async function registerContext(context: V2Context) {
             }
             return stored;
         };
-        // Storing a notice in an idle OpenCode 2 session starts a turn of its own.
-        // Such a turn has nothing for the model to answer, so it ends here.
         const newest = draft.messages.at(-1);
-        if (
-            newest &&
+        const wakeNotice =
+            newest?.id &&
             hasStorageNoticeShape(newest) &&
-            (await isMagicContextSynthetic(newest.id as string))
-        ) {
+            (await isMagicContextSynthetic(newest.id))
+                ? newest.id
+                : undefined;
+        try {
+            await dropRequestStorageNotices(draft);
+        } catch (error) {
+            if (!wakeNotice) throw error;
+            sessionLog(
+                draft.sessionID,
+                "v2 storage notice step refused: request notice lookup failed",
+                error,
+            );
             await refuseBeforeProvider(context.session, draft.sessionID, "storage-notice-turn");
             return "skipped";
         }
-        // Storage notices are for the user and never reach the model. Dropping them
-        // on every pass, from the first one that could contain them, keeps the
-        // served bytes the same whether or not a session ever had one.
-        await dropStorageNotices(draft.messages, isMagicContextSynthetic);
+        // An idle storage wake needs no model response. If the idle check raced
+        // a live turn, a tool result or new prompt may need this step instead.
+        if (wakeNotice) {
+            if (shouldRefuseStorageNoticeStep(draft, wakeNotice)) {
+                await refuseBeforeProvider(context.session, draft.sessionID, "storage-notice-turn");
+                return "skipped";
+            }
+            pass.storageNoticeWake = true;
+        }
         // The host's messages as this pass received them. A replay rebuilds the
         // transform input from these, never from a draft a failed pass reshaped.
         const hostMessagesAtEntry = [...draft.messages];
@@ -3775,7 +3841,20 @@ export async function registerContext(context: V2Context) {
             let returned = false;
             let outcome: Awaited<ReturnType<typeof runManagedContext>>;
             try {
-                outcome = await runManagedContext(draft);
+                outcome = await runManagedContext(draft, pass);
+                // Restoring a host checkpoint can replace a user-shaped tail with the last reply.
+                if (
+                    !pass.refused &&
+                    pass.storageNoticeWake &&
+                    draft.messages.at(-1)?.role === "assistant"
+                ) {
+                    await refuseBeforeProvider(
+                        context.session,
+                        draft.sessionID,
+                        "storage-notice-turn",
+                        "request ends with the previous reply",
+                    );
+                }
                 // A handler can interrupt and still return normally. Do not
                 // admit or save that draft after the refusal.
                 if (pass.refused) {
@@ -3837,10 +3916,20 @@ export async function registerContext(context: V2Context) {
         }),
     );
     await context.session.hook("generate", async (draft) => {
-        if (!compactionOff && !deletedSessions.has(draft.sessionID)) {
-            generateReplay.apply(draft);
-            await refuseOversizedCheckpoint(draft);
+        const managed = !compactionOff && !deletedSessions.has(draft.sessionID);
+        // The replay anchor describes the host's original history. Strip after
+        // matching it so notices appended to the tail cannot reach the provider.
+        if (managed) generateReplay.apply(draft);
+        try {
+            await dropRequestStorageNotices(draft);
+        } catch (error) {
+            sessionLog(
+                draft.sessionID,
+                "v2 side question: storage notice lookup failed; sending without notice filtering",
+                error,
+            );
         }
+        if (managed) await refuseOversizedCheckpoint(draft);
     });
     // Warm eagerly for cold sidebar/status reads; a failed startup warm releases
     // its latch and the context hook above retries after the host catalog settles.
