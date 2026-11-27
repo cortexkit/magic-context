@@ -139,7 +139,7 @@ describe("v2 context hook never registers a persistent tool transform", () => {
         const hookStart = source.indexOf('context.session.hook("context"', bodyStart);
         expect(bodyStart).toBeGreaterThan(0);
         expect(hookStart).toBeGreaterThan(bodyStart);
-        expect(source.slice(hookStart)).toContain("await runManagedContext(draft)");
+        expect(source.slice(hookStart)).toMatch(/await runManagedContext\(draft\b/);
         const hookBody = source.slice(bodyStart);
         expect(hookBody).not.toContain("context.tool.transform(");
         expect(hookBody).toMatch(/applyV2PromptSurfaceTools\(\s*draft/);

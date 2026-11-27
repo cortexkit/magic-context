@@ -67,6 +67,9 @@ function usingDb<T>(
 ): T {
 	const db = new Database(path, { readonly, fileMustExist: true });
 	try {
+		// The host is running and writes this store after every turn. Without a
+		// wait, a statement that meets the host's write lock fails at once.
+		db.exec("PRAGMA busy_timeout = 5000");
 		return action(db);
 	} finally {
 		db.close();
