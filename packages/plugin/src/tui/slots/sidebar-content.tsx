@@ -745,10 +745,37 @@ const SidebarContent = (props: {
         const current = s()
         return current?.compaction_enabled === false ? compactionOffSidebarRows(current) : []
     })
-    const contextSnapshot = () => {
+    const dreamerLabel = createMemo(() => {
+        const progress = s()?.dreamerProgress
+        if (!progress) return
+        return `Dreamer ${progress.task}: ${progress.processed}/${progress.total} processed`
+    })
+    const contextSummary = createMemo(() => {
         const current = s()
-        return current && current.inputTokens > 0 && current.contextLimit > 0 ? current : undefined
-    }
+        if (!current || !(current.inputTokens > 0 && current.contextLimit > 0)) return
+        const tokens = `${compactTokens(current.inputTokens)} / ${compactTokens(current.contextLimit)}`
+        if (current.compaction_enabled === false) {
+            return { tokens, native: nativeCompactionContextLabel(current) }
+        }
+        const usage = current.usagePercentage?.toFixed(1)
+        const threshold = current.executeThreshold == null
+            ? undefined
+            : `${formatThresholdPercent(current.executeThreshold)}%${current.executeThresholdClamped ? "*" : ""}`
+        return { tokens, usage, threshold }
+    }, undefined, {
+        equals: (a, b) =>
+            a?.tokens === b?.tokens && a?.native === b?.native &&
+            a?.usage === b?.usage && a?.threshold === b?.threshold,
+    })
+    const hygieneSummary = createMemo(() => {
+        const current = s()
+        if (!current || !(current.inputTokens > 0)) return
+        const hygiene = current.tailHygiene
+        if (!hygiene) return
+        return { value: hygieneValue(hygiene), warning: !hygiene.evaluable }
+    }, undefined, {
+        equals: (a, b) => a?.value === b?.value && a?.warning === b?.warning,
+    })
     const totalInputTokensLabel = () => {
         const tokens = s()?.totalInputTokens
         return tokens == null ? undefined : compactTokens(tokens)
@@ -824,12 +851,10 @@ const SidebarContent = (props: {
                 )}
             </For>
 
-            <Show keyed when={s()?.dreamerProgress}>
-                {(progress) => (
+            <Show keyed when={dreamerLabel()}>
+                {(label) => (
                     <box marginTop={1} width="100%">
-                        <text fg={props.theme.warning}>
-                            Dreamer {progress.task}: {progress.processed}/{progress.total} processed
-                        </text>
+                        <text fg={props.theme.warning}>{label}</text>
                     </box>
                 )}
             </Show>
@@ -839,43 +864,35 @@ const SidebarContent = (props: {
                 expanded mode keeps the 1-row gap above the bar. */}
             {(s()?.inputTokens ?? 0) > 0 && (
                 <box marginTop={collapsed() ? 0 : 1} flexDirection="column">
-                    <Show keyed when={contextSnapshot()}>
-                        {(current) => {
-                            const usage = current.usagePercentage?.toFixed(1)
-                            const threshold = current.executeThreshold == null
-                                ? undefined
-                                : formatThresholdPercent(current.executeThreshold)
-                            return (
-                                <box width="100%" flexDirection="row" justifyContent="space-between">
-                                    {current.compaction_enabled === false ? (
-                                        <text fg={contextSummaryColor()}>
-                                            <b>{nativeCompactionContextLabel(current)}</b>
-                                        </text>
-                                    ) : (
-                                        <text fg={contextSummaryColor()}>
-                                            {usage != null && <b>{usage}%</b>}
-                                            {usage != null && threshold != null ? " / " : ""}
-                                            {threshold != null ? `${threshold}%${current.executeThresholdClamped ? "*" : ""}` : ""}
-                                        </text>
-                                    )}
-                                    {/* Right: absolute token usage against the usable
-                                        scheduler window — the same denominator as the
-                                        percentage and nudge/trigger scheduling. */}
+                    <Show keyed when={contextSummary()}>
+                        {(summary) => (
+                            <box width="100%" flexDirection="row" justifyContent="space-between">
+                                {summary.native != null ? (
                                     <text fg={contextSummaryColor()}>
-                                        {compactTokens(current.inputTokens)} / {compactTokens(current.contextLimit)}
+                                        <b>{summary.native}</b>
                                     </text>
-                                </box>
-                            )
-                        }}
+                                ) : (
+                                    <text fg={contextSummaryColor()}>
+                                        {summary.usage != null && <b>{summary.usage}%</b>}
+                                        {summary.usage != null && summary.threshold != null ? " / " : ""}
+                                        {summary.threshold ?? ""}
+                                    </text>
+                                )}
+                                {/* Right: absolute token usage against the usable
+                                    scheduler window — the same denominator as the
+                                    percentage and nudge/trigger scheduling. */}
+                                <text fg={contextSummaryColor()}>{summary.tokens}</text>
+                            </box>
+                        )}
                     </Show>
                     <TokenBreakdown theme={props.theme} snapshot={s()} collapsed={collapsed()} />
-                    <Show keyed when={s()?.tailHygiene}>
+                    <Show keyed when={hygieneSummary()}>
                         {(hygiene) => (
                             <StatRow
                                 theme={props.theme}
                                 label="Hygiene"
-                                value={hygieneValue(hygiene)}
-                                warning={!hygiene.evaluable}
+                                value={hygiene.value}
+                                warning={hygiene.warning}
                             />
                         )}
                     </Show>
