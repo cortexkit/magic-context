@@ -34,6 +34,8 @@ for (const allowHomeProject of [true, false]) {
             host = await spawnOpencode({
                 mockProviderURL: baseURL,
                 existingEnv: env,
+                // The launcher normally sets HOME to the fixture root, not to its workdir.
+                extraEnv: { HOME: env.workdir, CFFIXED_USER_HOME: env.workdir },
                 magicContextConfig: {
                     allow_home_project: allowHomeProject,
                     execute_threshold_percentage: 40,
