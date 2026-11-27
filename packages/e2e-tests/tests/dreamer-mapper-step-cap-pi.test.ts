@@ -52,7 +52,9 @@ test.skipIf(process.env.MC_E2E_MAPPER_STEP_PROBE !== "1")(
         const refusals: string[] = [];
         const acknowledgement = join(root, "finalize-ack");
         const barrier = join(root, "finalize-barrier.js");
-        // Let the real guard handle both reads only after Pi has queued the steer.
+        // Hold both reads until Pi has accepted the wrap-up message (the
+        // "You're out of token budget" instruction the plugin sends when the
+        // step reserve is reached). The real guard then handles the reads.
         // This controls the handoff without refusing any tool in the fixture.
         writeFileSync(barrier, `
 import { existsSync, watch } from "node:fs";
@@ -114,7 +116,8 @@ export default (pi) => pi.on("tool_call", async (event) => {
                 return { text: `<verify>${batch.slice(0, 2).map((id) => `<verified id="${id}"/>`).join("")}</verify>`, usage: { input_tokens: 10, output_tokens: 30 } };
             }
             // Reach the step reserve without approaching the token cap. The
-            // trigger reply issues two reads before Pi delivers the steer.
+            // trigger reply issues two reads before Pi delivers the wrap-up
+            // message to the model.
             if (batch.length === 5) {
                 calls++;
                 expect(calls).toBeLessThanOrEqual(58);
