@@ -589,7 +589,10 @@ fn rekey_refuses_agent_data_journal_entries_before_rewriting_any_session() {
         let journal_before = std::fs::read(&journal_path).unwrap();
         let error = rekey_runner(&path, &request).unwrap_err();
         assert!(error.contains(&format!("{runner}/pi/head-two")), "{error}");
-        assert!(error.contains("agent-data/journal.json"), "{error}");
+        assert!(
+            error.contains(&journal_path.display().to_string()),
+            "{error}"
+        );
         assert_eq!(dump(&path), before);
         assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
     }
