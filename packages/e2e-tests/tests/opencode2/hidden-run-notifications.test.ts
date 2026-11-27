@@ -459,6 +459,10 @@ test.skipIf(!currentHost)(
 	"deleting a holder interrupts a hidden run and the next run repairs the holder",
 	async () => {
 		const { host } = await openFixture();
+		let release!: () => void;
+		const until = new Promise<void>((resolve) => {
+			release = resolve;
+		});
 		try {
 			const client = hostClient(host);
 			await waitForPluginActive(client, host.cwd, probeName);
@@ -471,7 +475,7 @@ test.skipIf(!currentHost)(
 			});
 			host.mock.addMatcher((body) =>
 				JSON.stringify(body).includes("HIDDEN_NOTICE_historian_0")
-					? { text: "the deleted run must not finish", delayMs: 10_000, usage }
+					? { text: "the deleted run must not finish", until, usage }
 					: null,
 			);
 			const run = drive.start(0, user.id);
@@ -492,6 +496,7 @@ test.skipIf(!currentHost)(
 					),
 			);
 			expect(await run.done()).toMatchObject({ ok: false, id: first.id });
+			release();
 			await expect(
 				client.session.get({ sessionID: first.id }),
 			).rejects.toThrow();
@@ -509,6 +514,7 @@ test.skipIf(!currentHost)(
 				}),
 			);
 		} finally {
+			release();
 			await host.stop();
 		}
 	},
