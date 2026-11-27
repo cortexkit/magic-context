@@ -4,6 +4,7 @@ import { embedAndStoreCompartmentChunks } from "../../features/magic-context/com
 import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment-lease";
 import {
     clearRecompStaging,
+    type Compartment,
     getCompartments,
     getRecompPartialRange,
     getRecompStaging,
@@ -67,20 +68,27 @@ import {
 } from "./read-session-chunk";
 import { sendStatusNotification } from "./send-session-notification";
 
+type CarriedRowsBySequence = ReadonlyMap<number, Pick<Compartment, "legacy" | "rebaseStatus">>;
+
 function insertRecompCompartmentRows(
     db: Database,
     sessionId: string,
     compartments: CandidateCompartment[],
     now: number,
+    carriedRows?: CarriedRowsBySequence,
 ): void {
-    // v2: carry paraphrase tiers + importance/episode_type through the recomp
-    // promote path. Must match compartment-storage.ts insertCompartmentRows column
-    // order. legacy=0 when P1 present, else 1 (flat).
+    // Carried rows keep their stored payload, boundaries, legacy and rebase status.
+    // The replacement gives them a new row id and sequence, and deliberately renews
+    // created_at just as range recomp always has. Fresh summaries derive legacy from P1.
     const stmt = db.prepare(
-        "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, p1, p2, p3, p4, importance, episode_type, legacy, created_at, harness, start_block_index, end_block_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        `INSERT INTO compartments (session_id, sequence, start_message, end_message,
+            start_message_id, end_message_id, title, content, p1, p2, p3, p4, importance,
+            episode_type, legacy, created_at, harness, start_block_index, end_block_index, rebase_status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const c of compartments) {
         const hasTiers = typeof c.p1 === "string" && c.p1.length > 0;
+        const carried = carriedRows?.get(c.sequence);
         stmt.run(
             sessionId,
             c.sequence,
@@ -96,11 +104,12 @@ function insertRecompCompartmentRows(
             c.p4 ?? null,
             typeof c.importance === "number" ? c.importance : 50,
             c.episodeType ?? null,
-            hasTiers ? 0 : 1,
+            carried?.legacy ?? (hasTiers ? 0 : 1),
             now,
             getHarness(),
             c.startBlockIndex ?? null,
             c.endBlockIndex ?? null,
+            carried?.rebaseStatus ?? "ok",
         );
     }
 }
@@ -109,8 +118,9 @@ export function promoteRecompStagingWithM0Mutation(
     db: Database,
     sessionId: string,
     holderId: string,
+    carriedRows?: CarriedRowsBySequence,
 ): RecompPromotion | null {
-    const promoted = promoteRecompStaging(db, sessionId, holderId);
+    const promoted = promoteRecompStaging(db, sessionId, holderId, undefined, carriedRows);
     return typeof promoted === "string" ? null : promoted;
 }
 
@@ -134,6 +144,7 @@ function promoteRecompStaging(
     sessionId: string,
     holderId: string,
     stopped?: StoppedRecomp,
+    carriedRows?: CarriedRowsBySequence,
 ): PromotionResult {
     const now = Date.now();
     db.exec("BEGIN IMMEDIATE");
@@ -186,7 +197,7 @@ function promoteRecompStaging(
         // The renderer no longer reads session_facts, so we clear any legacy
         // rows for hygiene and never re-insert.
         db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
-        insertRecompCompartmentRows(db, sessionId, compartments, now);
+        insertRecompCompartmentRows(db, sessionId, compartments, now, carried?.rows ?? carriedRows);
         appendM0Mutation(db, {
             sessionId,
             mutationType: "recomp_boundary_change",
@@ -247,7 +258,7 @@ function readAlignedLiveTail(
     live: ReturnType<typeof readLiveRanges>,
     staging: RecompStaging,
     stagedEnd: number,
-): { compartments: CandidateCompartment[]; end: number } | null {
+): { compartments: CandidateCompartment[]; rows: CarriedRowsBySequence; end: number } | null {
     let next = 1;
     let seam: number | undefined;
     for (const row of live) {
@@ -267,6 +278,7 @@ function readAlignedLiveTail(
         compartments: tail.map((row, index) =>
             compartmentToInput(row, staging.compartments.length + index),
         ),
+        rows: new Map(tail.map((row, index) => [staging.compartments.length + index, row])),
         end: next - 1,
     };
 }

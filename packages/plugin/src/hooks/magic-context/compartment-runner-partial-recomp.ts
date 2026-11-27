@@ -300,7 +300,20 @@ export async function executePartialRecompInternal(
             // replaces the real tables atomically with this set.
             saveRecompStagingPass(db, sessionId, passCount + 1, merged, stagedFacts);
             wroteStaging = true;
-            const promoted = promoteRecompStagingWithM0Mutation(db, sessionId, leaseHolderId);
+            // Read the flags from the live flanks, including on resume: the staging
+            // tables describe the replacement summaries, not their live row metadata.
+            const carriedRows = new Map([
+                ...priorCompartments.map((c, idx) => [idx, c] as const),
+                ...tailCompartments.map(
+                    (c, idx) => [candidateCompartments.length + idx, c] as const,
+                ),
+            ]);
+            const promoted = promoteRecompStagingWithM0Mutation(
+                db,
+                sessionId,
+                leaseHolderId,
+                carriedRows,
+            );
             if (!promoted) {
                 log("[magic-context] partial recomp promote returned null");
                 return null;

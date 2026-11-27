@@ -235,6 +235,28 @@ function oldSummary(start: number, end: number, sequence: number) {
     };
 }
 
+function noiseMarker(start: number, end: number, sequence: number) {
+    return {
+        ...oldSummary(start, end, sequence),
+        title: "",
+        content: "",
+        p1: "",
+        p2: "",
+        p3: "",
+        p4: "",
+        episodeType: "filtered-noise",
+        importance: 1,
+    };
+}
+
+function storedCarryFlags(db: Database, sessionId: string) {
+    return db
+        .prepare(
+            "SELECT start_message, legacy, rebase_status FROM compartments WHERE session_id = ? AND episode_type = 'filtered-noise' ORDER BY sequence",
+        )
+        .all(sessionId);
+}
+
 function rebuildRequest(db: Database, sessionId: string, count: number, replay: boolean) {
     const messages = Array.from({ length: count }, (_, i) => ({
         info: { id: `m-${i + 1}`, role: "user", sessionID: sessionId },
@@ -563,7 +585,9 @@ describe("full recomp staging", () => {
         expect([...represented, ...raw]).toEqual(Array.from({ length: 60 }, (_, i) => i + 1));
         expect(getRecompStaging(db, sessionId)).toBeNull();
         const depth = db
-            .prepare("SELECT message_ordinal, depth FROM compression_depth WHERE session_id = ? ORDER BY message_ordinal")
+            .prepare(
+                "SELECT message_ordinal, depth FROM compression_depth WHERE session_id = ? ORDER BY message_ordinal",
+            )
             .all(sessionId);
         expect(depth).toEqual(
             Array.from({ length: 6 }, (_, i) => ({ message_ordinal: 41 + i, depth: 2 })),
@@ -595,6 +619,50 @@ describe("full recomp staging", () => {
         expect(getRecompStaging(db, sessionId)).toBeNull();
     });
 
+    it("preserves a carried noise marker's stored legacy and unresolved status in a full rebuild", async () => {
+        appendCompartments(db, sessionId, [oldSummary(1, 40, 0), noiseMarker(41, 46, 1)]);
+        db.prepare(
+            "UPDATE compartments SET rebase_status = 'unresolved' WHERE session_id = ? AND sequence = 1",
+        ).run(sessionId);
+        const expected = [{ start_message: 41, legacy: 0, rebase_status: "unresolved" }];
+        expect(storedCarryFlags(db, sessionId)).toEqual(expected);
+
+        const ex = executorCoveringRequestedRange((start) => (start === 1 ? 40 : null));
+        const result = await withMessages(
+            sessionId,
+            60,
+            () => runManagedRecomp(context(db, ex), sessionId),
+            [],
+            41,
+        );
+        expect(result).toContain("Kept 1 existing history block through message 46.");
+        expect(storedCarryFlags(db, sessionId)).toEqual(expected);
+    });
+
+    it("preserves both carried flanks' stored flags when a range rebuild publishes", async () => {
+        appendCompartments(db, sessionId, [
+            noiseMarker(1, 3, 0),
+            oldSummary(4, 6, 1),
+            noiseMarker(7, 9, 2),
+        ]);
+        db.prepare(
+            "UPDATE compartments SET rebase_status = 'unresolved' WHERE session_id = ? AND sequence IN (0, 2)",
+        ).run(sessionId);
+        const expected = [
+            { start_message: 1, legacy: 0, rebase_status: "unresolved" },
+            { start_message: 7, legacy: 0, rebase_status: "unresolved" },
+        ];
+        expect(storedCarryFlags(db, sessionId)).toEqual(expected);
+
+        const ex = executorCoveringRequestedRange();
+        const result = await withMessages(sessionId, 15, () =>
+            runManagedRecomp(context(db, ex), sessionId, { range: { start: 4, end: 6 } }),
+        );
+        expect(result).toStartWith("## Magic Recomp — Partial Complete");
+        expect(ex.requestedStarts).toEqual([4]);
+        expect(storedCarryFlags(db, sessionId)).toEqual(expected);
+    });
+
     it.each([
         ["retired end id", { ...oldSummary(41, 46, 1), endMessageId: "retired-46" }],
         ["retired start id", { ...oldSummary(41, 46, 1), startMessageId: "retired-41" }],
@@ -618,14 +686,21 @@ describe("full recomp staging", () => {
 
     it("discards a resumed empty tail if a revert retired the live carry ids but not the staged ids", async () => {
         appendCompartments(db, sessionId, [oldSummary(1, 40, 0), oldSummary(41, 46, 1)]);
-        saveRecompStagingPass(db, sessionId, 1, [
-            { ...oldSummary(1, 40, 0), title: "Rebuilt", p1: "Rebuilt 1-40." },
-        ], []);
+        saveRecompStagingPass(
+            db,
+            sessionId,
+            1,
+            [{ ...oldSummary(1, 40, 0), title: "Rebuilt", p1: "Rebuilt 1-40." }],
+            [],
+        );
         const before = getCompartments(db, sessionId);
         const ex = executorCoveringRequestedRange();
         const result = await withMessages(
-            sessionId, 60, () => runManagedRecomp(context(db, ex), sessionId),
-            [41, 42, 43, 44, 45, 46], 41,
+            sessionId,
+            60,
+            () => runManagedRecomp(context(db, ex), sessionId),
+            [41, 42, 43, 44, 45, 46],
+            41,
         );
         expect(result).toContain("The unfinished rebuild was discarded.");
         expect(getCompartments(db, sessionId)).toEqual(before);
