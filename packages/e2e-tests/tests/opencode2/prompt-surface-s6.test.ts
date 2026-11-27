@@ -42,23 +42,18 @@ export default { id: "s6-surface", async setup(context) {
 	const host = await spawnOpencode2({
 		probePlugin: plugin,
 		additionalModelIDs: ["mock-light"],
+		magicContextConfig: {
+			auto_update: false,
+			memory: { enabled: false },
+			historian: { disable: true },
+			dreamer: { disable: true },
+			prompt_surface: {
+				default: "full",
+				models: { "openai/mock-light": "light" },
+			},
+		},
 	});
 	try {
-		const configDir = join(host.env.XDG_CONFIG_HOME!, "cortexkit");
-		mkdirSync(configDir, { recursive: true });
-		writeFileSync(
-			join(configDir, "magic-context.jsonc"),
-			JSON.stringify({
-				auto_update: false,
-				memory: { enabled: false },
-				historian: { disable: true },
-				dreamer: { disable: true },
-				prompt_surface: {
-					default: "full",
-					models: { "openai/mock-light": "light" },
-				},
-			}),
-		);
 		const client = OpenCode.make({
 			baseUrl: host.url,
 			headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` },
@@ -92,11 +87,8 @@ export default { id: "s6-surface", async setup(context) {
 		const hashes = sameModel.slice(0, 3).map((frame) => sha(frame.tools));
 		expect(new Set(hashes).size).toBe(1);
 
-		// The claim that matters is what the provider received, not what another
-		// plugin's hook saw: the observer above runs before Magic Context's own
-		// context hook, so its `draft.tools` read is pre-edit. The host's tool
-		// definitions must stay at their full baseline on every request and only
-		// the light model's request carries the light descriptions.
+		// The observer sees a draft; the provider request proves which descriptions
+		// the host actually sent. Only the light model should get the light text.
 		const wireDescriptions = (modelID: string) =>
 			host.mock
 				.requests()
@@ -125,10 +117,8 @@ export default { id: "s6-surface", async setup(context) {
 		for (const tools of lightOnWire)
 			expect(tools.ctx_search).toBe(LIGHT_TOOL_DESCRIPTIONS.ctx_search);
 
-		// Contamination control (issue 492 finding 4): a full-preset request AFTER
-		// the light one must still carry the full description. A persistent
-		// tool.transform registered per pass fails this arm, because the light
-		// edit becomes the host baseline every later request starts from.
+		// A full-preset request after the light one must still carry the full
+		// description. That fails if the light edit becomes the host's baseline.
 		await client.session.switchModel({
 			sessionID: session.id,
 			model: { providerID: "openai", id: "mock-model" },
