@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterAll, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,17 +10,16 @@ import { createOpencodeClient } from "@opencode-ai/sdk";
 import { buildMockHistorianPayload, findHistorianOrdinalRange } from "../src/mock-historian";
 import { MockProvider } from "../src/mock-provider/server";
 import { createIsolatedEnv, spawnOpencode } from "../src/opencode-runner/spawn";
+import { restoreEnvironmentVariable } from "../src/root-environment";
 import { rpcPortDir, type RpcPortFileRecord } from "../../plugin/src/shared/rpc-utils";
 
 const root = process.env.MC_ISSUE_570_ROOT;
 if (!root || !resolve(root).startsWith(resolve(join(tmpdir(), "magic-context")) + "/")) {
     throw new Error("Set MC_ISSUE_570_ROOT under the throwaway TMPDIR/magic-context tree");
 }
-const originalHome = process.env.HOME;
-afterAll(() => { process.env.HOME = originalHome; });
-
 for (const allowHomeProject of [true, false]) {
     test(`OpenCode 1 home project with allow_home_project=${allowHomeProject}`, async () => {
+        const originalHome = process.env.HOME;
         const mock = new MockProvider();
         const { baseURL } = await mock.start();
         const env = createIsolatedEnv();
@@ -118,9 +117,12 @@ for (const allowHomeProject of [true, false]) {
             expect(errors).toHaveLength(0);
             expect(skips.length).toBe(allowHomeProject ? 0 : 1);
         } finally {
-            await host?.kill();
-            await mock.stop();
-            process.env.HOME = originalHome;
+            try {
+                await host?.kill();
+                await mock.stop();
+            } finally {
+                restoreEnvironmentVariable("HOME", originalHome);
+            }
         }
     }, 180_000);
 }

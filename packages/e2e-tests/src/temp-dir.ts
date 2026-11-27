@@ -1,6 +1,6 @@
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { e2eTempRoot } from "./root-environment";
 
 const roots = new Set<string>();
 
@@ -14,7 +14,7 @@ export function cleanupE2ETempDir(root: string): void {
 }
 
 export function createE2ETempDir(prefix: string): string {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+    const root = realpathSync(mkdtempSync(join(e2eTempRoot(), prefix)));
     roots.add(root);
     return root;
 }

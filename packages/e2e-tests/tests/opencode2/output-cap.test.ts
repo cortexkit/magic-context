@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { historianReasoningBudgetDiagnostic } from "../../../plugin/src/hooks/magic-context/compartment-runner-historian";
 import { assertOpenPaths, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
+import { restoreEnvironmentVariable } from "../../src/root-environment";
 
 async function waitFile(path: string) {
     const deadline = Date.now() + 20000;
@@ -22,10 +23,10 @@ test("OpenCode 2 ordinary and hidden historian omit caps; a provider default exh
     const root = join(tmpdir(), "magic-context", "issue-551");
     mkdirSync(root, { recursive: true });
     const previousTmp = process.env.TMPDIR;
-    process.env.TMPDIR = realpathSync(root);
     const bundle = mkdtempSync(join(root, "probe-"));
     let host: Awaited<ReturnType<typeof spawnOpencode2>> | undefined;
     try {
+        process.env.TMPDIR = realpathSync(root);
         const build = await Bun.build({ entrypoints: [join(import.meta.dir, "output-cap-probe.ts")], outdir: bundle, naming: "index.js", target: "node", format: "esm", define: { "process.env.NODE_ENV": '"production"' }, external: ["bun:sqlite", "node:sqlite"] });
         if (!build.success) throw new Error(build.logs.join("\n"));
         host = await spawnOpencode2({ probePlugin: bundle, includeMagicContext: false, defaultModelID: "mock-model-user", additionalModelIDs: ["mock-model-cheap"], modelContextLimit: 200000, modelOutputLimit: 4096 });
@@ -81,8 +82,11 @@ test("OpenCode 2 ordinary and hidden historian omit caps; a provider default exh
         if (host) console.error(host.stderr(), host.stdout());
         throw error;
     } finally {
-        if (host) await host.stop();
-        rmSync(bundle, { recursive: true, force: true });
-        process.env.TMPDIR = previousTmp;
+        try {
+            if (host) await host.stop();
+            rmSync(bundle, { recursive: true, force: true });
+        } finally {
+            restoreEnvironmentVariable("TMPDIR", previousTmp);
+        }
     }
 }, 120000);

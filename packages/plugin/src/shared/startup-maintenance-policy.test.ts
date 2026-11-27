@@ -60,13 +60,18 @@ test.each([
     );
 });
 
-test("CLI uses the unit policy while end-to-end tests retain the shared isolation-only preload", () => {
+test("CLI uses the unit policy while end-to-end preloads only isolate test files and stores", () => {
     expect(preloads("cli")).toEqual(["../plugin/src/test-preload.ts"]);
-    expect(preloads("e2e-tests")).toEqual(["../plugin/test-preload.ts"]);
-    const isolation = readFileSync(join(root, "packages/plugin/test-preload.ts"), "utf8");
-    expect(isolation).not.toContain("delete process.env.OPENCODE_DB");
-    expect(isolation).not.toContain("__setScheduleStartupMaintenanceOnOpenForTests");
-    expect(isolation).not.toContain("src/test-preload");
+    expect(preloads("e2e-tests")).toEqual(["./src/test-preload.ts", "../plugin/test-preload.ts"]);
+    for (const path of [
+        "packages/plugin/test-preload.ts",
+        "packages/e2e-tests/src/test-preload.ts",
+    ]) {
+        const isolation = readFileSync(join(root, path), "utf8");
+        expect(isolation).not.toContain("delete process.env.OPENCODE_DB");
+        expect(isolation).not.toContain("__setScheduleStartupMaintenanceOnOpenForTests");
+        expect(isolation).not.toContain("src/test-preload");
+    }
 });
 
 test.each([
