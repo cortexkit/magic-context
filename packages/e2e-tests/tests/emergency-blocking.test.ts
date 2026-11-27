@@ -122,9 +122,6 @@ forEachHost(import.meta.url, "emergency >=95%", (host) => {
                 "turn 11: meaningful spike turn that pushes usage past 95%.",
             );
 
-            // Give event handler a beat to persist 95%+ state.
-            await Bun.sleep(300);
-
             // Turn 12: transform sees 97%. Historian must be invoked.
             h.mock.setDefault({
                 text: "after",
@@ -135,6 +132,9 @@ forEachHost(import.meta.url, "emergency >=95%", (host) => {
                     cache_read_input_tokens: 500,
                 },
             });
+            const historianRequestCount = () =>
+                h.mock.requests().filter((r) => isHistorianRequest(r.body)).length;
+            const historianRequestsBeforeFollowUp = historianRequestCount();
             await h.sendPrompt(
                 sessionId,
                 "turn 12: post-emergency follow-up.",
@@ -160,23 +160,17 @@ forEachHost(import.meta.url, "emergency >=95%", (host) => {
                 return;
             }
 
-            // Give historian's async fire a moment to land.
-            await h.waitFor(
-                () => {
-                    return (
-                        h.mock.requests().filter((r) => isHistorianRequest(r.body)).length >= 1
-                    );
-                },
-                { timeoutMs: 15_000, label: "at least one historian request" },
-            );
+            // A historian request from an earlier turn does not prove the emergency path ran.
+            await h.waitFor(() => historianRequestCount() > historianRequestsBeforeFollowUp, {
+                timeoutMs: 15_000,
+                label: "new historian request after the 95% follow-up",
+            });
 
-            const historianRequests = h.mock
-                .requests()
-                .filter((r) => isHistorianRequest(r.body));
+            const historianRequestsAfterFollowUp = historianRequestCount();
             console.log(
-                `[TEST] historian requests captured: ${historianRequests.length}`,
+                `[TEST] historian requests before/after the 95% follow-up: ${historianRequestsBeforeFollowUp}/${historianRequestsAfterFollowUp}`,
             );
-            expect(historianRequests.length).toBeGreaterThanOrEqual(1);
+            expect(historianRequestsAfterFollowUp).toBeGreaterThan(historianRequestsBeforeFollowUp);
 
             // The shared pressure observation above also proves the plugin saw
             // the high-pressure turn before the follow-up rewrote its usage.
