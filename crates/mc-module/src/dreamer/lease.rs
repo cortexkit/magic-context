@@ -319,8 +319,10 @@ pub fn monotonic_ms() -> u64 {
     }
     #[cfg(windows)]
     {
-        // SAFETY: GetTickCount64 takes no arguments and only reads the
-        // system's tick count.
+        // Lease notices carry the Windows tick count, which Instant cannot expose.
+        // SAFETY: GetTickCount64 takes no arguments and returns the system's
+        // tick count without accessing caller-owned memory.
+        #[allow(unsafe_code)]
         unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() }
     }
 }

@@ -931,15 +931,21 @@ fn applying_drops_an_id_the_batch_never_sent_or_a_memory_changed_since_it_was_re
 
 #[test]
 fn a_file_must_be_tracked_present_and_inside_the_checkout() {
+    #[cfg(unix)]
+    use std::os::unix::fs::{symlink as symlink_dir, symlink as symlink_file};
+    #[cfg(windows)]
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("secret.rs"), "fn secret() {}\n").unwrap();
     let store = store(&(1..=5).map(row).collect::<Vec<_>>());
     let root = store.repo.root();
     // A tracked link that leads out of the checkout, a tracked link to a
     // folder inside it, and a tracked file since deleted.
-    std::os::unix::fs::symlink(outside.path().join("secret.rs"), root.join("src/escape.rs"))
-        .unwrap();
-    std::os::unix::fs::symlink(root.join("src"), root.join("folder.rs")).unwrap();
+    #[cfg(windows)]
+    git(root, &["config", "core.symlinks", "true"]);
+    symlink_file(outside.path().join("secret.rs"), root.join("src/escape.rs")).unwrap();
+    symlink_dir(root.join("src"), root.join("folder.rs")).unwrap();
     git(root, &["add", "src/escape.rs", "folder.rs"]);
     commit(root);
     std::fs::remove_file(root.join("web/app.ts")).unwrap();
