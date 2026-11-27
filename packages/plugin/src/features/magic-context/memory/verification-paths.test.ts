@@ -105,7 +105,9 @@ test("a file inside a git submodule is a tracked verification path", async () =>
                 "protocol.file.allow=always",
                 ...args,
             ],
-            { cwd, encoding: "utf8", timeout: 10000, windowsHide: true },
+            // Caller Git settings (hooks, signing, repository paths) must not reach
+            // the fixture's commits.
+            { cwd, env: isolatedTestGitEnv(), encoding: "utf8", timeout: 10000, windowsHide: true },
         );
     try {
         mkdirSync(join(sub, "src"), { recursive: true });
