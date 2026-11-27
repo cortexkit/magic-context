@@ -139,15 +139,13 @@ mod tests {
                     folders.push(path);
                     continue;
                 }
-                let relative = path
-                    .strip_prefix(&root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned();
-                let allowed = ALLOWED
-                    .iter()
-                    .any(|file| relative == *file || relative.starts_with("catalog/"));
-                if !relative.ends_with(".rs") || relative.ends_with("_tests.rs") || allowed {
+                let relative = path.strip_prefix(&root).unwrap();
+                let allowed = relative.starts_with("catalog")
+                    || ALLOWED
+                        .iter()
+                        .any(|file| relative == std::path::Path::new(file));
+                let name = relative.to_string_lossy();
+                if !name.ends_with(".rs") || name.ends_with("_tests.rs") || allowed {
                     continue;
                 }
                 let text = std::fs::read_to_string(&path).unwrap();
@@ -158,7 +156,7 @@ mod tests {
                     {
                         offenders.push(format!(
                             "{}:{}: {}",
-                            path.strip_prefix(&root).unwrap().display(),
+                            relative.display(),
                             number + 1,
                             line.trim()
                         ));
