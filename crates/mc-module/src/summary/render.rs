@@ -401,7 +401,8 @@ pub(crate) fn render_history(
                 tracing::warn!(
                     budget,
                     tokens,
-                    "ck-mc: history body still over its budget after {BODY_PLANS} plans"
+                    plans = BODY_PLANS,
+                    "ck-mc: history body still over its budget after its plans"
                 );
             }
             return RenderedHistory {
