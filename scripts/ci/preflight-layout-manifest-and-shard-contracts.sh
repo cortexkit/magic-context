@@ -9,6 +9,7 @@ check cargo-pins-self-test python3 scripts/cargo-lock-pins.py --self-test
 check nextest-inventory-self-test python3 scripts/check-nextest-inventory.py --self-test
 check artifact-wait-self-test python3 scripts/wait-ci-artifact.py --self-test
 check artifact-download-self-test python3 scripts/download-ci-artifact.py --self-test
+check opencode-installer-tests python3 tests/docker/install-opencode.test.py
 check ci-evidence-tests timeout 180s python3 scripts/ci-gate.test.py -v
 check release-tests timeout 180s python3 scripts/release.test.py -v
 check merge-tests timeout 180s python3 scripts/merge-pr.test.py -v
