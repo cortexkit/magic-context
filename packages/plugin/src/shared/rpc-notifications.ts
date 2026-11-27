@@ -63,16 +63,19 @@ export function pushLiveNotification(
     type: string,
     payload: Record<string, unknown>,
     sessionId: string,
-): void {
+): boolean {
     const notification: RpcNotification = { id: nextNotificationId++, type, payload, sessionId };
+    let delivered = false;
     for (const sink of sinks) {
         if (sink.sessionId !== sessionId) continue;
         try {
             sink.send(notification);
+            delivered = true;
         } catch {
             // A socket that closed during the send has no live terminal to notify.
         }
     }
+    return delivered;
 }
 
 /** Push a notification to the TUI. Fans out to any live WS sink immediately and

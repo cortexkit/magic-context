@@ -606,27 +606,34 @@ export function observeIgnoredNotificationEvent(event: {
     queuedIgnoredNotifications.delete(sessionId);
 }
 
+interface StatusNotificationParams extends NotificationParams {
+    toastTitle?: string;
+    toastVariant?: ReturnType<typeof inferToastVariant>;
+    liveOnly?: boolean;
+}
+
 /** Publish passive status through RPC only: a noReply user row is still input to host run scheduling. */
 export async function sendStatusNotification(
     _client: unknown,
     sessionId: string,
     text: string,
-    params: NotificationParams,
+    params: StatusNotificationParams,
 ): Promise<NotificationDeliveryDisposition> {
     try {
-        const { pushNotification } = await importPluginModule(
+        const { pushLiveNotification, pushNotification } = await importPluginModule(
             () => import("../../shared/rpc-notifications"),
         );
-        pushNotification(
-            "toast",
-            {
-                title: extractToastTitle(text),
-                message: text,
-                variant: inferToastVariant(text),
-                duration: params.toastDurationMs ?? 5000,
-            },
-            sessionId,
-        );
+        const toast = {
+            title: params.toastTitle ?? extractToastTitle(text),
+            message: text,
+            variant: params.toastVariant ?? inferToastVariant(text),
+            duration: params.toastDurationMs ?? 5000,
+        };
+        if (params.liveOnly) {
+            if (!pushLiveNotification("toast", toast, sessionId)) return "skipped";
+        } else {
+            pushNotification("toast", toast, sessionId);
+        }
         notifyDelivered(sessionId, params);
         return "sent";
     } catch (error) {

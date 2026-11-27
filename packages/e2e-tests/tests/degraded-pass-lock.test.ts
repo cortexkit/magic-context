@@ -273,12 +273,13 @@ export default {
 // Exceptions inside replay-only lanes used to be swallowed whenever the size
 // guard admitted the partially replayed array. Inject at the actual message read,
 // not at the wrapper: both lanes run on an ordinary, under-limit defer pass.
-for (const [stage, fn, lkg] of [
-	["stale-reduce-strip-exception", "dropStaleReduceCalls", true],
-	["image-strip-exception", "stripProcessedImages", false],
+for (const [stage, fn, lkg, busy] of [
+	["stale-reduce-strip-exception", "dropStaleReduceCalls", true, false],
+	["image-strip-exception", "stripProcessedImages", false, false],
+	["image-strip-exception", "stripProcessedImages", false, true],
 ] as const) {
 	(residualEnabled ? test : test.skip)(
-		`OpenCode 1.18.30: ${stage} ${lkg ? "replays LKG" : "refuses without LKG"} and never sends raw`,
+		`OpenCode 1.18.30: ${stage}${busy ? " (storage busy)" : ""} ${lkg ? "replays LKG" : "refuses without LKG"} and never sends raw`,
 		async () => {
 			expect(execFileSync("opencode", ["--version"], { encoding: "utf8" }).trim()).toBe("1.18.30");
 			const root = resolve(tmpdir());
@@ -291,7 +292,7 @@ for (const [stage, fn, lkg] of [
 			const entry = resolve(import.meta.dir, "../../plugin/src/index.ts");
 			writeFileSync(wrapper, `import mc from ${JSON.stringify(entry)};
 import { dropSlot } from ${JSON.stringify(join(dirname(entry), "hooks/magic-context/lkg-slot.ts"))};
-import { drainNotifications } from ${JSON.stringify(join(dirname(entry), "shared/rpc-notifications.ts"))};
+import { drainNotifications, registerNotificationSink } from ${JSON.stringify(join(dirname(entry), "shared/rpc-notifications.ts"))};
 import { existsSync, writeFileSync } from "node:fs";
 export default {
     id: mc.id,
@@ -300,7 +301,8 @@ export default {
         const transform = hooks["experimental.chat.messages.transform"];
         let injected = false;
         hooks["experimental.chat.messages.transform"] = async (input, output) => {
-            if (existsSync(${JSON.stringify(arm)}) && !injected) {
+            const armed = existsSync(${JSON.stringify(arm)}) && !injected;
+            if (armed) {
                 ${lkg ? "" : "dropSlot(output.messages.find(m => m.info.sessionID)?.info.sessionID);"}
                 for (const message of output.messages) {
                   for (const [target, key] of [[message, "parts"], [message.info, "id"]]) {
@@ -312,7 +314,9 @@ export default {
                             if (!injected && stack.includes(${JSON.stringify(fn)})) {
                                 injected = true;
                                 writeFileSync(${JSON.stringify(fired)}, stack);
-                                throw new Error(${JSON.stringify(`injected ${stage}`)});
+                                const error = new Error(${JSON.stringify(`injected ${stage}`)});
+                                if (${busy}) error.code = "SQLITE_BUSY";
+                                throw error;
                             }
                             return value;
                         },
@@ -322,12 +326,17 @@ export default {
                 }
             }
             const sessionId = output.messages.find(m => m.info.sessionID)?.info.sessionID;
+            const live = [];
+            const unregister = ${!lkg} && armed && sessionId
+                ? registerNotificationSink({ sessionId, protocol: 2, send: notice => live.push(notice) })
+                : undefined;
             try {
                 return await transform(input, output);
             } finally {
-                if (${!lkg} && injected && sessionId) {
-                    const notices = drainNotifications(0, sessionId, { sessionOnly: true });
-                    writeFileSync(${JSON.stringify(noticesPath)}, JSON.stringify(notices));
+                unregister?.();
+                if (unregister && injected) {
+                    const queued = drainNotifications(0, sessionId, { sessionOnly: true });
+                    writeFileSync(${JSON.stringify(noticesPath)}, JSON.stringify({ live, queued }));
                 }
             }
         };
@@ -380,16 +389,23 @@ export default {
 					expect(log).toContain("lkg_replay_served");
 					expect(after.length).toBeGreaterThan(0);
 				} else {
-					expect(outcome).toStartWith("refused:");
-					expect(JSON.parse(readFileSync(noticesPath, "utf8"))).toContainEqual(
+					if (!busy) expect(outcome).toStartWith("refused:");
+					const { live, queued } = JSON.parse(readFileSync(noticesPath, "utf8"));
+					expect(live).toEqual([
 						expect.objectContaining({
 							type: "toast",
 							sessionId,
-							payload: expect.objectContaining({
-								message: "Magic Context could not safely prepare this turn [MC-S06] (image-strip-exception: injected image-strip-exception). This request was not sent.",
-							}),
+							payload: {
+								title: "Magic Context",
+								variant: busy ? "info" : "error",
+								duration: 15000,
+								message: busy
+									? "Magic Context's database is busy (another process held it too long); send your message again."
+									: "Magic Context could not safely prepare this turn [MC-S06] (image-strip-exception). This request was not sent.",
+							},
 						}),
-					);
+					]);
+					expect(queued).toEqual(busy ? live : []);
 					expect(after).toEqual([]);
 				}
 				for (const body of after) {

@@ -165,7 +165,7 @@ function restartFromDurableSlot(format: "legacy" | "current"): void {
 function busyHandler(onRefusal?: () => void) {
     return createMessagesTransformHandler({
         onRefusal: async (_id, message) => {
-            expect(message).toBe(`${STORAGE_BUSY_MESSAGE} [STORAGE_BUSY_REFUSAL]`);
+            expect(message).toBe(STORAGE_BUSY_MESSAGE);
             onRefusal?.();
         },
         magicContext: {

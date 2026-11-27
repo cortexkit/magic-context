@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import {
+    createFailClosedBlockingError,
     createFailClosedController,
     FAIL_CLOSED_DOCTOR_COMMAND,
     isFailClosedBlockingError,
@@ -26,7 +27,10 @@ import {
     recordToolDefinition,
 } from "../features/magic-context/tool-definition-tokens";
 import { DegradedPassRefusalError } from "../hooks/magic-context/degraded-pass-refusal";
-import { EmergencyFailClosedError } from "../hooks/magic-context/emergency-fail-closed";
+import {
+    EmergencyFailClosedError,
+    ENGINE_RECONNECTING_USER_MESSAGE,
+} from "../hooks/magic-context/emergency-fail-closed";
 import {
     clearLkgMeasuredRequest,
     noteLkgProviderResponse,
@@ -45,6 +49,7 @@ import { UnresolvedHistoryBoundaryError } from "../hooks/magic-context/unresolve
 import * as logger from "../shared/logger";
 import { Database } from "../shared/sqlite";
 import {
+    ASSISTANT_TERMINAL_RETRY_MESSAGE,
     AssistantTerminalRetryError,
     createMessagesTransformHandler,
     IncompleteUserMessageError,
@@ -197,19 +202,16 @@ describe("createMessagesTransformHandler — refusal notices", () => {
             new DegradedPassRefusalError("image-strip-exception", {
                 cause: new Error("strip failed"),
             }),
-            "Magic Context could not safely prepare this turn [MC-S06] (image-strip-exception: strip failed). This request was not sent.",
+            "Magic Context could not safely prepare this turn [MC-S06] (image-strip-exception). This request was not sent.",
         ],
         [new UnresolvedHistoryBoundaryError(6_200_000, 500_000), /(MC-H04)/],
         [new UnmanagedOverWindowError(6_200_000, 500_000), /(MC-H06)/],
-        [
-            new EmergencyFailClosedError("Emergency recovery failed"),
-            "Emergency recovery failed [EMERGENCY_FAIL_CLOSED]",
-        ],
-        [new RawFallbackContextLimitError(3_300_000, 1_000_000), /\[RAW_FALLBACK_CONTEXT_LIMIT\]$/],
-        [new AssistantTerminalRetryError(), /\[ASSISTANT_TERMINAL_RETRY\]$/],
+        [new EmergencyFailClosedError("Emergency recovery failed"), "Emergency recovery failed"],
+        [new RawFallbackContextLimitError(3_300_000, 1_000_000), ENGINE_RECONNECTING_USER_MESSAGE],
+        [new AssistantTerminalRetryError(), ASSISTANT_TERMINAL_RETRY_MESSAGE],
         [
             new StorageBusyRefusalError(new Error("fixture busy"), "messages-transform"),
-            `${STORAGE_BUSY_MESSAGE} [STORAGE_BUSY_REFUSAL]`,
+            STORAGE_BUSY_MESSAGE,
         ],
     ] as const) {
         it(`notifies before rejecting with ${refusal.name}`, async () => {
@@ -238,6 +240,95 @@ describe("createMessagesTransformHandler — refusal notices", () => {
             expect(output).toEqual(before);
         });
     }
+
+    for (const [reason, expected] of [
+        [
+            { kind: "storage_failure", cause: "fixture disk unavailable" },
+            `Magic Context cannot operate: persistent storage failed (fixture disk unavailable). The plugin will not silently degrade to native compaction while enabled. Recovery: ${FAIL_CLOSED_DOCTOR_COMMAND}`,
+        ],
+        [
+            {
+                kind: "migration_guard",
+                persistedVersion: 64,
+                supportedVersion: 65,
+                blockingProcesses: [
+                    { kind: "OpenCode server", pid: 42, commandLine: "private command line" },
+                ],
+            },
+            "Magic Context cannot migrate the shared database from v64 to v65 while OpenCode server (PID 42) may still run an older Magic Context build. Stop or update that host, then start this one once.",
+        ],
+    ] as const) {
+        it(`notifies a fail-closed ${reason.kind} with its user-facing text`, async () => {
+            const notice = mock(async () => {});
+            const refusal = createFailClosedBlockingError(reason);
+            const failClosed = createFailClosedController();
+            const handler = createMessagesTransformHandler({
+                magicContext: null,
+                failClosed: {
+                    ...failClosed,
+                    enforce: () => {
+                        throw refusal;
+                    },
+                },
+                onRefusal: notice,
+            });
+            await expect(handler({}, makeOutput())).rejects.toBe(refusal);
+            expect(notice).toHaveBeenCalledTimes(1);
+            expect(notice).toHaveBeenCalledWith("ses_test", expected, refusal);
+        });
+    }
+
+    it("does not notify for a non-refusal thrown by the storage guard", async () => {
+        const failure = new Error("unexpected storage guard failure");
+        const notice = mock(async () => {});
+        const handler = createMessagesTransformHandler({
+            magicContext: null,
+            failClosed: {
+                ...createFailClosedController(),
+                enforce: () => {
+                    throw failure;
+                },
+            },
+            onRefusal: notice,
+        });
+        await expect(handler({}, makeOutput())).rejects.toBe(failure);
+        expect(notice).not.toHaveBeenCalled();
+    });
+
+    it("notifies an incomplete user message with only the resend advice", async () => {
+        const notice = mock(async () => {});
+        const handler = createMessagesTransformHandler({ magicContext: null, onRefusal: notice });
+        const output = makeOutput();
+        output.messages[0].parts = [];
+        await expect(handler({}, output)).rejects.toBeInstanceOf(IncompleteUserMessageError);
+        expect(notice).toHaveBeenCalledTimes(1);
+        expect(notice).toHaveBeenCalledWith(
+            "ses_test",
+            "Your message hadn't finished arriving. Send it again.",
+            expect.any(IncompleteUserMessageError),
+        );
+    });
+
+    it("keeps an unknown fault's message on the error and out of the notice", async () => {
+        const cause = new Error("Cannot read properties of undefined (reading 'parts')");
+        const notice = mock(async () => {});
+        const handler = createMessagesTransformHandler({
+            magicContext: {
+                "experimental.chat.messages.transform": async () => {
+                    throw cause;
+                },
+            },
+            onRefusal: notice,
+        });
+        const result = handler({}, makeOutput());
+        await expect(result).rejects.toMatchObject({ cause, site: "messages-transform-failed" });
+        await expect(result).rejects.toThrow(cause.message);
+        expect(notice).toHaveBeenCalledWith(
+            "ses_test",
+            "Magic Context could not safely prepare this turn [MC-S06] (messages-transform-failed). This request was not sent.",
+            expect.any(DegradedPassRefusalError),
+        );
+    });
 
     it("logs a failed notice and still rejects with the original refusal", async () => {
         const refusal = new DegradedPassRefusalError("failed-strip");

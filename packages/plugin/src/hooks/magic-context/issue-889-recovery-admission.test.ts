@@ -27,12 +27,14 @@ import {
     openDatabase,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import * as storageMeta from "../../features/magic-context/storage-meta-persisted";
 import {
     getOverflowState,
     recordOverflowDetected,
     resetEmergencyRecoveryRegistryForTest,
 } from "../../features/magic-context/storage-meta-persisted";
 import { createTagger } from "../../features/magic-context/tagger";
+import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import type { PluginContext } from "../../plugin/types";
 import * as logger from "../../shared/logger";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
@@ -40,6 +42,7 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import * as incremental from "./compartment-runner-incremental";
+import { EmergencyFailClosedError } from "./emergency-fail-closed";
 import { resolveContextWindowGeometry } from "./event-resolvers";
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import { createTransform } from "./transform";
@@ -192,6 +195,7 @@ function newTransform(args: {
     live: Map<string, typeof LARGE>;
     onRefuse: () => void;
     notices?: string[];
+    failNotice?: boolean;
     hostAddedTokens?: number;
 }) {
     return createTransform({
@@ -215,6 +219,7 @@ function newTransform(args: {
             session: { abort: mock(async () => ({ data: true })), prompt: mock(async () => ({})) },
         } as unknown as PluginContext["client"],
         hostRefusalNotice: async (_client, _sessionId, message) => {
+            if (args.failNotice) throw new Error("fixture notice fault");
             args.notices?.push(message);
         },
         // An OpenCode 2 host reports the checkpoint text it adds after the
@@ -246,17 +251,30 @@ async function passLogs(sessionId: string, run: () => Promise<unknown>): Promise
 async function switchedSession(
     sessionId: string,
     publishing: number,
-    options: { hostAddedTokens?: number } = {},
+    options: { hostAddedTokens?: number; failure?: "notification" | "abort" | "cleanup" } = {},
 ) {
     writeOpenCodeDb(sessionId);
     const db = openDatabase();
     const live = new Map([[sessionId, LARGE]]);
     let refused = 0;
+    let restoreCleanup: (() => void) | undefined;
     const notices: string[] = [];
     const transform = newTransform({
         db,
         live,
-        onRefuse: () => refused++,
+        onRefuse: () => {
+            refused++;
+            if (options.failure === "abort") throw new Error("fixture abort fault");
+            if (options.failure === "cleanup") {
+                const spy = spyOn(storageMeta, "clearEmergencyDropSample").mockImplementation(
+                    () => {
+                        throw new Error("fixture cleanup fault");
+                    },
+                );
+                restoreCleanup = () => spy.mockRestore();
+            }
+        },
+        failNotice: options.failure === "notification",
         notices,
         hostAddedTokens: options.hostAddedTokens,
     });
@@ -273,16 +291,32 @@ async function switchedSession(
     live.set(sessionId, SMALL);
     const output = { messages: hostMessages(sessionId, SMALL) };
     try {
-        const lines = await passLogs(sessionId, () => transform({}, output as never));
+        let failure: unknown;
+        const lines = await passLogs(sessionId, async () => {
+            if (!options.failure) return transform({}, output as never);
+            const handler = createMessagesTransformHandler({
+                magicContext: { "experimental.chat.messages.transform": transform },
+                onRefusal: async (_id, message) => {
+                    notices.push(message);
+                },
+            });
+            try {
+                await handler({}, output as never);
+            } catch (error) {
+                failure = error;
+            }
+        });
         return {
             db,
             lines,
             output,
             refused: () => refused,
             notices,
+            failure,
             historianRuns: historian.runs(),
         };
     } finally {
+        restoreCleanup?.();
         historian.spy.mockRestore();
     }
 }
@@ -298,6 +332,15 @@ const recoveryLine = (db: ReturnType<typeof openDatabase>, sessionId: string) =>
     );
 
 describe("OpenCode 1: recovery never sends a request over the window (issue 889)", () => {
+    for (const phase of ["notification", "abort", "cleanup"] as const) {
+        it(`does not send a second notice when emergency ${phase} fails`, async () => {
+            const pass = await switchedSession(`ses-889-emergency-${phase}`, 1, { failure: phase });
+            expect(pass.failure).toBeInstanceOf(EmergencyFailClosedError);
+            expect(pass.failure).toMatchObject({ message: `Emergency recovery ${phase} failed` });
+            expect(pass.notices).toEqual(phase === "notification" ? [] : [RECOVERY_NOTICE]);
+        });
+    }
+
     it("summarizes chunk after chunk within the switching turn and sends a request that fits", async () => {
         const sessionId = "ses-889-oc1-chain";
         const pass = await switchedSession(sessionId, TURNS);

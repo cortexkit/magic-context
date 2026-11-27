@@ -13,7 +13,10 @@ import {
     isProviderOverflowFailClosedProven,
 } from "../features/magic-context/storage-meta-persisted";
 import { updateSessionMeta } from "../features/magic-context/storage-meta-session";
-import { DegradedPassRefusalError } from "../hooks/magic-context/degraded-pass-refusal";
+import {
+    DegradedPassRefusalError,
+    describeDegradedPassFailure,
+} from "../hooks/magic-context/degraded-pass-refusal";
 import { EmergencyFailClosedError } from "../hooks/magic-context/emergency-fail-closed";
 import { markLkgRecoveryDirty } from "../hooks/magic-context/lkg-recovery-fence";
 import {
@@ -802,20 +805,26 @@ export function createMessagesTransformHandler(args: {
             } catch (error) {
                 // OpenCode hides hook errors. Notify at the boundary, after replay and
                 // compaction-off fallbacks have had their chance to serve the request.
-                if (args.onRefusal && isTransformRefusal(error)) {
+                if (
+                    args.onRefusal &&
+                    isTransformRefusal(error) &&
+                    !(error instanceof EmergencyFailClosedError && error.noticeHandled)
+                ) {
                     const sessionId = servedSessionId ?? resolveSessionId(output);
                     if (sessionId) {
                         try {
                             // A migration toast needs the blockers' PIDs, not their full command lines.
-                            const message =
+                            let message = error.message;
+                            if (
                                 isFailClosedBlockingError(error) &&
                                 error.reason.kind === "migration_guard"
-                                    ? formatFailClosedBlockingSummary(error.reason)
-                                    : error.message;
-                            const notice = /\bMC-[A-Z]\d{2}\b/.test(message)
-                                ? message
-                                : `${message} [${error.code}]`;
-                            await args.onRefusal(sessionId, notice, error);
+                            ) {
+                                message = formatFailClosedBlockingSummary(error.reason);
+                            } else if (error instanceof DegradedPassRefusalError) {
+                                // The failing stage is safe to show; arbitrary cause text is not.
+                                message = describeDegradedPassFailure(error.site, undefined);
+                            }
+                            await args.onRefusal(sessionId, message, error);
                         } catch (noticeError) {
                             sessionLog(sessionId, "host refusal notice failed:", noticeError);
                         }

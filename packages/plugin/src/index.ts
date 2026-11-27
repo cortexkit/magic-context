@@ -56,7 +56,6 @@ import {
 import { preloadTokenizer } from "./hooks/magic-context/read-session-formatting";
 import type { RustLkgReplayParticipant } from "./hooks/magic-context/rust-lkg-freeze-registry";
 import type { RustModeModuleClient } from "./hooks/magic-context/rust-mode-transform";
-import { StorageBusyRefusalError } from "./hooks/magic-context/storage-busy-refusal";
 import {
     createBootBudget,
     emitBootEnteringBreadcrumb,
@@ -75,6 +74,7 @@ import { startHostStallProfilerSwitch } from "./plugin/host-stall-profiler";
 import { isDisposedInstanceDirectory } from "./plugin/instance-disposal";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
 import { disableNativeAutoCompaction } from "./plugin/native-compaction-guard";
+import { sendOpenCodeRefusal } from "./plugin/refusal-notice";
 import { isDebugRpcEnabled, registerRpcHandlers } from "./plugin/rpc-handlers";
 import { bindStaleBuildNotice } from "./plugin/stale-build-notice";
 import { primaryOnlyToolIds } from "./plugin/subagent-tool-policy";
@@ -962,20 +962,8 @@ const server: Plugin = async (ctx) => {
                         getRustReplayParticipant?: () => RustLkgReplayParticipant | null;
                     } | null
                 )?.getRustReplayParticipant?.() ?? null,
-            onRefusal: async (sessionId, message, refusal) => {
-                const { sendStatusNotification } = await importPluginModule(
-                    () => import("./hooks/magic-context/send-session-notification"),
-                );
-                await sendStatusNotification(ctx.client, sessionId, message, {
-                    toastDurationMs: 15000,
-                });
-                if (refusal instanceof StorageBusyRefusalError) {
-                    const { abortSessionFailClosed } = await importPluginModule(
-                        () => import("./hooks/magic-context/transform-postprocess-phase"),
-                    );
-                    await abortSessionFailClosed(ctx.client, sessionId);
-                }
-            },
+            onRefusal: (sessionId, message, refusal) =>
+                sendOpenCodeRefusal(ctx.client, sessionId, message, refusal),
         }) as unknown as NonNullable<Hooks["experimental.chat.messages.transform"]>,
         "experimental.chat.system.transform": async (input, output) => {
             await magicContextRuntime.magicContext?.["experimental.chat.system.transform"]?.(

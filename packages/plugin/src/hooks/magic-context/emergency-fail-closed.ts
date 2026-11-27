@@ -121,10 +121,15 @@ export function signedTurnContextRefusal(
 
 export class EmergencyFailClosedError extends Error {
     readonly code: string;
+    readonly noticeHandled?: true;
 
-    constructor(message: string, options?: { cause?: unknown; code?: string }) {
+    constructor(
+        message: string,
+        options?: { cause?: unknown; code?: string; noticeHandled?: true },
+    ) {
         super(message, options);
         this.code = options?.code ?? "EMERGENCY_FAIL_CLOSED";
+        this.noticeHandled = options?.noticeHandled;
         this.name = "EmergencyFailClosedError";
     }
 }

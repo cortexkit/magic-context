@@ -4625,6 +4625,7 @@ export function createTransform(deps: TransformDeps) {
                 } catch (error) {
                     throw new EmergencyFailClosedError("Emergency recovery notification failed", {
                         cause: error,
+                        noticeHandled: true,
                     });
                 }
                 try {
@@ -4639,6 +4640,7 @@ export function createTransform(deps: TransformDeps) {
                     );
                     throw new EmergencyFailClosedError("Emergency recovery abort failed", {
                         cause: error,
+                        noticeHandled: true,
                     });
                 }
                 // The abort prevents a fresh provider usage sample. Release the
@@ -4648,6 +4650,7 @@ export function createTransform(deps: TransformDeps) {
                 } catch (error) {
                     throw new EmergencyFailClosedError("Emergency recovery cleanup failed", {
                         cause: error,
+                        noticeHandled: true,
                     });
                 }
                 sessionLog(
