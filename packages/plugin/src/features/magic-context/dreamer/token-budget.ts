@@ -32,7 +32,11 @@ interface FinalizingChild {
 
 const finalizingChildren = new Map<string, FinalizingChild>();
 
-/** The OpenCode 1 hook refuses immediately; the poller counts refusals from finalize submission. */
+/**
+ * OpenCode 1's `tool.execute.before` hook always refuses while finalizing.
+ * Refusals start counting when the poller installs the in-flight set just
+ * before it submits the finalize prompt.
+ */
 export function registerBudgetFinalizeChild(
     sessionId: string,
     budget: ReturnType<typeof createDreamTokenBudget>,

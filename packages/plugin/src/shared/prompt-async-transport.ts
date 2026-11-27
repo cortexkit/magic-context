@@ -567,19 +567,19 @@ export async function promptAsyncAndWaitForIdle(
                         if ((await readStatus(session, sessionId, dir, signal)) !== "idle") {
                             throw new DreamTokenBudgetExceeded(sessionId, budget.snapshot().spent);
                         }
-                        const cancelled = await readMessages(session, sessionId, dir, signal).catch(
-                            (error: unknown) => {
-                                if (signal?.aborted) throw error;
-                                return [];
-                            },
-                        );
+                        const cancelled = await readMessages(session, sessionId, dir, signal);
                         // An aborted assistant is not the answer to the new user turn.
                         completionBaseline = new Set(
                             (cancelled.length ? cancelled : messages)
                                 .map(messageId)
                                 .filter((value): value is string => value !== null),
                         );
-                        countRefusals(inFlightAtAbort(cancelled, initialBaseline));
+                        const exemptCallIds = inFlightAtAbort(cancelled, initialBaseline);
+                        countRefusals(exemptCallIds);
+                        sessionLog(sessionId, "dreamer token budget: counting tool refusals", {
+                            snapshot: cancelled.length ? "read" : "unreadable",
+                            exemptCallIds: [...exemptCallIds],
+                        });
                         const finalizeResponse = await session.promptAsync?.({
                             ...request,
                             body: {

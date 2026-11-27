@@ -266,12 +266,14 @@ export function createDroppedInputToolExecuteBeforeHook() {
             if (refusal) {
                 if (refusal.spared) {
                     sessionLog(call.sessionID, "dreamer token budget: refusal did not count", {
-                        callId,
+                        tool: call.tool,
+                        callId: callId ?? null,
                         reason: refusal.spared,
                     });
                 } else {
                     sessionLog(call.sessionID, "dreamer token budget: tool call refused", {
                         tool: call.tool,
+                        callId: callId ?? null,
                         hardStopped: refusal.hardStopped,
                     });
                 }

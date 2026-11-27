@@ -750,6 +750,21 @@ describe("tool refusals at finalize submission", () => {
             answer: true,
         }));
 
+    test("spares a call that is still running in the cancellation snapshot", () =>
+        runScript({
+            afterAbort: [toolPart("a", "running")],
+            afterSubmission: ["a"],
+            counts: [0],
+            answer: true,
+        }));
+
+    test("counts a call whose part closed with an ordinary tool error", () =>
+        runScript({
+            afterAbort: [{ ...toolPart("a"), state: { status: "error", error: "File not found" } }],
+            afterSubmission: ["a", "b"],
+            counts: [1, 2],
+        }));
+
     test("spares an early refusal but counts a reuse and a second new call", () =>
         runScript({
             beforeAbort: [toolPart("a")],
@@ -775,6 +790,41 @@ describe("tool refusals at finalize submission", () => {
             afterSubmission: ["a", "b"],
             counts: [1, 2],
         }));
+
+    test("releases the guard without submitting finalize when the cancellation read throws", async () => {
+        const readError = new Error("socket hang up");
+        const meter = { info: { id: "meter", role: "assistant", tokens: { input: 81 } } };
+        const cancelled = {
+            info: {
+                id: "cancelled",
+                role: "assistant",
+                finish: "tool-calls",
+                time: { completed: 1 },
+            },
+            parts: [toolPart("a", "completed")],
+        };
+        const promptAsync = mock(async () => ({ data: undefined }));
+        const abort = mock(async () => ({ data: true }));
+        const messages = mock(async () => {
+            if (!promptAsync.mock.calls.length) return { data: [] };
+            if (!abort.mock.calls.length) return { data: [meter] };
+            if (promptAsync.mock.calls.length === 1) throw readError;
+            // A settled tool reply missing from the poll that triggered cancellation
+            // must not be mistaken for the finalize response.
+            return { data: [meter, cancelled] };
+        });
+        const client = {
+            session: { promptAsync, abort, messages, status: async () => ({ data: {} }) },
+        } as never;
+        const run = promptAsyncAndWaitForIdle(client, request(), {
+            pollIntervalMs: 1,
+            tokenBudget: 100,
+        });
+        await expect(run).rejects.toBe(readError);
+        expect(promptAsync).toHaveBeenCalledTimes(1);
+        expect(abort).toHaveBeenCalledTimes(1);
+        expect(refuseBudgetedToolCall("ses-child")).toBeNull();
+    });
 
     test("counts missing ids and ids of completed tools after submission", () =>
         runScript({
