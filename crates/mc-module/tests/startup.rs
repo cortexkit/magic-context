@@ -145,7 +145,11 @@ fn startup_opens_default_stores_writes_catalog_and_leaves_rollback_store_alone()
 #[test]
 fn startup_refuses_an_unrenamed_session_store() {
     let root = tempfile::tempdir().unwrap();
-    let data = root.path().join("data/cortexkit/magic-context");
+    let data = root
+        .path()
+        .join("data")
+        .join("cortexkit")
+        .join("magic-context");
     std::fs::create_dir_all(&data).unwrap();
     drop(mc_module::context_db::ContextDb::create_for_tests(&data.join("context.db")).unwrap());
     let old = data.join("mode3.db");

@@ -1287,6 +1287,7 @@ mod tests {
                 .unwrap();
             assert_eq!(mapping, ("opencode".into(), "pj-1".into(), 7));
         });
+        drop(db);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1349,6 +1350,7 @@ mod tests {
                 .unwrap();
             assert_eq!(rows, vec![("s1".into(), "pj-b".into(), 5)]);
         });
+        drop(db);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
