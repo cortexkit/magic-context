@@ -246,32 +246,47 @@ forEachHost(import.meta.url, "status-notice loop-exit ordering", () => {
         const sessionId = await h.createSession();
         await h.sendPrompt(sessionId, "title this session");
 
-        h.mock.script([
-            {
+        let releaseReply!: () => void;
+        const untilNoticeIsStored = new Promise<void>((resolve) => {
+            releaseReply = resolve;
+        });
+        let held = false;
+        h.mock.addMatcher((body) => {
+            // Hold the real turn's first request, not a title or follow-up request.
+            if (
+                held ||
+                !Array.isArray(body.messages) ||
+                !JSON.stringify(body.messages.at(-1))?.includes(REAL_PROMPT)
+            )
+                return null;
+            held = true;
+            return {
                 text: "slow turn",
                 usage: { input_tokens: 100, output_tokens: 10 },
-                delayMs: 1500,
-            },
-        ]);
-
-        const requestsBeforeRun = h.mock.requests().length;
-        const inFlight = h.sendPrompt(sessionId, REAL_PROMPT, { timeoutMs: 60_000 });
-        await h.waitFor(() => h.mock.requests().length > requestsBeforeRun, {
-            timeoutMs: 15_000,
-            intervalMs: 50,
-            label: "in-flight provider request",
+                until: untilNoticeIsStored,
+            };
         });
 
-        await appendIgnoredNotice(sessionId, NOTICE_TEXT);
-        const noticeDuringRun = findIgnoredNotice(sessionId, NOTICE_TEXT);
-        expect(noticeDuringRun).toBeDefined();
-
-        let promptError: string | undefined;
+        const requestsBeforeRun = h.mock.requests().length;
+        const inFlight = h.sendPrompt(sessionId, REAL_PROMPT, { timeoutMs: 60_000 }).then(
+            () => undefined,
+            (error: unknown) => (error instanceof Error ? error.message : String(error)),
+        );
+        let noticeDuringRun: ReturnType<typeof findIgnoredNotice>;
         try {
-            await inFlight;
-        } catch (error) {
-            promptError = error instanceof Error ? error.message : String(error);
+            await h.waitFor(() => held, {
+                timeoutMs: 15_000,
+                intervalMs: 50,
+                label: "in-flight provider request",
+            });
+            await appendIgnoredNotice(sessionId, NOTICE_TEXT);
+            noticeDuringRun = findIgnoredNotice(sessionId, NOTICE_TEXT);
+            expect(noticeDuringRun).toBeDefined();
+        } finally {
+            releaseReply();
         }
+
+        const promptError = await inFlight;
 
         const observed = formatObservedRows(sessionId);
         const realUser = findUserByText(sessionId, REAL_PROMPT);
