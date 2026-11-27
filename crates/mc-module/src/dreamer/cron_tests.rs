@@ -1,4 +1,4 @@
-use chrono::{Local, TimeZone};
+use chrono::{FixedOffset, Local, NaiveDate, NaiveDateTime, TimeZone};
 
 use super::*;
 
@@ -64,6 +64,10 @@ fn an_empty_invalid_or_impossible_schedule_is_never_due() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows Local does not honor POSIX TZ; see dst_schedule_runs_the_first_repeated_minute_and_skips_the_missing_minute"
+)]
 fn a_repeated_wall_clock_minute_matches_only_on_its_first_occurrence() {
     const CHILD: &str = "MC_CRON_TEST_DST_CHILD";
     if std::env::var_os(CHILD).is_none() {
@@ -107,5 +111,89 @@ fn a_repeated_wall_clock_minute_matches_only_on_its_first_occurrence() {
     assert_eq!(
         next_due("30 2 * * *", local(2026, 3, 8, 1, 59)),
         Some(local(2026, 3, 9, 2, 30))
+    );
+}
+
+// A fixed fixture with the 2026 US Eastern transitions, independent of the
+// machine's zone and without making the scheduler depend on a timezone table.
+#[derive(Clone)]
+struct DstZone;
+
+fn transition(month: u32, day: u32, hour: u32) -> NaiveDateTime {
+    NaiveDate::from_ymd_opt(2026, month, day)
+        .unwrap()
+        .and_hms_opt(hour, 0, 0)
+        .unwrap()
+}
+
+impl TimeZone for DstZone {
+    type Offset = FixedOffset;
+
+    fn from_offset(_offset: &Self::Offset) -> Self {
+        Self
+    }
+
+    fn offset_from_utc_date(&self, date: &NaiveDate) -> Self::Offset {
+        self.offset_from_utc_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+    }
+
+    fn offset_from_utc_datetime(&self, utc: &NaiveDateTime) -> Self::Offset {
+        let daylight = (transition(3, 8, 7)..transition(11, 1, 6)).contains(utc);
+        FixedOffset::west_opt(if daylight { 4 } else { 5 } * 3600).unwrap()
+    }
+
+    fn offset_from_local_date(&self, date: &NaiveDate) -> LocalResult<Self::Offset> {
+        self.offset_from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+    }
+
+    fn offset_from_local_datetime(&self, local: &NaiveDateTime) -> LocalResult<Self::Offset> {
+        // Keep only offsets that round-trip through one of the real instants.
+        let mut offsets = [4, 5]
+            .map(|hours| FixedOffset::west_opt(hours * 3600).unwrap())
+            .into_iter()
+            .filter(|offset| {
+                local
+                    .checked_sub_offset(*offset)
+                    .is_some_and(|utc| self.offset_from_utc_datetime(&utc) == *offset)
+            });
+        match (offsets.next(), offsets.next()) {
+            (Some(first), Some(second)) => LocalResult::Ambiguous(first, second),
+            (Some(only), None) => LocalResult::Single(only),
+            _ => LocalResult::None,
+        }
+    }
+}
+
+#[test]
+fn dst_schedule_runs_the_first_repeated_minute_and_skips_the_missing_minute() {
+    let zone = DstZone;
+    let LocalResult::Ambiguous(first, second) = zone.with_ymd_and_hms(2026, 11, 1, 1, 30, 0) else {
+        panic!("the fixture must repeat 01:30");
+    };
+    assert_ne!(first.offset(), second.offset());
+    assert_eq!((second.hour(), second.minute()), (1, 30));
+    let (first, second) = (first.timestamp_millis(), second.timestamp_millis());
+    assert_eq!(second - first, 60 * MINUTE);
+    let local = |month, day, hour, minute| {
+        zone.with_ymd_and_hms(2026, month, day, hour, minute, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis()
+    };
+    assert_eq!(
+        next_due_in(&zone, "30 1 * * *", first - MINUTE),
+        Some(first)
+    );
+    assert_eq!(
+        next_due_in(&zone, "30 1 * * *", first + MINUTE),
+        Some(local(11, 2, 1, 30))
+    );
+    assert!(matches!(
+        zone.with_ymd_and_hms(2026, 3, 8, 2, 30, 0),
+        LocalResult::None
+    ));
+    assert_eq!(
+        next_due_in(&zone, "30 2 * * *", local(3, 8, 1, 59)),
+        Some(local(3, 9, 2, 30))
     );
 }
