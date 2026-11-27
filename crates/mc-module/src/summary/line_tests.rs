@@ -116,6 +116,15 @@ fn line_forms(scores: &[f64], stretch: f64) -> Vec<u8> {
         .collect()
 }
 
+/// The line, the floor and the step down alone, without the titles that
+/// fill what they leave of the budget.
+fn no_fill() -> Options {
+    Options {
+        fill: false,
+        ..Options::default()
+    }
+}
+
 fn fnv1a32(forms: &[u8]) -> u32 {
     forms.iter().fold(2_166_136_261u32, |hash, &form| {
         (hash ^ u32::from(form)).wrapping_mul(16_777_619)
@@ -169,7 +178,7 @@ fn the_line_matches_the_lab_on_a_real_sessions_shape() {
     let options = Options {
         reference_scale: false,
         day_headers: false,
-        ..Options::default()
+        ..no_fill()
     };
     for expected in &fixture.expected {
         let plan = plan(&summaries, expected.budget, &mut table, options);
@@ -222,7 +231,7 @@ fn generated_sessions_keep_the_lines_promises_at_every_budget() {
             let full: u64 = table.forms.iter().map(|forms| forms[0]).sum();
             let mut previous: Option<Vec<u8>> = None;
             for &budget in &BUDGETS {
-                let plan = plan(&summaries, budget, &mut table, Options::default());
+                let plan = plan(&summaries, budget, &mut table, no_fill());
                 let at = format!("{count} summaries (round {round}) at {budget}");
 
                 // Within the budget.
@@ -290,7 +299,13 @@ fn the_plan_fits_its_budget_or_is_empty_at_any_budget() {
                 1.0, 5.0, 20.0, 50.0, 120.0, 200.0, 700.0, 1_500.0, 3_000.0, 10_000.0,
             ] {
                 let at = format!("{count} summaries (round {round}) at {budget}");
-                let plan = plan(&summaries, budget, &mut table, Options::default());
+                let filled = plan(&summaries, budget, &mut table, Options::default());
+                assert!(
+                    filled.total as f64 <= budget,
+                    "{at}: {} tokens",
+                    filled.total
+                );
+                let plan = plan(&summaries, budget, &mut table, no_fill());
                 assert!(plan.total as f64 <= budget, "{at}: {} tokens", plan.total);
                 if plan.stretch != Some(STRETCH_MIN) {
                     continue;
@@ -471,7 +486,7 @@ fn the_floor_takes_the_highest_scores_first_and_stops_at_five_percent() {
     let options = Options {
         reference_scale: false,
         day_headers: false,
-        ..Options::default()
+        ..no_fill()
     };
     let plan = plan(&summaries, budget, &mut table, options);
     let stretch = plan.stretch.unwrap();
@@ -514,7 +529,7 @@ fn the_floor_brings_back_only_scores_of_ninety_or_more() {
         lines: vec![10; count],
         header: 10,
     };
-    let plan = plan(&summaries, 2_000.0, &mut table, Options::default());
+    let plan = plan(&summaries, 2_000.0, &mut table, no_fill());
     assert_eq!(plan.forms[0], NOT_SHOWN);
 }
 
@@ -612,6 +627,7 @@ fn stopping_the_sums_early_changes_no_choice() {
                             reference_scale,
                             day_headers,
                             stop_early: true,
+                            fill: true,
                         };
                         let all = Options {
                             stop_early: false,
@@ -745,7 +761,7 @@ fn a_tied_top_group_still_has_floor_titles() {
         };
         let budget = 6_000.0;
         let at = format!("{tied} of {count} tied at {top}");
-        let plan = plan(&summaries, budget, &mut table, Options::default());
+        let plan = plan(&summaries, budget, &mut table, no_fill());
         let stretch = plan.stretch.unwrap();
         // The forms still read the middle of the group: below the floor.
         assert!(plan.scores[0] < 90.0, "{at}: {}", plan.scores[0]);
@@ -802,7 +818,7 @@ fn the_lab_sessions_floor_on_the_reference_scale_is_pinned() {
     };
     let options = Options {
         day_headers: false,
-        ..Options::default()
+        ..no_fill()
     };
     let candidates = floor_scores(&summaries, true)
         .iter()
@@ -849,7 +865,7 @@ fn a_score_exactly_at_the_line_is_not_shown() {
         lines: vec![10; 2],
         header: 10,
     };
-    let plan = plan(&summaries, 600.0, &mut table, Options::default());
+    let plan = plan(&summaries, 600.0, &mut table, no_fill());
     assert_eq!(plan.forms[1], NOT_SHOWN);
 }
 
@@ -879,12 +895,7 @@ fn the_widest_stretch_is_twelve() {
     let (session, mut table) = Generated::new(&mut random, 400);
     let summaries = session.summaries();
     let full: u64 = table.forms.iter().map(|forms| forms[0]).sum();
-    let plan = plan(
-        &summaries,
-        full as f64 - 1.0,
-        &mut table,
-        Options::default(),
-    );
+    let plan = plan(&summaries, full as f64 - 1.0, &mut table, no_fill());
     assert_eq!(plan.stretch, Some(12.0));
     assert_eq!(plan.forms, line_forms_with_floor(&plan, 12.0, &mut table));
     // The line's far end at 12: flat at 96 from age 1718.3 × 12.
@@ -899,4 +910,147 @@ fn line_forms_with_floor(plan: &Plan, stretch: f64, table: &mut Table) -> Vec<u8
         floor: &plan.floor_scores,
     };
     forms_on_line(scores, stretch, plan.budget, table)
+}
+
+/// What filling with titles adds on the real session's shape in
+/// `testdata/history-line-shape.json`, at the six budgets, with stored and
+/// with reference scores (day headings off, as in the pins above): the same
+/// stretch, the same form for every summary the plan showed, and titles for
+/// the newest summaries it hid, as many as fit. Pinned: the number added,
+/// the total and the forms' checksum.
+#[test]
+fn filling_on_the_lab_session_adds_only_the_newest_hidden_titles() {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        score: f64,
+        date: String,
+        costs: [u64; 5],
+    }
+    #[derive(serde::Deserialize)]
+    struct Fixture {
+        rows: Vec<Row>,
+    }
+    let fixture: Fixture =
+        serde_json::from_str(include_str!("../../testdata/history-line-shape.json")).unwrap();
+    let summaries: Vec<Summary> = fixture
+        .rows
+        .iter()
+        .map(|row| Summary {
+            score: row.score,
+            scored: true,
+            day: Some(&row.date),
+        })
+        .collect();
+    let mut table = Table {
+        forms: fixture.rows.iter().map(|row| row.costs).collect(),
+        lines: vec![0; fixture.rows.len()],
+        header: 0,
+    };
+    let mut found = Vec::new();
+    for reference_scale in [false, true] {
+        for budget in [5_000.0, 15_000.0, 30_000.0, 60_000.0, 98_000.0, 150_000.0] {
+            let options = Options {
+                reference_scale,
+                day_headers: false,
+                ..Options::default()
+            };
+            let without = plan(
+                &summaries,
+                budget,
+                &mut table,
+                Options {
+                    fill: false,
+                    ..options
+                },
+            );
+            let with = plan(&summaries, budget, &mut table, options);
+            let at = format!("reference {reference_scale} at {budget}");
+            assert_eq!(with.stretch, without.stretch, "{at}");
+            let added: Vec<usize> = (0..summaries.len())
+                .filter(|&i| with.forms[i] != without.forms[i])
+                .collect();
+            for &i in &added {
+                assert_eq!(
+                    (without.forms[i], with.forms[i]),
+                    (NOT_SHOWN, TITLE),
+                    "{at}"
+                );
+            }
+            // The newest hidden summaries, with none skipped between them.
+            let hidden_newest_first: Vec<usize> = (0..summaries.len())
+                .rev()
+                .filter(|&i| without.forms[i] == NOT_SHOWN)
+                .take(added.len())
+                .collect();
+            assert_eq!(
+                added.iter().rev().copied().collect::<Vec<_>>(),
+                hidden_newest_first,
+                "{at}"
+            );
+            assert!(with.total as f64 <= budget);
+            found.push((
+                reference_scale,
+                budget,
+                added.len(),
+                with.total,
+                fnv1a32(&with.forms),
+            ));
+        }
+    }
+    // (reference scale, budget, titles added, total, forms' checksum).
+    let pinned: Vec<(bool, f64, usize, u64, u32)> = vec![
+        (false, 5_000.0, 0, 4_991, 1_052_589_277),
+        (false, 15_000.0, 1, 14_986, 1_473_885_001),
+        (false, 30_000.0, 2, 29_965, 975_964_847),
+        (false, 60_000.0, 0, 59_989, 1_477_899_541),
+        (false, 98_000.0, 10, 97_992, 2_617_244_088),
+        (false, 150_000.0, 1, 149_979, 27_596_514),
+        (true, 5_000.0, 0, 4_991, 1_052_589_277),
+        (true, 15_000.0, 0, 14_976, 1_108_801_024),
+        (true, 30_000.0, 1, 29_985, 2_648_418_696),
+        (true, 60_000.0, 0, 59_993, 208_577_252),
+        (true, 98_000.0, 12, 97_970, 351_146_901),
+        (true, 150_000.0, 1, 149_988, 2_952_854_611),
+    ];
+    assert_eq!(found, pinned);
+}
+
+/// On generated sessions, filling adds titles only for hidden summaries,
+/// the newest first with none skipped, keeps every other form, stays within
+/// the budget, and stops only where the next title does not fit.
+#[test]
+fn filling_spends_what_is_left_on_the_newest_hidden_titles() {
+    let mut random = Random::new(2_611);
+    let mut filled = 0;
+    for &count in &[1, 2, 7, 50, 300, 1_200] {
+        let (session, mut table) = Generated::new(&mut random, count);
+        let summaries = session.summaries();
+        for budget in [1.0, 25.0, 200.0, 2_000.0, 15_000.0, 60_000.0] {
+            let at = format!("{count} at {budget}");
+            let without = plan(&summaries, budget, &mut table, no_fill());
+            let with = plan(&summaries, budget, &mut table, Options::default());
+            assert!(with.total as f64 <= budget, "{at}");
+            let hidden: Vec<usize> = (0..count)
+                .rev()
+                .filter(|&i| without.forms[i] == NOT_SHOWN)
+                .collect();
+            let added = hidden
+                .iter()
+                .take_while(|&&i| with.forms[i] == TITLE)
+                .count();
+            filled += added;
+            for i in 0..count {
+                if !hidden[..added].contains(&i) {
+                    assert_eq!(with.forms[i], without.forms[i], "{at}: summary {i}");
+                }
+            }
+            if let Some(&next) = hidden.get(added) {
+                let mut more = with.forms.clone();
+                more[next] = TITLE;
+                let (_, total) = cost_of(&summaries, &more, &mut table, Options::default());
+                assert!(total as f64 > budget, "{at}: summary {next} would fit");
+            }
+        }
+    }
+    assert!(filled > 0);
 }

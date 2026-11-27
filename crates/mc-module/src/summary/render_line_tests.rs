@@ -859,3 +859,34 @@ fn the_first_plan_charges_the_joints_between_pieces() {
         assert!(rendered.body_tokens[0] <= plan.total);
     }
 }
+
+/// A summary the line hides, whose title fits the budget left, is shown as
+/// its title: an empty block would drop history that fits.
+#[test]
+fn a_fitting_title_is_not_lost() {
+    let counter = claude();
+    let count = |text: &str| counter.count(text) as usize;
+    let row = DecayRenderCompartment {
+        start_message: 5,
+        end_message: 21,
+        title: "Keep this heading".into(),
+        start_date: Some("2026-03-01".into()),
+        end_date: Some("2026-03-01".into()),
+        p1: Some(" explanation that takes space".repeat(200)),
+        p2: Some("lighter".into()),
+        p3: Some("condensed".into()),
+        p4: Some("cue".into()),
+        importance: Some(5),
+        legacy: Some(0),
+        ..Default::default()
+    };
+    let title = render_compartment_at_tier(&row, TITLE);
+    let budget = 64;
+    assert!(count(&title) <= budget && count(&render_compartment_at_tier(&row, 1)) > budget);
+    let rendered = render_history(std::slice::from_ref(&row), budget as f64, count);
+    assert_eq!(rendered.text, title);
+    assert_eq!(rendered.items, vec![(0, TITLE, count(&title) as u64)]);
+    // Below one title, the body is still empty.
+    let rendered = render_history(std::slice::from_ref(&row), 5.0, count);
+    assert!(rendered.text.is_empty());
+}

@@ -133,6 +133,10 @@ pub(crate) struct Options {
     /// Stop adding up pieces, newest first, once the sum is over the budget
     /// ([`cost_within`]). Off, every piece is counted.
     pub stop_early: bool,
+    /// Spend what the chosen forms leave of the budget on titles of hidden
+    /// summaries ([`fill_titles`]). Off, the plan is the reference
+    /// calculation's, which has no such step.
+    pub fill: bool,
 }
 
 impl Default for Options {
@@ -141,6 +145,7 @@ impl Default for Options {
             reference_scale: true,
             day_headers: true,
             stop_early: true,
+            fill: true,
         }
     }
 }
@@ -301,6 +306,10 @@ pub(crate) fn plan(
         let (forms, groups, total) = step_down(summaries, chosen.1, budget, costs, options);
         chosen = (chosen.0, forms, total, groups);
     }
+    if options.fill {
+        let (forms, groups, total) = fill_titles(summaries, chosen.1, budget, costs, options);
+        chosen = (chosen.0, forms, total, groups);
+    }
     let (stretch, forms, total, groups) = chosen;
     let joints = joints_cost(&forms, &groups, costs);
     Plan {
@@ -321,6 +330,35 @@ pub(crate) fn plan(
 pub(crate) struct Scores<'s> {
     pub line: &'s [f64],
     pub floor: &'s [f64],
+}
+
+/// Spend what is left of the budget on the summaries the plan hides: newest
+/// first, each as its title alone, until the next one does not fit. A title
+/// that fits is history the block would otherwise drop, while the messages
+/// it covers are already out of the request. The titles join day headings
+/// like any other.
+fn fill_titles(
+    summaries: &[Summary],
+    mut forms: Vec<u8>,
+    budget: f64,
+    costs: &mut impl Costs,
+    options: Options,
+) -> (Vec<u8>, Vec<Vec<usize>>, u64) {
+    let limit = options.limit(budget);
+    let (mut groups, mut total) = cost_within(summaries, &forms, costs, options, limit);
+    for index in (0..forms.len()).rev() {
+        if forms[index] != NOT_SHOWN {
+            continue;
+        }
+        forms[index] = TITLE;
+        let (with_title, with_total) = cost_within(summaries, &forms, costs, options, limit);
+        if with_total as f64 > budget {
+            forms[index] = NOT_SHOWN;
+            break;
+        }
+        (groups, total) = (with_title, with_total);
+    }
+    (forms, groups, total)
 }
 
 /// The stretch factor the search settles on (`None` when everything fits in
