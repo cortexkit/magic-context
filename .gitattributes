@@ -2,6 +2,7 @@
 # platforms so byte-compare drift checks (and any byte-level fixture assertions)
 # behave identically on Windows. Mirrors the producer-side .gitattributes that
 # pins ck_wire_golden.json to LF.
+crates/mc-module/testdata/** text=auto eol=lf
 crates/mc-module/testdata/*.json text eol=lf
 crates/mc-module/testdata/codec/*.json text eol=lf
 crates/mc-module/testdata/codec/*.ts text eol=lf
@@ -13,3 +14,6 @@ crates/mc-module/testdata/role-lease-v1.2/*.json text eol=lf
 crates/mc-module/testdata/fleet-epoch-magic-context-v1.1/* text eol=lf
 crates/mc-module/testdata/entorhinal-fleet-epoch-current-v1/* text eol=lf
 crates/mc-module/testdata/config-settings-v1/* text eol=lf
+
+# The tool catalog embeds these bytes and hashes them into its text revision.
+crates/mc-module/assets/catalog_tools_only*.txt text eol=lf
