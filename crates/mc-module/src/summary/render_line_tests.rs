@@ -890,3 +890,92 @@ fn a_fitting_title_is_not_lost() {
     let rendered = render_history(std::slice::from_ref(&row), 5.0, count);
     assert!(rendered.text.is_empty());
 }
+
+/// A word stream for generated rows in mixed scripts and code-like strings.
+fn mixed_words(mut state: u64, n: usize) -> String {
+    const WORDS: &[&str] = &[
+        "closure",
+        "箱",
+        "καλημέρα",
+        "09|>",
+        "🎛️",
+        "_api_key",
+        "café",
+        "a_______b",
+        "\nfoo<bar>",
+        "непрерывность",
+        "",
+    ];
+    (0..n)
+        .map(|_| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            WORDS[((state >> 32) as usize) % WORDS.len()]
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Rows in mixed scripts with uneven form lengths, some undated.
+fn mixed_rows(n: usize, seed: u64) -> Vec<DecayRenderCompartment> {
+    (0..n)
+        .map(|i| {
+            let j = (i as u64).wrapping_mul(521).wrapping_add(seed);
+            let date = (i % 37 != 0).then(|| format!("2026-03-{:02}", i / 23 % 28 + 1));
+            DecayRenderCompartment {
+                start_message: i as i64 * 21 + 5,
+                end_message: i as i64 * 21 + 21,
+                title: format!("set {seed}/{i}: {}", mixed_words(j, 3 + i % 13)),
+                content: String::new(),
+                start_date: date.clone(),
+                end_date: date,
+                p1: Some(mixed_words(j + 1, 100 + i * 127 % 310)),
+                p2: Some(mixed_words(j + 2, 30 + i * 47 % 100)),
+                p3: Some(mixed_words(j + 3, 4 + i * 83 % 60)),
+                p4: Some(mixed_words(j + 4, i * 79 % 21)),
+                importance: Some(if i % 11 == 0 {
+                    99
+                } else {
+                    ((j ^ (j >> 5)) % 101) as i32
+                }),
+                legacy: Some(0),
+            }
+        })
+        .collect()
+}
+
+/// The search halves the range of stretches; it does not look for the
+/// widest stretch that fits. Stored forms need not grow in length from
+/// condensed to full, so the total can fall again at a wider stretch: here
+/// the older summary's one-line form is longer than its condensed form, and
+/// a wider stretch than the one found (0.0041, the condensed form) also fits
+/// the budget. Pinned as it is: what is guaranteed is the body's bound.
+#[test]
+fn the_search_keeps_its_stretch_though_a_wider_one_also_fits_with_uneven_forms() {
+    use super::line::{form_under_line, line_height};
+    let mut rows = mixed_rows(2, 19);
+    rows[0].importance = Some(89);
+    rows[0].title = "Older item".into();
+    rows[0].p1 = Some(" earlier work with many details".repeat(250));
+    rows[0].p2 = Some(" longer supposedly lighter clause".repeat(85));
+    rows[0].p3 = Some("Fits in brief.".into());
+    rows[0].p4 = Some(" a long unbounded one-line form".repeat(40));
+    rows[1].importance = Some(95);
+    rows[1].title = "New item".into();
+    rows[1].p1 = Some("Recent work.".into());
+    let counter = claude();
+    let count = |text: &str| counter.count(text) as usize;
+    let rendered = render_history(&rows, 64.0, count);
+    assert_eq!(rendered.plan.stretch, Some(0.002750408256973515));
+    assert_eq!(rendered.plan.forms, vec![TITLE, 1]);
+    assert_eq!(count(&rendered.text), 35);
+    // The wider stretch that also fits.
+    let wider = 0.0041;
+    let form = form_under_line(89.0, line_height(1.0, wider));
+    assert_eq!(form, 3);
+    let body = format!(
+        "{}\n\n{}",
+        render_compartment_at_tier(&rows[0], form),
+        render_compartment_at_tier(&rows[1], 1)
+    );
+    assert!(count(&body) <= 64, "{}", count(&body));
+}

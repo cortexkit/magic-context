@@ -9,15 +9,19 @@
 //!
 //! The line has a fixed shape. To fit a budget, its ages are stretched by one
 //! factor: a larger factor lowers the line everywhere, so every summary keeps
-//! its form or gets a longer one, and the total nearly always grows with it
-//! (the floor's titles for old high scores can make it fall a little). The
-//! fold halves the range of factors and keeps the largest one it saw fit,
-//! counting every piece it looks at with the session's own counter. Old short
-//! forms are therefore never removed to keep a newer long one, as a guard
-//! that cuts from the oldest end would. Only when even the smallest factor
-//! is over the budget (the newest summary alone can be larger than a small
-//! budget) do the shown summaries step down from the oldest end, so the
-//! block always fits or is empty.
+//! its form or gets a longer one, and the total usually grows with it. It
+//! need not: the floor's titles for old high scores can make it fall a
+//! little, and a stored form is not always longer than the next shorter one.
+//! The fold halves the range of factors a fixed number of times and keeps
+//! the factor it ends on that fits, which is not always the widest that
+//! fits; the bound on the body is what it guarantees. It counts every piece
+//! it looks at with the session's own counter. Old short forms are therefore
+//! never removed to keep a newer long one, as a guard that cuts from the
+//! oldest end would. Only when even the smallest factor is over the budget
+//! (the newest summary alone can be larger than a small budget) do the
+//! shown summaries step down from the oldest end, so the block always fits
+//! or is empty. What the forms leave of the budget then goes to the titles
+//! of the newest hidden summaries.
 //!
 //! When every summary fits in full there is nothing to trade, and every
 //! summary is shown in full. Old summaries the line hides whose reference
@@ -279,13 +283,14 @@ fn ranked_scores(summaries: &[Summary], reference_scale: bool, top: bool) -> Vec
 
 /// Choose every summary's form for `budget` tokens.
 ///
-/// The search takes the largest stretch factor whose total fits, by halving
-/// the range [`STRETCH_MIN`, `STRETCH_MAX`] [`STRETCH_STEPS`] times, on the
-/// real token count of every piece it looks at. A fold's costs remember
-/// those counts for the session ([`PieceCounts`]), so a fold counts only the
-/// pieces no earlier fold counted. When even the smallest stretch is over
-/// the budget, the shown summaries step down from the oldest end
-/// ([`step_down`]), so the total always fits.
+/// The search takes [`STRETCH_MAX`] if its total fits, and otherwise halves
+/// the range [`STRETCH_MIN`, `STRETCH_MAX`] [`STRETCH_STEPS`] times, keeping
+/// the lower end, on the real token count of every piece it looks at. A
+/// fold's costs remember those counts for the session ([`PieceCounts`]), so
+/// a fold counts only the pieces no earlier fold counted. When even the
+/// smallest stretch is over the budget, the shown summaries step down from
+/// the oldest end ([`step_down`]), so the total always fits. What is left of
+/// the budget goes to titles of hidden summaries ([`fill_titles`]).
 pub(crate) fn plan(
     summaries: &[Summary],
     budget: f64,
