@@ -1193,6 +1193,36 @@
             ]
         },
         {
+            "path": "tests/opencode2/stale-native-floor.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Fix in progress: real manual checkpoints after a partial rebuild or a committed revert can hide stored history or refuse a turn.",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/stale-imported-floor.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Fix in progress: converted checkpoints can hide unreached history after a partial rebuild or serve stale summaries after a committed revert.",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/image-attachment.test.ts",
             "tier": "ts-only",
             "invocation": {

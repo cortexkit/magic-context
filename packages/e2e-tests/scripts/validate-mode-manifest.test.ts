@@ -145,6 +145,8 @@ describe("mode manifest validator", () => {
             "tests/opencode2/rust-mode-boundary-restart-gate.test.ts",
             "tests/opencode2/session-api-cutover.test.ts",
             "tests/opencode2/sidebar-component.test.ts",
+            "tests/opencode2/stale-imported-floor.test.ts",
+            "tests/opencode2/stale-native-floor.test.ts",
             "tests/opencode2/status-dialog.test.ts",
             "tests/opencode2/storage-refusal-reason.test.ts",
             "tests/opencode2/store-generation-conversion.test.ts",
