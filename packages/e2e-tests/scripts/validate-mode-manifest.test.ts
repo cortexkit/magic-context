@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { CiSources } from "./ci-mode-coverage";
 import {
+    describeKnownProductGaps,
     filesForMode,
     validateManifestDocument,
     validateModeManifest,
@@ -19,7 +20,7 @@ function manifestWith(entries: ModeManifest["entries"]): ModeManifest {
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(261);
+        expect(validation.files.length).toBe(259);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -30,7 +31,7 @@ describe("mode manifest validator", () => {
     it("derives separate TS and Rust invocation lists", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
-        expect(ts).toHaveLength(145);
+        expect(ts).toHaveLength(142);
         expect(rust).toHaveLength(60);
         expect(rust).toContain("tests/rust-compaction-marker-catchup.test.ts");
         expect(rust).toContain("tests/rust-tool-attachments.test.ts");
@@ -38,11 +39,7 @@ describe("mode manifest validator", () => {
         expect(rust).toContain("tests/idle-ttl-restart.test.ts");
         expect(rust).toContain("tests/subagent-behavior.test.ts");
         expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(9);
-        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(51);
-        for (const host of ["opencode", "pi"] as const) {
-            expect(filesForMode(validation, "ts", host)).toContain("tests/recomp-paused.test.ts");
-        }
-        expect(rust).not.toContain("tests/recomp-paused.test.ts");
+        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(50);
         expect(filesForMode(validation, "ts", "opencode")).toContain("tests/wrapup-next-message.test.ts");
         expect(rust).not.toContain("tests/wrapup-next-message.test.ts");
         expect(filesForMode(validation, "ts", "opencode")).toContain("tests/processed-images.test.ts");
@@ -56,12 +53,11 @@ describe("mode manifest validator", () => {
         expect(rust).not.toContain("tests/opencode2/latest-turn-thinking-recovery.test.ts");
         expect(ts).toContain("tests/reasoning-token-budget.test.ts");
         expect(rust).not.toContain("tests/reasoning-token-budget.test.ts");
-        expect(filesForMode(validation, "ts", "pi")).toHaveLength(37);
-        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(103);
+        expect(filesForMode(validation, "ts", "pi")).toHaveLength(36);
+        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(101);
         // These OpenCode 2 files are ts-only with hosts ["opencode2"], so only the
         // OpenCode 2 host lane runs them; the other host lanes never select them.
         for (const path of [
-            "tests/opencode2/recomp-paused.test.ts",
             "tests/opencode2/storage-notice-boundaries.test.ts",
             "tests/opencode2/issue-889-model-switch.test.ts",
             "tests/opencode2/overflow-terminal-errors.test.ts",
@@ -120,6 +116,7 @@ describe("mode manifest validator", () => {
             "tests/opencode2/commands-s2-tui-feedback.test.ts",
             "tests/opencode2/context-s2-lanes.test.ts",
             "tests/opencode2/converted-store-overwindow.test.ts",
+            "tests/opencode2/fork-inheritance.test.ts",
             "tests/opencode2/hidden-run-notifications.test.ts",
             "tests/opencode2/mapper-step-finalize.test.ts",
             "tests/opencode2/marker-s3-runtime.test.ts",
@@ -307,6 +304,27 @@ describe("CI reachability guard", () => {
         expect(checkEntry(pending("2026-10-28")).manifest.entries).toHaveLength(1);
         expect(() => checkEntry(pending("2026-10-27"))).toThrow(/older than 30 days/);
         expect(() => checkEntry(pending("2026-11-28"))).toThrow(/since date is in the future/);
+    });
+
+    it("requires a real date, positive issue number and rationale for a known product gap", () => {
+        const gap = { ...manual, exclusion: { reason: "known-product-gap" as const, since: "2024-01-01", issue: 860 } };
+        const parse = (entry: unknown) => validateManifestDocument(
+            { ...manifestWith([]), entries: [entry] }, [gap.path], { now, ci: fixtureCi() },
+        );
+        for (const since of [undefined, "2024-02-30", "2026-11-28"]) {
+            expect(() => parse({ ...gap, exclusion: { ...gap.exclusion, since } })).toThrow(/date/);
+        }
+        for (const issue of [undefined, "860", 0, -860, 8.6]) {
+            expect(() => parse({ ...gap, exclusion: { ...gap.exclusion, issue } })).toThrow(/requires a positive issue number/);
+        }
+        expect(() => checkEntry({ ...gap, rationale: " " })).toThrow(/must have a rationale/);
+    });
+
+    it("reports each known product gap and its age without expiring it", () => {
+        const gap = { ...manual, rationale: "Admission leaves out framing", exclusion: { reason: "known-product-gap" as const, since: "2025-11-27", issue: 860 } };
+        expect(describeKnownProductGaps(checkEntry(gap), now)).toEqual([
+            `known-product-gap: ${gap.path} — issue 860, 365d (since 2025-11-27): Admission leaves out framing`,
+        ]);
     });
 
     it("accepts direct CI coverage independently of the tier", () => {

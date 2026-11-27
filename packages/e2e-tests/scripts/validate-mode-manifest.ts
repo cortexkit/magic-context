@@ -16,10 +16,13 @@ const TEST_GLOB = "{tests,scripts,src}/**/*.test.ts";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const EXCLUSION_REASONS = [
     "manual-paid-provider", "manual-native-lane", "manual-tui", "manual-pinned-host",
-    "manual-long-running", "manual-opt-in-probe", "triage-pending",
+    "manual-long-running", "manual-opt-in-probe", "triage-pending", "known-product-gap",
 ] as const;
 
-type Exclusion = { reason: (typeof EXCLUSION_REASONS)[number]; since?: string };
+type ExclusionReason = (typeof EXCLUSION_REASONS)[number];
+type Exclusion =
+    | { reason: "known-product-gap"; since: string; issue: number }
+    | { reason: Exclude<ExclusionReason, "known-product-gap">; since?: string };
 
 export const TIERS = ["both-modes", "ts-only", "rust-only", "excluded"] as const;
 export const HOSTS = ["opencode", "opencode2", "pi", "omp"] as const;
@@ -76,24 +79,36 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function exclusionAgeDays(time: number, now: number): number {
+    return Math.floor(now / DAY_MS) - Math.floor(time / DAY_MS);
+}
+
 function validateExclusion(value: unknown, path: string, now: number): Exclusion {
-    if (!isRecord(value) || Object.keys(value).some((key) => key !== "reason" && key !== "since") ||
-        !EXCLUSION_REASONS.includes(value.reason as Exclusion["reason"])) {
+    if (!isRecord(value) || Object.keys(value).some((key) => key !== "reason" && key !== "since" &&
+        (key !== "issue" || value.reason !== "known-product-gap")) ||
+        !EXCLUSION_REASONS.includes(value.reason as ExclusionReason)) {
         throw new Error(`${path}: invalid exclusion; expected a reason from ${EXCLUSION_REASONS.join(", ")}`);
     }
-    const reason = value.reason as Exclusion["reason"];
+    const reason = value.reason as ExclusionReason;
     const since = value.since;
-    if (since === undefined && reason !== "triage-pending") return { reason };
-    const time = typeof since === "string" && /^\d{4}-\d{2}-\d{2}$/.test(since) ? Date.parse(since) : NaN;
-    if (!Number.isFinite(time) || new Date(time).toISOString().slice(0, 10) !== since) {
+    if (since === undefined && reason !== "triage-pending" && reason !== "known-product-gap") return { reason };
+    if (typeof since !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(since) ||
+        !Number.isFinite(Date.parse(since)) || new Date(since).toISOString().slice(0, 10) !== since) {
         throw new Error(`${path}: ${reason} exclusion requires a valid UTC date (YYYY-MM-DD) in since`);
     }
-    const days = Math.floor(now / DAY_MS) - Math.floor(time / DAY_MS);
+    const days = exclusionAgeDays(Date.parse(since), now);
     if (days < 0) throw new Error(`${path}: exclusion since date is in the future`);
     if (reason === "triage-pending" && days > 30) {
         throw new Error(`${path}: triage-pending exclusion is older than 30 days (since ${since})`);
     }
-    return { reason, since: since as string };
+    if (reason === "known-product-gap") {
+        const issue = value.issue;
+        if (typeof issue !== "number" || !Number.isSafeInteger(issue) || issue < 1) {
+            throw new Error(`${path}: known-product-gap exclusion requires a positive issue number`);
+        }
+        return { reason, since, issue };
+    }
+    return { reason, since };
 }
 
 function validateEntry(value: unknown, index: number, now: number): ModeManifestEntry {
@@ -291,8 +306,20 @@ export function validateManifestDocument(
     return validation;
 }
 
+export function describeKnownProductGaps(validation: ValidationResult, now: number): string[] {
+    return validation.manifest.entries.flatMap(({ path, exclusion, rationale }) => {
+        if (exclusion?.reason !== "known-product-gap") return [];
+        const days = exclusionAgeDays(Date.parse(exclusion.since), now);
+        return [`known-product-gap: ${path} — issue ${exclusion.issue}, ${days}d (since ${exclusion.since}): ${rationale}`];
+    });
+}
+
 export function validateModeManifest(): ValidationResult {
-    return validateManifestDocument(readManifest());
+    const now = Date.now();
+    const validation = validateManifestDocument(readManifest(), undefined, { now });
+    // Mode selectors use stdout as a list of test files.
+    for (const notice of describeKnownProductGaps(validation, now)) console.error(notice);
+    return validation;
 }
 
 function parseArgs(args: string[]): { mode?: Mode; harness: HarnessSelection } {
