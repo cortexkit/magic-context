@@ -171,29 +171,35 @@ function writeProbeExtension(dir: string, events: string): string {
 		`
 import { appendFileSync } from "node:fs";
 export default function (pi) {
-	const record = (event, ctx) => {
+	const record = (event, ctx, prompt) => {
 		let agent = null;
 		try { agent = ctx.agent ?? null; } catch {}
 		appendFileSync(${JSON.stringify(events)}, JSON.stringify({
 			event,
+			at: Date.now(),
+			prompt,
 			sessionId: ctx.sessionManager.getSessionId(),
 			agent,
 			active: pi.getActiveTools(),
 		}) + "\\n");
 	};
 	pi.on("session_start", (_event, ctx) => record("session_start", ctx));
-	pi.on("before_agent_start", (_event, ctx) => record("before_agent_start", ctx));
+	pi.on("before_agent_start", (event, ctx) => record("before_agent_start", ctx, event.prompt?.slice(0, 80)));
 	pi.registerCommand("e2e904-off", {
 		description: "Remove ctx_reduce from the active tools",
-		async handler() {
+		async handler(_args, ctx) {
+			record("off-start", ctx);
 			await pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "ctx_reduce"));
+			record("off-complete", ctx);
 		},
 	});
 	pi.registerCommand("e2e904-on", {
 		description: "Restore ctx_reduce to the active tools",
-		async handler() {
+		async handler(_args, ctx) {
+			record("on-start", ctx);
 			const active = pi.getActiveTools();
 			if (!active.includes("ctx_reduce")) await pi.setActiveTools([...active, "ctx_reduce"]);
+			record("on-complete", ctx);
 		},
 	});
 }
@@ -204,6 +210,8 @@ export default function (pi) {
 
 interface ProbeEvent {
 	event: string;
+	at: number;
+	prompt?: string;
 	sessionId: string;
 	agent: { kind?: string; name?: string; depth?: number } | null;
 	active: string[];
@@ -216,6 +224,19 @@ function readEvents(path: string): ProbeEvent[] {
 		.split("\n")
 		.filter(Boolean)
 		.map((line) => JSON.parse(line) as ProbeEvent);
+}
+
+async function setReduceCallable({ h, events }: Run, callable: boolean): Promise<void> {
+	const change = callable ? "on" : "off";
+	const before = readEvents(events).length;
+	await h.invokeExtensionCommand(`e2e904-${change}`);
+	// Oh My Pi can acknowledge a slash command while its handler is still
+	// running. An idle agent does not mean the tool change has completed.
+	const completed = await h.waitFor(
+		() => readEvents(events).slice(before).find((event) => event.event === `${change}-complete`),
+		{ label: `ctx_reduce ${change} completed by host` },
+	);
+	expect(completed.active.includes("ctx_reduce")).toBe(callable);
 }
 
 interface Run {
@@ -376,6 +397,23 @@ function scenarioRequests(h: PiTestHarness, marker: string): Body[] {
 		.filter((body) => isScenarioRequest(body, marker));
 }
 
+function reportFlipRequests({ h, events }: Run, marker: string, phase: string): void {
+	console.log(
+		"ISSUE904_FLIP_TOOL_MISMATCH",
+		JSON.stringify({
+			phase,
+			events: readEvents(events),
+			requests: h.mock.requests().map(({ body, receivedAt }, index) => ({
+				index,
+				receivedAt,
+				prompt: promptText(body).slice(0, 80),
+				scenario: isScenarioRequest(body, marker),
+				sendsReduce: sendsCtxReduce(body),
+			})),
+		}),
+	);
+}
+
 /**
  * The pressure script: the large reads, then one small read at 70% and one
  * at 90% of the window. The small reads' results are where the in-turn
@@ -462,7 +500,7 @@ forEachHost(import.meta.url, null, (host) => {
 			scriptPressure(h, "ABSENT904", bigFilesFor(host));
 			scriptPressure(h, "CONTROL904", bigFilesFor(host));
 
-			await h.invokeExtensionCommand("e2e904-off");
+			await setReduceCallable(run, false);
 			const absent = await runPressure(run, "ABSENT904", bigFilesFor(host));
 			run.assertIsolation("absent");
 			const absentRequests = scenarioRequests(h, "ABSENT904");
@@ -478,7 +516,7 @@ forEachHost(import.meta.url, null, (host) => {
 			expect(run.countDropped(absent)).toBeGreaterThan(0);
 
 			// Control: the same script with the tool, in a new session.
-			await h.invokeExtensionCommand("e2e904-on");
+			await setReduceCallable(run, true);
 			await h.newSession();
 			const control = await runPressure(run, "CONTROL904", bigFilesFor(host));
 			const controlRequests = scenarioRequests(h, "CONTROL904");
@@ -553,14 +591,17 @@ forEachHost(import.meta.url, null, (host) => {
 			await h.sendPrompt(sessionId, `${marker} step one`);
 			await h.sendPrompt(sessionId, `${marker} step two`);
 			const callable = served();
+			run.assertIsolation("flip");
 			if (target === undefined) throw new Error("no drop was queued");
 			expect(callable.every(sendsCtxReduce)).toBe(true);
 			expect(bodyText(callable.at(-1)?.messages)).toContain("big-1 0:");
 
-			await h.invokeExtensionCommand("e2e904-off");
+			await setReduceCallable(run, false);
 			await h.sendPrompt(sessionId, `${marker} step three`);
 			await h.sendPrompt(sessionId, `${marker} step four`);
 			const removed = served().slice(callable.length);
+			if (removed.length !== 2 || removed.some(sendsCtxReduce))
+				reportFlipRequests(run, marker, "removed");
 			expect(removed).toHaveLength(2);
 			for (const body of removed) {
 				expect(sendsCtxReduce(body)).toBe(false);
@@ -571,13 +612,14 @@ forEachHost(import.meta.url, null, (host) => {
 			}
 			expect(run.tagStatus(sessionId, target)).toBe("dropped");
 
-			await h.invokeExtensionCommand("e2e904-on");
+			await setReduceCallable(run, true);
 			await h.sendPrompt(sessionId, `${marker} step five`);
 			await h.sendPrompt(sessionId, `${marker} step six`);
 			const restored = served().slice(callable.length + removed.length);
+			if (restored.length !== 2 || !restored.every(sendsCtxReduce))
+				reportFlipRequests(run, marker, "restored");
 			expect(restored).toHaveLength(2);
 			for (const body of restored) expect(sendsCtxReduce(body)).toBe(true);
-			run.assertIsolation("flip");
 
 			// One rebuild at each change and none between: within each stretch
 			// every request only appends to the one before it, and the first
