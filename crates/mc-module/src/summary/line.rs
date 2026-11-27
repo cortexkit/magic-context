@@ -51,7 +51,7 @@ const PARTS: [(f64, f64, f64); 3] = [(234.2, 32.0, 2.0), (1059.6, 70.0, 0.6), (1
 const FORM_SHARES: [f64; 4] = [90.0, 80.0, 60.0, 50.0];
 
 /// The range the stretch factor is searched in, and the number of halvings.
-const STRETCH_MIN: f64 = 0.0005;
+pub(crate) const STRETCH_MIN: f64 = 0.0005;
 const STRETCH_MAX: f64 = 12.0;
 const STRETCH_STEPS: usize = 40;
 
@@ -269,6 +269,12 @@ pub(crate) fn plan(
     if estimates && chosen.2 as f64 > budget {
         chosen = search(summaries, &scores, budget, costs, options, false);
     }
+    // On real counts the search ends over the budget only when nothing fits
+    // at any stretch, so at the smallest.
+    if chosen.2 as f64 > budget {
+        let (forms, groups, total) = step_down(summaries, chosen.1, budget, costs, options);
+        chosen = (chosen.0, forms, total, groups);
+    }
     let (stretch, forms, total, groups) = chosen;
     let joints = joints_cost(&forms, &groups, costs);
     Plan {
@@ -343,6 +349,33 @@ fn search(
     (Some(stretch), forms, total, groups)
 }
 
+/// When even the smallest stretch is over the budget (the newest summary
+/// alone can be larger than a small budget, since the line starts at the
+/// same height at every stretch), the shown summaries give up detail from
+/// the oldest end: each one form at a time until it is hidden, before the
+/// next newer one is touched, until the total fits. The floor's titles are
+/// among the oldest shown, so they go first. With every summary hidden the
+/// total is zero, so the result always fits.
+fn step_down(
+    summaries: &[Summary],
+    mut forms: Vec<u8>,
+    budget: f64,
+    costs: &mut impl Costs,
+    options: Options,
+) -> (Vec<u8>, Vec<Vec<usize>>, u64) {
+    for index in 0..forms.len() {
+        while forms[index] < NOT_SHOWN {
+            forms[index] += 1;
+            let (groups, total) = cost_of(summaries, &forms, costs, options);
+            if total as f64 <= budget {
+                return (forms, groups, total);
+            }
+        }
+    }
+    let (groups, total) = cost_of(summaries, &forms, costs, options);
+    (forms, groups, total)
+}
+
 /// The forms, day groups and total cost at one stretch factor.
 fn forms_at(
     summaries: &[Summary],
@@ -352,7 +385,20 @@ fn forms_at(
     costs: &mut impl Costs,
     options: Options,
 ) -> (Vec<u8>, Vec<Vec<usize>>, u64) {
-    let count = summaries.len();
+    let forms = forms_on_line(scores, stretch, budget, costs);
+    let (groups, total) = cost_of(summaries, &forms, costs, options);
+    (forms, groups, total)
+}
+
+/// The form the line gives each summary at `stretch`, with the floor's
+/// titles for `budget`.
+pub(crate) fn forms_on_line(
+    scores: &[f64],
+    stretch: f64,
+    budget: f64,
+    costs: &mut impl Costs,
+) -> Vec<u8> {
+    let count = scores.len();
     let mut forms: Vec<u8> = (0..count)
         .map(|index| {
             let age = (count - 1 - index) as f64;
@@ -379,9 +425,19 @@ fn forms_at(
         room -= cost;
         forms[index] = TITLE;
     }
+    forms
+}
 
+/// The day groups of `forms` and what the shown pieces cost together.
+pub(crate) fn cost_of(
+    summaries: &[Summary],
+    forms: &[u8],
+    costs: &mut impl Costs,
+    options: Options,
+) -> (Vec<Vec<usize>>, u64) {
+    let count = forms.len();
     let groups = if options.day_headers {
-        day_groups(summaries, &forms)
+        day_groups(summaries, forms)
     } else {
         Vec::new()
     };
@@ -399,8 +455,8 @@ fn forms_at(
             total += costs.piece(index, form);
         }
     }
-    total += joints_cost(&forms, &groups, costs);
-    (forms, groups, total)
+    total += joints_cost(forms, &groups, costs);
+    (groups, total)
 }
 
 /// Runs of at least two titles that follow each other in the block (hidden

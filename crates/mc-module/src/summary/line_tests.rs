@@ -271,6 +271,49 @@ fn generated_sessions_keep_the_lines_promises_at_every_budget() {
     }
 }
 
+/// Budgets from one token up, including budgets smaller than the newest
+/// summary alone: the forms fit, or nothing is shown. When the line at its
+/// smallest stretch is still over, the summaries it shows are stepped down
+/// oldest first, each one form at a time until it is hidden before the next
+/// newer one is touched, and the stepping stops as soon as the total fits.
+#[test]
+fn the_plan_fits_its_budget_or_is_empty_at_any_budget() {
+    let mut random = Random::new(1128);
+    let mut stepped = 0;
+    for &count in &[1, 2, 7, 50, 51, 300, 1_200] {
+        for round in 0..2 {
+            let (session, mut table) = Generated::new(&mut random, count);
+            let summaries = session.summaries();
+            for budget in [
+                1.0, 5.0, 20.0, 50.0, 120.0, 200.0, 700.0, 1_500.0, 3_000.0, 10_000.0,
+            ] {
+                let at = format!("{count} summaries (round {round}) at {budget}");
+                let plan = plan(&summaries, budget, &mut table, Options::default());
+                assert!(plan.total as f64 <= budget, "{at}: {} tokens", plan.total);
+                if plan.stretch != Some(STRETCH_MIN) {
+                    continue;
+                }
+                let on_line = forms_on_line(&plan.scores, STRETCH_MIN, budget, &mut table);
+                let Some(last) = (0..count).rev().find(|&i| plan.forms[i] != on_line[i]) else {
+                    continue;
+                };
+                stepped += 1;
+                // Everything older than the last summary stepped down is hidden,
+                // everything newer keeps the line's form, and that summary is
+                // one form short of not fitting.
+                assert!(plan.forms[..last].iter().all(|&form| form == NOT_SHOWN), "{at}");
+                assert_eq!(plan.forms[last + 1..], on_line[last + 1..], "{at}");
+                assert!(plan.forms[last] > on_line[last], "{at}");
+                let mut longer = plan.forms.clone();
+                longer[last] -= 1;
+                let (_, total) = cost_of(&summaries, &longer, &mut table, Options::default());
+                assert!(total as f64 > budget, "{at}: stepped one form too far");
+            }
+        }
+    }
+    assert!(stepped > 0);
+}
+
 #[test]
 fn everything_is_full_exactly_while_it_fits_in_full() {
     let mut random = Random::new(7);

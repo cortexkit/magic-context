@@ -329,3 +329,72 @@ fn the_joined_body_is_held_to_the_budget_when_joining_takes_it_over() {
     }
     assert!(replanned > 0);
 }
+
+/// The exact counter a fold uses for Claude models.
+fn claude() -> crate::count::Counter {
+    crate::count::Counter::for_model(Some("anthropic/claude-opus-5-5"))
+}
+
+/// The body fits the budget, or nothing is shown.
+fn assert_fits_or_empty(rendered: &RenderedHistory, budget: f64, tokens: u64, at: &str) {
+    assert!(
+        tokens as f64 <= budget || rendered.text.is_empty(),
+        "{at}: {tokens} tokens over {budget}, forms {:?}",
+        rendered.items
+    );
+    assert_eq!(rendered.text.is_empty(), rendered.items.is_empty(), "{at}");
+}
+
+#[test]
+fn budgets_below_one_summary_are_held() {
+    let counter = claude();
+    let count = |text: &str| counter.count(text) as usize;
+    let normal = session(300, 25, mixed_score);
+    for budget in [1.0, 10.0, 50.0] {
+        let rendered = render_history(&normal[..1], budget, count);
+        let tokens = counter.count(&rendered.text);
+        assert_fits_or_empty(&rendered, budget, tokens, &format!("one summary at {budget}"));
+    }
+    let mut high_newest = normal.clone();
+    high_newest[299].importance = Some(95);
+    let rendered = render_history(&high_newest, 200.0, count);
+    let tokens = counter.count(&rendered.text);
+    assert_fits_or_empty(&rendered, 200.0, tokens, "300, the newest scored 95, at 200");
+
+    // One summary far larger than the budget, alone and as the newest of 300.
+    let vocabulary = [
+        "the", "reader", "parser", "kept", "diagnostics", "stable", "while", "summary_due",
+        "crates/mc-module/src/session.rs", "traced", "notice", "through", "regression", "test",
+        "cargo", "fold", "baseline", "budget", "cache", "prefix", "rebuild", "memory", "and", "of",
+    ];
+    let mut huge = normal[299].clone();
+    huge.p1 = Some(vocabulary.iter().cycle().take(40_000).copied().collect::<Vec<_>>().join(" "));
+    huge.importance = Some(80);
+    let full = counter.count(&render_compartment_at_tier(&huge, 1));
+    assert!(full > 100_000, "the large summary is {full} tokens");
+    for budget in [2_000.0, 25_000.0, 60_000.0] {
+        let rendered = render_history(std::slice::from_ref(&huge), budget, count);
+        let tokens = counter.count(&rendered.text);
+        assert_fits_or_empty(&rendered, budget, tokens, &format!("one large at {budget}"));
+    }
+    let mut with = normal.clone();
+    with[299] = huge;
+    let rendered = render_history(&with, 30_000.0, count);
+    let tokens = counter.count(&rendered.text);
+    assert_fits_or_empty(&rendered, 30_000.0, tokens, "300, the newest large, at 30000");
+}
+
+/// What the oldest-first guard of the earlier renderer promised, for any
+/// session and any budget from one token up: the body fits, or it is empty.
+#[test]
+fn the_body_fits_its_budget_or_is_empty_for_generated_sessions() {
+    let mut random = Random::new(80);
+    for count in [1, 2, 5, 30, 120, 400] {
+        let comps = session(count, 1 + random.between(1, 40) as usize, mixed_score);
+        for budget in [1.0, 3.0, 10.0, 30.0, 80.0, 200.0, 600.0, 2_000.0, 8_000.0] {
+            let rendered = render_history(&comps, budget, chars);
+            let tokens = chars(&rendered.text) as u64;
+            assert_fits_or_empty(&rendered, budget, tokens, &format!("{count} at {budget}"));
+        }
+    }
+}

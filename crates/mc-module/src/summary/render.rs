@@ -325,9 +325,6 @@ pub(crate) struct RenderedHistory {
     pub body_tokens: Vec<u64>,
 }
 
-/// How many times the forms are chosen at most for one render.
-const BODY_PLANS: usize = 3;
-
 /// Render the history block for `history_budget_tokens` (no `<session-history>`
 /// wrapper — callers add their own framing), counting each piece with
 /// `estimate_tokens`. A budget of zero or less means the window is unknown
@@ -336,8 +333,8 @@ const BODY_PLANS: usize = 3;
 /// The line fits the pieces, and the joints between them as measured on a
 /// few headings, to the budget. Joined text can count a little differently,
 /// so the joined body is counted for real, and while it is over the budget
-/// (at most [`BODY_PLANS`] plans), the forms are chosen again with pieces
-/// that much smaller, from the same counts.
+/// the forms are chosen again with pieces that much smaller, from the same
+/// counts. The body therefore fits the budget, or is empty.
 pub(crate) fn render_history(
     compartments: &[DecayRenderCompartment],
     history_budget_tokens: f64,
@@ -391,31 +388,38 @@ pub(crate) fn render_history(
     let mut target = budget;
     let mut body_tokens = Vec::new();
     loop {
-        let plan = line::plan(&summaries, target, &mut costs, Options::default());
-        let (text, items) = join_plan(&plan, &rows, &indices, &mut costs);
+        let mut plan = line::plan(&summaries, target, &mut costs, Options::default());
+        let (mut text, mut items) = join_plan(&plan, &rows, &indices, &mut costs);
         let tokens = count(&text);
         body_tokens.push(tokens);
         let over = tokens as f64 - budget;
-        if over <= 0.0 || body_tokens.len() == BODY_PLANS {
-            if over > 0.0 {
-                tracing::warn!(
-                    budget,
-                    tokens,
-                    plans = BODY_PLANS,
-                    "ck-mc: history body still over its budget after its plans"
-                );
-            }
-            return RenderedHistory {
-                text,
-                items,
-                plan,
-                body_tokens,
-            };
-        }
         // The new plan's pieces must come out `over` below this plan's, not
         // only below this target: a plan's pieces usually fall short of
-        // its target, and the excess beyond them stays about the same.
-        target = (target.min(plan.total as f64) - over).max(1.0);
+        // its target, and the excess beyond them stays about the same. The
+        // target falls by at least one token a plan, and a plan never
+        // costs more than its target, so this ends: at the latest when no
+        // piece fits any more.
+        let next = target.min(plan.total as f64) - over.ceil().max(1.0);
+        if over > 0.0 && !items.is_empty() && next >= 1.0 {
+            target = next;
+            continue;
+        }
+        if over > 0.0 && !items.is_empty() {
+            // Only a counter that charges joined text far more than its
+            // pieces gets here: nothing shown fits once joined.
+            text.clear();
+            items.clear();
+            plan.forms.fill(NOT_SHOWN);
+            plan.groups.clear();
+            (plan.total, plan.joints) = (0, 0);
+            body_tokens.push(count(&text));
+        }
+        return RenderedHistory {
+            text,
+            items,
+            plan,
+            body_tokens,
+        };
     }
 }
 
