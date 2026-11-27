@@ -31,7 +31,10 @@ import {
 	noteModelOutputReceived,
 } from "@magic-context/core/shared/model-suggestion-retry";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
-import type { CompletedSubagentToolCall } from "@magic-context/core/shared/subagent-runner";
+import type {
+	CompletedSubagentToolCall,
+	CurateMemoryToolCall,
+} from "@magic-context/core/shared/subagent-runner";
 import { HiddenAgentStepLimit } from "@magic-context/core/v2/hooks/hidden-child";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { isPiModelRegistered } from "../model-chain-health";
@@ -766,6 +769,9 @@ function createPiDreamerClient(
 							...syntheticToolParts(
 								result.toolCallCount ?? 0,
 								result.completedToolCalls,
+								accountingTask === "curate"
+									? (result.curateMemoryToolCalls ?? [])
+									: undefined,
 							),
 							...(result.assistantText
 								? [{ type: "text" as const, text: result.assistantText }]
@@ -925,9 +931,10 @@ type SyntheticPart =
 			callID?: string;
 			tool: string;
 			state: {
-				status?: "completed";
+				status?: "completed" | "pending" | "error";
 				input: Record<string, unknown>;
 				output?: string;
+				error?: string;
 			};
 	  };
 
@@ -939,24 +946,42 @@ type SyntheticPart =
 function syntheticToolParts(
 	count: number,
 	completedCalls: readonly CompletedSubagentToolCall[] = [],
+	curateCalls?: readonly CurateMemoryToolCall[],
 ): SyntheticPart[] {
-	const safe = Math.max(completedCalls.length, Math.max(0, Math.floor(count)));
-	const completed = completedCalls.map((call, index) => ({
-		type: "tool" as const,
-		callID: `pi-completed-tool-${index}`,
-		tool: call.name,
-		state: {
-			status: "completed" as const,
-			input: call.arguments,
-			output: "completed",
-		},
-	}));
-	const remaining = Array.from({ length: safe - completed.length }, () => ({
-		type: "tool" as const,
-		tool: "investigation",
-		state: { input: { description: "investigation step" } },
-	}));
-	return [...completed, ...remaining];
+	const calls: SyntheticPart[] = curateCalls
+		? curateCalls.map((call) => ({
+				type: "tool" as const,
+				callID: call.id,
+				tool: call.name,
+				state: {
+					status: call.status,
+					input: call.arguments,
+					...(call.output === undefined
+						? {}
+						: call.status === "error"
+							? { error: call.output }
+							: { output: call.output }),
+				},
+			}))
+		: completedCalls.map((call, index) => ({
+				type: "tool" as const,
+				callID: `pi-completed-tool-${index}`,
+				tool: call.name,
+				state: {
+					status: "completed" as const,
+					input: call.arguments,
+					output: "completed",
+				},
+			}));
+	const remaining = Array.from(
+		{ length: Math.max(0, Math.floor(count) - calls.length) },
+		() => ({
+			type: "tool" as const,
+			tool: "investigation",
+			state: { input: { description: "investigation step" } },
+		}),
+	);
+	return [...calls, ...remaining];
 }
 
 function makeMessage(
@@ -974,6 +999,7 @@ function makeMessage(
 
 export const __test = {
 	accountingTaskFromTitle,
+	syntheticToolParts,
 	registeredProjectCount: () => registeredProjects.size,
 	clearRegistrationGeneration: (projectIdentity: string) => {
 		const registration = registeredProjects.get(projectIdentity);

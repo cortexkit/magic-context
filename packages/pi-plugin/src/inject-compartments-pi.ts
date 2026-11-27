@@ -26,7 +26,10 @@
  */
 
 import { MEMORY_MURAL_BLOCK } from "@magic-context/core/agents/magic-context-prompt";
-import { CACHED_TRIM_PARTIAL_SQL } from "@magic-context/core/features/magic-context/compartment-storage";
+import {
+	CACHED_TRIM_PARTIAL_SQL,
+	cachedHistoryCoversLatestCompartment,
+} from "@magic-context/core/features/magic-context/compartment-storage";
 import {
 	getMaxMemoryIdForProjects,
 	getMemoriesByProject,
@@ -897,6 +900,8 @@ export interface PiM0M1InjectionResult extends PiInjectionResult {
 	 * not match the latest saved compartment snapshot.
 	 */
 	contentionExhausted: boolean;
+	/** The replayed history markers did not confirm that the cached pair includes the newest summary. */
+	wrapupPublicationUnconfirmed?: boolean;
 	/** The compartment boundary actually represented by the m[0]/m[1] pair sent. */
 	renderedBoundary: PiRenderedCompartmentBoundary;
 	/**
@@ -2636,6 +2641,7 @@ function softRefreshCachedM1Pi(args: {
 	markers: PiM0SnapshotMarkers;
 	memoryUpdateCount: number;
 	recomputed: boolean;
+	wrapupPublicationUnconfirmed?: boolean;
 } {
 	const steps = new WriteTransactionSteps();
 	args.state.beforeCacheCommitForTest?.();
@@ -2664,14 +2670,22 @@ function softRefreshCachedM1Pi(args: {
 				args.db,
 				args.state,
 			);
+			const replayed = applyCachedPiRow({
+				row: sibling,
+				state: args.state,
+				compartmentsForNormalization: siblingCompartments,
+			});
 			return {
-				...applyCachedPiRow({
-					row: sibling,
-					state: args.state,
-					compartmentsForNormalization: siblingCompartments,
-				}),
+				...replayed,
 				memoryUpdateCount: 0,
 				recomputed: false,
+				wrapupPublicationUnconfirmed:
+					args.state.skipPressureRefold === true &&
+					!cachedHistoryCoversLatestCompartment(
+						siblingCompartments,
+						replayed.markers.maxCompartmentSeq,
+						replayed.markers.lastBaselineEndMessageId,
+					),
 			};
 		}
 
@@ -2972,6 +2986,7 @@ export function injectM0M1Pi(
 	let contentionExhausted = false;
 	let memoryUpdateCount = 0;
 	let m1Recomputed = false;
+	let wrapupPublicationUnconfirmed: boolean | undefined;
 	let freshFallbackRenderedMemoryIds: number[] | null = null;
 
 	if (decision.value) {
@@ -3108,6 +3123,7 @@ export function injectM0M1Pi(
 			markers = refreshed.markers;
 			memoryUpdateCount = refreshed.memoryUpdateCount;
 			m1Recomputed = refreshed.recomputed;
+			wrapupPublicationUnconfirmed = refreshed.wrapupPublicationUnconfirmed;
 		} catch (error) {
 			if (!state.allowFreshContentionFallback) throw error;
 			// Force recovery cannot depend on winning the soft-refresh write lock.
@@ -3303,6 +3319,7 @@ export function injectM0M1Pi(
 		m0Bytes: m0.length,
 		m1Bytes: m1.length,
 		contentionExhausted,
+		wrapupPublicationUnconfirmed,
 		renderedBoundary,
 		m1RenderedCoverage,
 		// Skip entries before the retained message tail and Magic Context's two

@@ -12,13 +12,11 @@ import type { V2StoreReader } from "../store-reader";
 import { selectRunnableDreamTasks } from "./dream-manual";
 
 /**
- * Find the session a timer-started dream run's child sessions hang under.
- *
- * A run started by the schedule timer has no triggering session. OpenCode 2
- * shows a hidden child created without a parent as a separate top-level
- * session, so the run borrows the most recently updated user session in this
- * location. Returns undefined when the location has none (or its store cannot
- * be read); the executor then skips the tasks that need a child session.
+ * A timer-started dream run has no triggering session, so it borrows the most
+ * recently updated user session in this location for task context and model
+ * selection. The user session is never the parent of the hidden run. If there
+ * is no user session or the store is unavailable, return undefined so the
+ * executor skips tasks that require one.
  */
 export function findV2DreamParentSession(
     openReader: () => Pick<V2StoreReader, "latestRootSessionInDirectory" | "close">,

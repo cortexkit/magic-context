@@ -104,7 +104,7 @@ export async function embedPromotedFacts(
     refs: PromotedMemoryRef[],
 ): Promise<void> {
     for (const ref of refs) {
-        await embedAndStoreMemory(db, sessionId, projectPath, ref.memoryId, ref.content);
+        await embedAndStoreMemory(db, sessionId, projectPath, ref.memoryId);
     }
 }
 
@@ -113,20 +113,16 @@ async function embedAndStoreMemory(
     sessionId: string,
     projectPath: string,
     memoryId: number,
-    content: string,
 ): Promise<void> {
     try {
-        // Capture the row's content hash BEFORE the async provider call: the
-        // vector it returns is only valid for the content stored right now. If
-        // the memory is edited while the call is in flight, the row's
-        // normalized_hash changes and the guarded save below discards the stale
-        // vector instead of resurrecting an out-of-date row — the memory then
-        // stays unembedded until the proactive drain re-embeds current content.
-        const hashBeforeEmbed = getMemoryById(db, memoryId)?.normalizedHash;
-        if (!hashBeforeEmbed) {
+        // A queued memory can change while an earlier fact is embedding. Read
+        // its text and hash from the same row; the guarded save rejects any
+        // later edit while this provider call is in flight.
+        const memory = getMemoryById(db, memoryId);
+        if (!memory?.normalizedHash) {
             return;
         }
-        const result = await embedTextForProject(projectPath, content);
+        const result = await embedTextForProject(projectPath, memory.content);
         if (result) {
             db.transaction(() => {
                 saveEmbeddingIfHashMatches(
@@ -134,7 +130,7 @@ async function embedAndStoreMemory(
                     memoryId,
                     result.vector,
                     result.modelId,
-                    hashBeforeEmbed,
+                    memory.normalizedHash,
                 );
             }).immediate();
         }

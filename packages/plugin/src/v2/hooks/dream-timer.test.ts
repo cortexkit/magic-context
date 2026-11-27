@@ -13,6 +13,7 @@ import {
 import { _resetHarnessForTesting } from "../../shared/harness";
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
+import { isolatedTestGitEnv } from "../../shared/test-git-env";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { setup } from "../server";
 import { V2StoreReader } from "../store-reader";
@@ -122,6 +123,7 @@ describe("OpenCode 2 dream schedule timer registration", () => {
             const config = mockConfig({ disable: dreamerDisabled }, bootGitEnabled);
             const directory = projectDirectory();
             const commitMessage = `independent commit indexing ${directory}`;
+            const env = isolatedTestGitEnv();
             for (const args of [
                 ["init", "--quiet"],
                 [
@@ -137,6 +139,7 @@ describe("OpenCode 2 dream schedule timer registration", () => {
                 ],
             ]) {
                 const result = Bun.spawnSync(["git", "-C", directory, ...args], {
+                    env,
                     windowsHide: true,
                 });
                 if (result.exitCode !== 0) throw new Error(result.stderr.toString());
@@ -265,6 +268,12 @@ describe("OpenCode 2 timer parent lookup", () => {
                 directory: "/work/app",
                 metadata: JSON.stringify({ magic_context: "hidden-run", role: "dreamer" }),
                 time_updated: 9,
+            },
+            {
+                id: "ses-holder",
+                directory: "/work/app",
+                metadata: JSON.stringify({ magic_context: "background-holder" }),
+                time_updated: 10,
             },
             { id: "ses-archived", directory: "/work/app", time_updated: 9, time_archived: 9 },
             { id: "ses-sibling", directory: "/work/app-worktree", time_updated: 9 },

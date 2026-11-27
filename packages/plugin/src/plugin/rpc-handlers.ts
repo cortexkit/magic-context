@@ -32,6 +32,7 @@ import {
     emptyMemoryImportanceHistogram,
     getActiveMemoryImportanceHistogram,
 } from "../features/magic-context/memory/memory-diagnostics";
+import { getProjectBindingWarning } from "../features/magic-context/memory/project-binding-notice";
 import {
     ProjectIdentityError,
     resolveProjectIdentity,
@@ -711,6 +712,7 @@ export function buildSidebarSnapshot(
             lastTransformError: meta?.last_transform_error
                 ? String(meta.last_transform_error)
                 : null,
+            projectBindingWarning: getProjectBindingWarning(db, sessionId),
             lastDreamerRunAt,
             projectIdentity,
             dreamerBacklog,
@@ -1509,6 +1511,8 @@ export function registerRpcHandlers(
         storageDir?: string;
         getDebugMemoryHolders?: () => RuntimeDebugMemoryHolders | undefined;
         getDatabase?: () => Database | null;
+        /** Optional read-only diagnosis supplied by the OpenCode 2 adapter. */
+        readForkHistoryGap?: (db: Database, sessionId: string) => boolean;
     },
 ): void {
     const { directory, config, liveSessionState, rustModeModuleClient } = args;
@@ -1530,6 +1534,15 @@ export function registerRpcHandlers(
         );
 
     const injectionBudgetTokens = config.memory?.injection_budget_tokens;
+    const showForkHistoryGap = (db: Database, sessionId: string) => {
+        if (!compactionEnabled || config.transform_mode === "rust") return false;
+        try {
+            return args.readForkHistoryGap?.(db, sessionId) === true;
+        } catch {
+            // An unreadable host store is not evidence of a history gap.
+            return false;
+        }
+    };
 
     if (isDebugRpcEnabled(config)) {
         const readMemory = () => buildDebugMemoryUsage(args.getDebugMemoryHolders?.());
@@ -1556,7 +1569,7 @@ export function registerRpcHandlers(
                 error: "Rust module status unavailable; canonical session state was not read",
             };
         }
-        return buildSidebarSnapshotRpcResponse(
+        const snapshot = buildSidebarSnapshotRpcResponse(
             db,
             sessionId,
             dir,
@@ -1566,6 +1579,9 @@ export function registerRpcHandlers(
             moduleStatus,
             compactionEnabled,
         );
+        if (!snapshot.error && snapshot.disabled !== true && showForkHistoryGap(db, sessionId))
+            snapshot.forkHistoryGap = true;
+        return snapshot;
     });
 
     // A TUI whose session directory matched no discovery directory asks every
@@ -1620,6 +1636,7 @@ export function registerRpcHandlers(
             moduleStatus,
             compactionEnabled,
         );
+        if (showForkHistoryGap(db, sessionId)) detail.forkHistoryGap = true;
         // Name the tasks this host cannot run. Only the RPC boundary knows which
         // completion transport the host supplies, and a user who never sees the
         // list has no way to tell a task that is unavailable here from one that

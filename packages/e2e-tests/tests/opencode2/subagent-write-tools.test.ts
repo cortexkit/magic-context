@@ -36,6 +36,21 @@ test("OC2 task child hides memory and note tools; primary tools and bytes surviv
         await subagentWriteScenario({ host: "oc2", mock: host.mock, db, parent: parent.id,
             turn: async text => { await client.session.prompt({ sessionID: parent.id, text }); await client.session.wait({ sessionID: parent.id }, { signal: AbortSignal.timeout(30_000) }); },
             child: () => (store.query("SELECT id FROM session_v2 WHERE parent_id = ?").get(parent.id) as { id: string }).id,
+            // OpenCode 2.3+ launches the worker in the background; parent idle
+            // does not establish that the child made its provider request.
+            waitForChild: async () => {
+                const deadline = Date.now() + 30_000;
+                const children = store.query("SELECT id FROM session_v2 WHERE parent_id = ?");
+                for (;;) {
+                    const child = children.get(parent.id) as { id: string } | null;
+                    if (child && host.mock.requests().some(({ body }) => JSON.stringify(body.system).includes(CHILD_SYSTEM))) {
+                        await client.session.wait({ sessionID: child.id }, { signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
+                        return;
+                    }
+                    if (Date.now() >= deadline) throw new Error("worker never reached the provider");
+                    await Bun.sleep(50);
+                }
+            },
         });
     } finally { db.close(); store.close(); await host.stop(); }
 }, 120_000);

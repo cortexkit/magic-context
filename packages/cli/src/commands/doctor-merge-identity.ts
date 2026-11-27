@@ -1,8 +1,10 @@
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { resolveProjectIdentityStrict } from "@magic-context/core/features/magic-context/memory/project-identity";
+import {
+    directoryFallback,
+    resolveProjectIdentityStrict,
+} from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
     projectDirectoryKey,
     readRememberedGitIdentity,
@@ -28,9 +30,11 @@ import {
 } from "../lib/database-access";
 import { availableDiskBytes, checkDiskSpace, existingDirectoryAncestor } from "../lib/disk-space";
 import {
+    canonicalIdentity,
     findIdentitySplits,
     type IdentitySplit,
     orphanedPathReason,
+    resolveReadOnly,
 } from "./doctor-identity-splits";
 import { probeHostProcessesUsing } from "./doctor-opencode2-cache";
 import {
@@ -108,54 +112,6 @@ function printReport(report: IdentityMergeReport): void {
     if (!report.changedRows) console.log("  No-op: no source rows remain to move.");
     if (report.dryRun)
         console.log("  No writes. Review this preview, then repeat with --apply to confirm.");
-}
-
-/** Probe Git without populating the resolver's durable cache during a preview. */
-function resolveReadOnly(directory: string): string | undefined {
-    if (!existsSync(directory)) return undefined;
-    try {
-        const roots = execFileSync("git", ["rev-list", "--max-parents=0", "HEAD"], {
-            cwd: directory,
-            windowsHide: true,
-            encoding: "utf8",
-            timeout: 5000,
-            stdio: ["ignore", "pipe", "pipe"],
-        })
-            .trim()
-            .split(/\s+/)
-            .filter((root) => /^[0-9a-f]{40,64}$/.test(root))
-            .sort();
-        if (roots[0]) return `git:${roots[0]}`;
-    } catch {
-        /* An unreadable repository is not proof of a directory identity. */
-    }
-    try {
-        const result = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
-            cwd: directory,
-            windowsHide: true,
-            encoding: "utf8",
-            timeout: 5000,
-            stdio: ["ignore", "pipe", "pipe"],
-        });
-        if (result.trim() === "true") return undefined;
-    } catch (error) {
-        if (String((error as { stderr?: unknown }).stderr).includes("not a git repository"))
-            return `dir:${createHash("md5").update(projectDirectoryKey(directory)).digest("hex").slice(0, 12)}`;
-    }
-    return undefined;
-}
-
-/**
- * The identity a directory belongs to. The identity the plugin persisted for the path
- * (its `project-identities` sidecar) wins over a live probe: a live probe of a folder
- * that lost its git metadata yields a fresh `dir:` hash, while the plugin keeps using
- * the persisted `git:` identity there. A leftover path has no live resolution at all.
- */
-function canonicalIdentity(directory: string, storageDir: string): string | undefined {
-    return (
-        readRememberedGitIdentity(directory, storageDir) ??
-        (orphanedPathReason(directory) ? undefined : resolveReadOnly(directory))
-    );
 }
 
 interface PersistedIdentityAllowance {
@@ -396,6 +352,10 @@ export interface MergeIdentityDeps {
 
 export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityDeps> = {}): number {
     const options = parseMergeIdentityArgs(args);
+    if (options.from && !/^(git|dir):/.test(options.from)) {
+        // A source folder names its historical folder key, even if it is now a git repo or gone.
+        options.from = directoryFallback(options.from);
+    }
     const dbPath = options.dbPath ?? join(getMagicContextStorageDir(), "context.db");
     const storageDir = dirname(dbPath);
     const hostPath =

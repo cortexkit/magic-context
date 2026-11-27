@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { openTestDb } from "../../src/test-db";
+import { V2StoreReader } from "../../../plugin/src/v2/store-reader";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
@@ -35,6 +35,17 @@ const assistantTexts = (input: Item[]) =>
 		.filter((item) => item.role === "assistant")
 		.flatMap((item) => (item.content ?? []).map((part) => part.text ?? ""));
 
+function assistantRows(env: NodeJS.ProcessEnv, sessionID: string) {
+	// Since 2.2.6 assistant parts may be written separately from the message row;
+	// the store reader reconstructs the host's raw content, not the outgoing draft.
+	const reader = new V2StoreReader(join(env.XDG_DATA_HOME!, "opencode", env.OPENCODE_DB!));
+	try {
+		return reader.history(sessionID).filter((row) => row.type === "assistant");
+	} finally {
+		reader.close();
+	}
+}
+
 test("OpenCode 2 requests carry assistant replies without copied §N§ tag notation", async () => {
 	const fixture = isolation();
 	const host = await spawnOpencode2({
@@ -69,20 +80,12 @@ test("OpenCode 2 requests carry assistant replies without copied §N§ tag notat
 			turnRequests.push(sent[0]!);
 		}
 
-		const store = openTestDb(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!), {
-			readonly: true,
-		});
-		const stored = (
-			store
-				.prepare("SELECT data FROM session_message WHERE session_id = ? AND type = 'assistant' ORDER BY seq")
-				.all(session.id) as Array<{ data: string }>
-		).map((row) =>
-			(JSON.parse(row.data).content as Array<{ type: string; text?: string }>)
+		const stored = assistantRows(fixture.env, session.id).map((row) =>
+			(row.data.content as Array<{ type: string; text?: string }>)
 				.filter((part) => part.type === "text")
 				.map((part) => part.text)
 				.join(""),
 		);
-		store.close();
 		const open = spawnSync("lsof", ["-p", String(host.pid), "-Fn"], { encoding: "utf8" });
 		const databases = open.stdout
 			.split("\n")
@@ -180,12 +183,10 @@ test("OpenCode 2 recovers a stored whole copied tag followed by failed turns wit
 			const oldTag = requests[turn - 1]!.filter((item) => item.role === "assistant")[0];
 			expect(JSON.stringify(requests[turn]!.filter((item) => item.role === "assistant")[0])).toBe(JSON.stringify(oldTag));
 		}
-		const store = openTestDb(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!), { readonly: true });
-		const rows = store.prepare("SELECT data FROM session_message WHERE session_id = ? AND type = 'assistant' ORDER BY seq").all(session.id) as Array<{ data: string }>;
-		store.close();
-		expect(rows.some((row) => row.data.includes("§58§"))).toBe(true);
-		expect(rows.filter((row) => row.data.includes("record a failed turn")).length).toBeGreaterThanOrEqual(2);
-		expect(rows.at(-1)!.data).toContain("recovered");
+		const rows = assistantRows(fixture.env, session.id).map((row) => JSON.stringify(row.data));
+		expect(rows.some((row) => row.includes("§58§"))).toBe(true);
+		expect(rows.filter((row) => row.includes("record a failed turn")).length).toBeGreaterThanOrEqual(2);
+		expect(rows.at(-1)).toContain("recovered");
 		const open = spawnSync("lsof", ["-p", String(host.pid), "-Fn"], { encoding: "utf8" });
 		expect(open.status).toBe(0);
 		const databases = open.stdout.split("\n").filter((line) => line.startsWith("n") && /\.db(-wal|-shm)?$/.test(line)).map((line) => line.slice(1));

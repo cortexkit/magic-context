@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { STORAGE_BUSY_MESSAGE } from "../../../plugin/src/hooks/magic-context/storage-busy-refusal";
-import { CLI, assertOpenPaths, isolation, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
+import { CLI, assertOpenPaths, inspectOpenFiles, isolation, spawnOpencode2, waitForPluginActive, waitForPluginLog } from "../../src/opencode2-runner/spawn";
 
 for (const seconds of [7, 60]) {
     test(`OpenCode 2 real write lock ${seconds}s ${seconds === 7 ? "retries successfully" : "refuses visibly without raw provider request"}`, async () => {
@@ -117,7 +117,15 @@ for (const seconds of [7, 60]) {
 }
 
 
-test("OpenCode 2 busy LKG replays the exact served prefix and system together", async () => {
+const pixel = Buffer.from(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63fccfc0500f000485018084a98c210000000049454e44ae426082",
+    "hex",
+).toString("base64");
+
+test.each([
+    ["OpenCode 2 busy LKG replays the exact served prefix and system together", undefined],
+    ["OpenCode 2 busy LKG replays the exact served prefix containing an image", pixel],
+] as const)("%s", async (_name, image) => {
     const fixture = isolation();
     const version = spawnSync(CLI, ["--version"], { env: fixture.env, cwd: fixture.cwd, encoding: "utf8" });
     expect(version.status).toBe(0);
@@ -149,53 +157,76 @@ test("OpenCode 2 busy LKG replays the exact served prefix and system together", 
             return mc.setup(new Proxy(context, { get(target,key) { return key === 'session' ? session : Reflect.get(target,key); } }));
         }};
     `);
-    const host = await spawnOpencode2({ existingIsolation: fixture, includeMagicContext: false, probePlugin: probe, magicContextConfig: {
+    const host = await spawnOpencode2({ existingIsolation: fixture, includeMagicContext: false, probePlugin: probe, visionModel: image !== undefined, magicContextConfig: {
         dreamer: { disable: true }, memory: { enabled: false }, historian: { disable: true }, temporal_awareness: false,
     } });
-    let locker: ReturnType<typeof Bun.spawn> | undefined;
+    let locker: ReturnType<typeof openTestDb> | undefined;
     try {
         const client = OpenCode.make({ baseUrl: host.url, headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
         const session = await client.session.create({ location: { directory: host.cwd }, model: { providerID: "openai", id: "mock-model" } });
         await waitForPluginActive(client, host.cwd);
-        await client.session.prompt({ sessionID: session.id, text: "LKG-FIRST-TURN" });
+        await client.session.prompt({
+            sessionID: session.id,
+            text: "LKG-FIRST-TURN",
+            ...(image ? { files: [{ uri: `data:image/png;base64,${image}`, name: "pixel.png" }] } : {}),
+        });
         await client.session.wait({ sessionID: session.id }, { signal: AbortSignal.timeout(60000) });
-        const prompt = client.session.prompt({ sessionID: session.id, text: "LKG-BUSY-TURN" });
+        const prompt = client.session.prompt(
+            { sessionID: session.id, text: "LKG-BUSY-TURN" },
+            { signal: AbortSignal.timeout(90000) },
+        );
+        // The fixture may fail before it reaches the await for this in-flight turn.
+        void prompt.catch(() => {});
         const deadline = Date.now() + 20000;
         while (!existsSync(ready) && Date.now() < deadline) await Bun.sleep(20);
         expect(existsSync(ready)).toBe(true);
         const dbPath = join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db");
-        locker = Bun.spawn(["python3", "-u", "-c", "import sqlite3,sys,time; db=sqlite3.connect(sys.argv[1]); db.execute('BEGIN IMMEDIATE'); print('locked',flush=True); time.sleep(60); db.rollback()", dbPath], { env: fixture.env, stdout: "pipe", stderr: "pipe" });
-        const reader = (locker.stdout as ReadableStream<Uint8Array>).getReader();
-        expect(new TextDecoder().decode((await reader.read()).value)).toContain("locked");
-        reader.releaseLock();
-        for (const pid of [host.pid, locker.pid]) {
-            const fds = spawnSync("lsof", ["-p", String(pid), "-Fn"], {encoding:"utf8"});
-            expect(fds.status).toBe(0);
-            const paths = fds.stdout.split("\n").filter(line=>line.startsWith("n")).map(line=>line.slice(1));
-            assertOpenPaths(paths, fixture.root);
-            console.info(`LKG lsof pid=${pid} root=${fixture.root} databases=${JSON.stringify(paths.filter(path=>/\.db(-wal|-shm)?$/.test(path)))}`);
-        }
-        expect(locker.exitCode).toBeNull();
+        // Do not release the write lock until the replay verdict arrives. The host has
+        // reached the context hook, so no session-created writer can consume the fault.
+        expect(existsSync(dbPath)).toBe(true);
+        locker = openTestDb(dbPath, { create: false });
+        locker.run("BEGIN IMMEDIATE");
+        const databases = inspectOpenFiles(host.pid!, fixture.root, fixture.env).filter(
+            (path) => /\.db(?:-wal|-shm)?$/.test(path),
+        );
+        expect(databases).toContain(dbPath);
+        expect(databases.every((path) => path.startsWith(`${fixture.root}/`))).toBe(true);
+        console.info(`LKG lsof pid=${host.pid} root=${fixture.root} databases=${JSON.stringify(databases)}`);
         writeFileSync(locked, "locked");
+        const log = await waitForPluginLog(fixture.env, "lkg_replay_served", 20000);
+        expect(log.slice(-5000)).toContain("lkg_replay_served");
+        expect(log).not.toContain("lkg_content_mismatch");
+        expect(log).not.toContain("lkg_fit_untrusted");
+        locker.close();
+        locker = undefined;
         await prompt;
         await client.session.wait({sessionID:session.id},{signal:AbortSignal.timeout(90000)});
         const requests = host.mock.requests().filter(request=>request.body.model === "mock-model");
-        expect(requests.filter(request=>JSON.stringify(request.body).includes("LKG-BUSY-TURN"))).toHaveLength(1);
+        const busyRequests = requests.filter(request=>JSON.stringify(request.body).includes("LKG-BUSY-TURN"));
+        expect(busyRequests).toHaveLength(1);
+        if (image) {
+            const imageParts = (body: { input?: unknown }) => {
+                const message = (Array.isArray(body.input) ? body.input : []).find((item) =>
+                    JSON.stringify(item).includes("LKG-FIRST-TURN"),
+                ) as { content?: unknown } | undefined;
+                return (Array.isArray(message?.content) ? message.content : []).filter((part) =>
+                    JSON.stringify(part).includes(image),
+                );
+            };
+            const before = imageParts(requests.find((request) => JSON.stringify(request.body).includes("LKG-FIRST-TURN"))!.body);
+            expect(before).toHaveLength(1);
+            expect(JSON.stringify(imageParts(busyRequests[0].body))).toBe(JSON.stringify(before));
+        }
         const frames = readFileSync(trace,"utf8").trim().split("\n").map(line=>JSON.parse(line));
         expect(frames).toHaveLength(2);
         expect(JSON.stringify(frames[1].messages.slice(0, frames[0].messages.length))).toBe(JSON.stringify(frames[0].messages));
         expect(JSON.stringify(frames[1].system)).toBe(JSON.stringify(frames[0].system));
-        await locker.exited;
-        const logDeadline = Date.now()+10000;
-        while (!readFileSync(logPath,"utf8").includes("lkg_replay_served") && Date.now()<logDeadline) await Bun.sleep(100);
-        expect(readFileSync(logPath,"utf8")).toContain("lkg_replay_served");
-        expect(readFileSync(logPath,"utf8")).not.toContain("lkg_content_mismatch");
         console.info("LKG real-host served prefix IDENTICAL; system IDENTICAL; lkg_replay_served");
     } catch (error) {
         console.error(`LKG fixture ${fixture.root}`, readFileSync(logPath,"utf8"), host.stderr());
         throw error;
     } finally {
-        locker?.kill();
+        locker?.close();
         await host.stop();
     }
 }, 180000);

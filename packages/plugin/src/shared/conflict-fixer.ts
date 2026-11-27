@@ -69,6 +69,15 @@ function resolveUserOpenCodeConfigPath(): string {
     return paths.configJson;
 }
 
+export function projectOpenCodeConfigPaths(directory: string): string[] {
+    return [
+        join(directory, ".opencode", "opencode.jsonc"),
+        join(directory, ".opencode", "opencode.json"),
+        join(directory, "opencode.jsonc"),
+        join(directory, "opencode.json"),
+    ];
+}
+
 function collectOpenCodeConfigPaths(directory: string): string[] {
     const paths = new Set<string>();
     const userConfig = resolveUserOpenCodeConfigPath();
@@ -77,12 +86,7 @@ function collectOpenCodeConfigPaths(directory: string): string[] {
         paths.add(userConfig);
     }
 
-    for (const filePath of [
-        join(directory, ".opencode", "opencode.jsonc"),
-        join(directory, ".opencode", "opencode.json"),
-        join(directory, "opencode.jsonc"),
-        join(directory, "opencode.json"),
-    ]) {
+    for (const filePath of projectOpenCodeConfigPaths(directory)) {
         if (existsSync(filePath)) {
             paths.add(filePath);
         }

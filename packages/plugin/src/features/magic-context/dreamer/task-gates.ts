@@ -12,12 +12,14 @@ import { getPendingSmartNotes } from "../storage-notes";
 import { countPrimerCandidatesForProject, getActivePrimers } from "../storage-primers";
 import { getUserMemoryCandidates } from "../user-memory/storage-user-memory";
 import { peekCurateCategoryScope } from "./curate-category-rotation";
+import { isMapMemoryDeferred, readMapMemoryRetries } from "./map-memories-retry";
 import { getTaskScheduleState } from "./storage-task-schedule";
 import {
     CANONICAL_DREAM_TASKS,
     type DreamTaskBacklog,
     type DreamTaskBacklogMap,
     type DreamTaskName,
+    MIN_POOL_TO_CLASSIFY,
 } from "./task-registry";
 
 /**
@@ -73,21 +75,36 @@ export function countLiveMemories(
     return row?.cnt ?? 0;
 }
 
-/** Live active/permanent memories with NO mapping row yet — the map-memories scope. */
+const UNMAPPED_LIVE_MEMORIES_SQL = `FROM memories m
+    WHERE m.project_path = ?
+      AND m.status IN ('active','permanent')
+      AND (m.expires_at IS NULL OR m.expires_at > ?)
+      AND NOT EXISTS (SELECT 1 FROM memory_verifications v WHERE v.memory_id = m.id)`;
+
+/** Live unmapped memories eligible for an attempt now. */
 export function countUnmappedActiveMemories(db: Database, projectPath: string): number {
+    const now = Date.now();
     const row = db
         .prepare<[string, number], { cnt: number }>(
-            `SELECT COUNT(*) AS cnt
-               FROM memories m
-              WHERE m.project_path = ?
-                AND m.status IN ('active','permanent')
-                AND (m.expires_at IS NULL OR m.expires_at > ?)
-                AND NOT EXISTS (
-                    SELECT 1 FROM memory_verifications v WHERE v.memory_id = m.id
-                )`,
+            `SELECT COUNT(*) AS cnt ${UNMAPPED_LIVE_MEMORIES_SQL}`,
         )
-        .get(projectPath, Date.now());
-    return row?.cnt ?? 0;
+        .get(projectPath, now);
+    const total = row?.cnt ?? 0;
+    if (total === 0) return 0;
+
+    const retries = readMapMemoryRetries(db, projectPath);
+    const waitingIds = Object.entries(retries)
+        .filter(([, retry]) => retry.deferUntil > now)
+        .map(([id]) => id);
+    if (waitingIds.length === 0) return total;
+    // Fetch text only for possible exclusions: a text or category edit bypasses the wait.
+    const waiting = db
+        .prepare<[string, number, string], { id: number; category: string; content: string }>(
+            `SELECT m.id, m.category, m.content ${UNMAPPED_LIVE_MEMORIES_SQL}
+             AND m.id IN (SELECT CAST(value AS INTEGER) FROM json_each(?))`,
+        )
+        .all(projectPath, now, JSON.stringify(waitingIds));
+    return total - waiting.filter((memory) => isMapMemoryDeferred(memory, retries, now)).length;
 }
 
 export function countCompartmentsSince(db: Database, projectPath: string, since: number): number {
@@ -450,7 +467,10 @@ export function getDreamTaskBacklog(
         case "classify-memories": {
             const total = countLiveMemories(db, projectPath);
             return {
-                pending: countLiveMemories(db, projectPath, { unclassifiedOnly: true }),
+                pending:
+                    total >= MIN_POOL_TO_CLASSIFY
+                        ? countLiveMemories(db, projectPath, { unclassifiedOnly: true })
+                        : 0,
                 total,
             };
         }
@@ -590,11 +610,16 @@ export function getDreamTaskBacklogs(
     }
     let eligible = cache.eligibleProjects.get(projectPath);
     if (eligible === undefined) {
-        // An expiring pool can change without a write. Never memoize its counts;
-        // all other backlog predicates depend only on rows and caller options.
+        // An expiring pool can change without a write. Never memoize its counts.
         eligible = !cache.expiryStatement.get(projectPath);
         if (cache.eligibleProjects.size >= 16) cache.eligibleProjects.clear();
         cache.eligibleProjects.set(projectPath, eligible);
+    }
+    // Waiting mappings can become eligible without a database write either.
+    if (eligible && tasks.includes("map-memories")) {
+        eligible = !Object.values(readMapMemoryRetries(db, projectPath)).some(
+            ({ deferUntil }) => deferUntil > 0,
+        );
     }
     // JSON numbers collapse NaN/Infinity to null; null and omitted watermarks
     // also have different meanings. Preserve those distinctions in the key.
@@ -628,9 +653,7 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
     const { db, projectIdentity: project, lastRunAt } = ctx;
     switch (task) {
         case "map-memories":
-            // Runs only while UNMAPPED active memories exist — the one-time-style
-            // backfill that drains the pool then no-ops. Cheap: a single NOT-IN
-            // count against the verification side-table.
+            // Backfill unmapped memories as their individual waits expire.
             return countUnmappedActiveMemories(db, project) > 0;
 
         case "verify":
@@ -659,9 +682,7 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
             return countLiveMemories(db, project) > 0;
 
         case "classify-memories":
-            // Classification scores the live project memory pool directly. It has
-            // no file gate, watermark, or completeness prerequisites.
-            return countLiveMemories(db, project) > 0;
+            return countLiveMemories(db, project) >= MIN_POOL_TO_CLASSIFY;
 
         case "retrospective":
             // Cheap pre-gate: any project session updated since the CONTENT

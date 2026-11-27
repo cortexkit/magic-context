@@ -12,10 +12,8 @@ export interface FoldIdentity {
      * stores other text (the checkpoint note). Records written before the note
      * have no head: their submitted text is the head itself. */
     head?: string;
-    /** Ids of the host checkpoint rows this record answered, when the host had a
-     * running row to name. Every note checkpoint stores the same text, so after a
-     * revert lets a new checkpoint reuse a sequence number, only these ids tell
-     * whether the head belongs to the checkpoint being served. */
+    /** The one running checkpoint id this record was created for. Older records
+     * could append ids when another checkpoint reused the sequence. */
     answered?: string[];
     rendered?: V2Message;
     renderedSha?: string;
@@ -24,6 +22,10 @@ export interface FoldIdentity {
     rejectedSha?: string;
     reason?: "host_rerender" | "host_cut_before_watermark" | "boot_recovery";
 }
+
+/** Whether a fold record stands for a checkpoint the host stored or was running. */
+export const boundToCheckpoint = (record: FoldIdentity) =>
+    record.cutSeq !== undefined || record.rendered !== undefined || record.answered !== undefined;
 
 /** A host checkpoint has two identities: our submitted summary and its rendered wrapper.
  * GA provider compaction dispatches the hook before Started (mime-hxnftcv1.js:385/387);
@@ -59,6 +61,12 @@ export class FoldOwner {
         checkpointText?: string;
         /** The id of the host's running checkpoint row being answered, when it has one. */
         checkpointID?: string;
+        /**
+         * Leave a record that already stands for a host checkpoint in place and
+         * return it, for a request with no running checkpoint row: nothing is
+         * cut by that request, and the stored checkpoint still needs its record.
+         */
+        keepBound?: boolean;
     }): Promise<FoldIdentity> {
         return this.serial(args.sessionID, async () => {
             const previous = await this.read(args.sessionID);
@@ -68,14 +76,24 @@ export class FoldOwner {
                     ? previous.cutSeq === args.runningCut
                     : previous.cutSeq === undefined && previous.watermark === args.watermark);
             if (same) {
-                // The same answer now also stands for this checkpoint row.
                 const id = args.checkpointID;
-                if (id !== undefined && !previous.answered?.includes(id)) {
-                    previous.answered = [...(previous.answered ?? []), id].slice(-8);
-                    await this.storage.set(this.key(args.sessionID), previous);
-                }
-                return previous;
+                if (
+                    args.runningCut === undefined ||
+                    (id !== undefined && ownsCheckpoint(previous, id))
+                )
+                    return previous;
+                // The note is safe to submit again, but the head is not. Keep the
+                // old record so observe can request a rebuild when the host serves
+                // the replacement checkpoint.
+                if (args.checkpointText !== undefined && isCheckpointNote(args.checkpointText))
+                    return {
+                        watermark: args.watermark,
+                        cutSeq: args.runningCut,
+                        submitted: args.checkpointText,
+                        submittedSha: foldDigest(args.checkpointText),
+                    };
             }
+            if (args.keepBound && previous && boundToCheckpoint(previous)) return previous;
             const head = args.materialize();
             const submitted = args.checkpointText ?? head;
             const next: FoldIdentity = {
@@ -99,26 +117,16 @@ export class FoldOwner {
     }): Promise<FoldIdentity> {
         return this.serial(args.sessionID, async () => {
             let state = await this.read(args.sessionID);
-            // Discard a record bound to another checkpoint, even if a revert lets
-            // the host reuse its sequence number: one already rendered with another
-            // message id, or one whose answered rows do not include this one. Its
-            // head carries over only to a note checkpoint it answered; without one,
-            // the rebuilt record holds just the stored text.
-            let carriedHead: string | undefined;
+            // The note's bytes do not identify the record's history. Trust a
+            // rendered id or a single running id, never a list of reused ids.
             if (
                 state &&
-                (state.rendered
-                    ? state.rendered.id !== args.rendered.id
-                    : state.answered !== undefined &&
-                      !state.answered.includes(args.rendered.id ?? ""))
-            ) {
-                if (
-                    isCheckpointNote(args.summary) &&
-                    state.answered?.includes(args.rendered.id ?? "")
-                )
-                    carriedHead = state.head;
+                (state.rendered ||
+                    state.answered !== undefined ||
+                    (state.head !== undefined && state.cutSeq !== undefined)) &&
+                !ownsCheckpoint(state, args.rendered.id ?? "")
+            )
                 state = undefined;
-            }
             let changed = !state;
             const observedSha = foldDigest(JSON.stringify(args.rendered));
             const rendered = structuredClone(args.rendered);
@@ -133,7 +141,6 @@ export class FoldOwner {
                     watermark: args.cutSeq,
                     submitted: args.summary,
                     submittedSha: foldDigest(args.summary),
-                    ...(carriedHead === undefined ? {} : { head: carriedHead }),
                     reason: "boot_recovery",
                 };
             }
@@ -188,6 +195,23 @@ export class FoldOwner {
             return state;
         });
     }
+}
+
+function ownsCheckpoint(state: FoldIdentity, id: string): boolean {
+    // A record stores the history head rendered for one host checkpoint row.
+    // Older builds added a second row's ID to the record when that row reused
+    // the first one's sequence number (after a revert), and could then carry
+    // the first row's head, reverted text included, into a record rebuilt for
+    // the second. Both leftovers are recognizable: this build never stores a
+    // head on a record rebuilt by recovery, and never lists more than one ID.
+    if (
+        (state.reason === "boot_recovery" && state.head !== undefined) ||
+        (state.answered?.length ?? 0) > 1
+    )
+        return false;
+    return state.rendered
+        ? state.rendered.id === id
+        : state.answered?.length === 1 && state.answered[0] === id;
 }
 
 /** Remove the host's rendered recent transcript, preserving the supplied summary. */

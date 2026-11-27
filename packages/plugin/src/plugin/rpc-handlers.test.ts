@@ -45,6 +45,7 @@ import { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
 import { buildStatusViewFor } from "../shared/status-view";
 import { checkStatusDetailPayload } from "../shared/status-view-check";
+import { isolatedTestGitEnv } from "../shared/test-git-env";
 import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import { registerV2Commands } from "../v2/hooks/commands";
 import {
@@ -617,7 +618,10 @@ describe("sidebar snapshot RPC failures", () => {
         const directory = createTestTempDirFromPath(join(tmpdir(), "sidebar-unborn-"));
         const db = createTestDb();
         try {
-            execFileSync("git", ["init", "-q", directory], { windowsHide: true });
+            execFileSync("git", ["init", "-q", directory], {
+                env: isolatedTestGitEnv(),
+                windowsHide: true,
+            });
             const identity = `dir:${createHash("md5").update(directory).digest("hex").slice(0, 12)}`;
             insertMemory(db, {
                 projectPath: identity,
@@ -635,7 +639,10 @@ describe("sidebar snapshot RPC failures", () => {
 
     test("paused sidebar logs once per directory and reason without stacks", () => {
         const directory = createTestTempDirFromPath(join(tmpdir(), "sidebar-paused-"));
-        execFileSync("git", ["init", "-q", directory], { windowsHide: true });
+        execFileSync("git", ["init", "-q", directory], {
+            env: isolatedTestGitEnv(),
+            windowsHide: true,
+        });
         // A repository with commits: one with none is recognized from its files and gets its
         // directory identity without asking git, so a failing git could not pause it.
         execFileSync(
@@ -650,7 +657,7 @@ describe("sidebar snapshot RPC failures", () => {
                 "-qm",
                 "first",
             ],
-            { cwd: directory, windowsHide: true },
+            { cwd: directory, env: isolatedTestGitEnv(), windowsHide: true },
         );
         const db = createTestDb();
         const logged = spyOn(logger, "log").mockImplementation(() => {});

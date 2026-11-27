@@ -26,6 +26,7 @@ import {
 import { resolveProjectIdentity } from "../../plugin/src/features/magic-context/memory/project-identity";
 import { computeNormalizedHash } from "../../plugin/src/features/magic-context/memory/normalize-hash";
 import { openTestDb } from "../src/test-db";
+import { isTitleRequest, providerSystemText } from "../src/provider-system-text";
 
 let h: ScenarioHarness;
 
@@ -129,13 +130,10 @@ forEachHost(import.meta.url, "compaction-off mode (issue #266 S3)", (host) => {
 
             let mainCalls = 0;
             h.mock.addMatcher((body) => {
-                const sys = body.system;
-                const sysText =
-                    sys === undefined || sys === null ? "" : JSON.stringify(sys);
                 // Route hidden MC children (historian) away; in off mode they
                 // never fire, but keep the guard so an unexpected spawn can't
                 // poison the main-agent usage ramp.
-                if (sysText.includes("the hippocampus of a long-running coding agent")) {
+                if (isTitleRequest(body) || providerSystemText(body).includes("the hippocampus of a long-running coding agent")) {
                     return null;
                 }
                 mainCalls += 1;
@@ -167,10 +165,7 @@ forEachHost(import.meta.url, "compaction-off mode (issue #266 S3)", (host) => {
             const mainRequests = requests.filter((req) => {
                 const bodyText = JSON.stringify(req.body);
                 if (!bodyText.includes("off-mode turn")) return false;
-                const sys = req.body.system;
-                const sysText =
-                    sys === undefined || sys === null ? "" : JSON.stringify(sys);
-                return !sysText.includes("title generator");
+                return !isTitleRequest(req.body);
             });
             expect(mainRequests.length).toBeGreaterThanOrEqual(3);
 

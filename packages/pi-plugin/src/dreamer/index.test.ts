@@ -1202,10 +1202,13 @@ describe("Pi dreamer wiring", () => {
 						ok: true,
 						assistantText: "",
 						toolCallCount: 1,
-						completedToolCalls: [
+						curateMemoryToolCalls: [
 							{
+								id: "archive-applied",
 								name: "ctx_memory",
 								arguments: { action: "archive" },
+								status: "completed",
+								output: "Archived memory [ID: 1].",
 							},
 						],
 					})),
@@ -1237,6 +1240,111 @@ describe("Pi dreamer wiring", () => {
 		expect(result.ran).toEqual(["curate"]);
 		expect(result.details).toEqual([
 			"curate: PROJECT_RULES (1); curate: 1 memory operation applied (archive)",
+		]);
+	});
+
+	test("keeps non-memory synthetic grounding parts unchanged beside a curate call", () => {
+		const investigation = {
+			type: "tool",
+			tool: "investigation",
+			state: { input: { description: "investigation step" } },
+		};
+		expect(__test.syntheticToolParts(1)).toEqual([investigation]);
+		expect(
+			__test.syntheticToolParts(
+				2,
+				[],
+				[
+					{
+						id: "archive-pending",
+						name: "ctx_memory",
+						arguments: { action: "archive" },
+						status: "pending",
+					},
+				],
+			),
+		).toEqual([
+			{
+				type: "tool",
+				callID: "archive-pending",
+				tool: "ctx_memory",
+				state: { status: "pending", input: { action: "archive" } },
+			},
+			investigation,
+		]);
+	});
+
+	test.each([
+		false,
+		true,
+	])("reports a Pi safety refusal with applied mutation=%s without fallback", async (withApplied) => {
+		db = createDb();
+		const identity = "git:pi-curate-refusals";
+		const calls = [
+			{
+				id: "archive-refused",
+				name: "ctx_memory",
+				arguments: { action: "archive", ids: [1] },
+				status: "completed",
+				output:
+					"Skipped archive for memory [ID: 1]: curate safety refusal (missing-active-same-category-successor); refused=1.",
+			},
+			...(withApplied
+				? [
+						{
+							id: "update-applied",
+							name: "ctx_memory",
+							arguments: { action: "update", ids: [1] },
+							status: "completed",
+							output: "Updated memory [ID: 1] in PROJECT_RULES.",
+						},
+					]
+				: []),
+		];
+		const run = mock(async (_args: { model?: string }) => ({
+			ok: true,
+			assistantText: "",
+			toolCallCount: calls.length,
+			completedToolCalls: calls.map(({ name, arguments: args }) => ({
+				name,
+				arguments: args,
+			})),
+			curateMemoryToolCalls: calls,
+		}));
+		__test.setStartDreamScheduleTimerFactory(async () => mock(() => {}));
+		__test.setPiSubagentRunnerFactory(() => ({ run }) as never);
+		insertMemory(db, {
+			projectPath: identity,
+			category: "PROJECT_RULES",
+			content: "Keep the scoped fixture.",
+		});
+		const opts = dreamerOptions({
+			database: db,
+			projectDir: process.cwd(),
+			projectIdentity: identity,
+			config: DreamerConfigSchema.parse({
+				tasks: { curate: { schedule: "0 4 * * *" } },
+				pi: {
+					model: "primary/curator",
+					tasks: { curate: { fallback_models: ["fallback/curator"] } },
+				},
+			}),
+		});
+		registerPiDreamerProject(opts);
+		const result = await runPiDreamForProject(
+			identity,
+			"curate",
+			opts.registrationOwner,
+		);
+		expect(result).toMatchObject({
+			ran: ["curate"],
+			failed: [],
+			details: [
+				`curate: PROJECT_RULES (1); curate: ${withApplied ? "1 memory operation applied (update)" : "no changes"}; 1 operation refused (missing-active-same-category-successor ×1)`,
+			],
+		});
+		expect(run.mock.calls.map(([args]) => args.model)).toEqual([
+			"primary/curator",
 		]);
 	});
 

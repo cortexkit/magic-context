@@ -6,15 +6,17 @@ import { join } from "node:path";
 import { DREAMER_DOCS_ALLOWED_TOOLS } from "../../../agents/dreamer";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { isolatedTestGitEnv } from "../../../shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { listPendingDocsProposals } from "./docs-proposals";
 import { acquireLease } from "./lease";
 import { getDreamRuns } from "./storage-dream-runs";
-import { writeTaskStateJson } from "./storage-task-schedule";
+import { getTaskScheduleState, writeTaskStateJson } from "./storage-task-schedule";
 import { createDreamTaskExecutor } from "./task-executor";
 import { leaseKeyFor } from "./task-registry";
+import { runManualDream } from "./task-scheduler";
 
 let dir: string;
 let db: Database;
@@ -26,7 +28,12 @@ afterEach(() => {
 function fixture(architecture = "# Architecture\n\n## Core\nOld sentence.\n") {
     dir = createTestTempDirFromPath(join(tmpdir(), "mc-docs-e2e-"));
     const git = (...args: string[]) =>
-        execFileSync("git", args, { windowsHide: true, cwd: dir, encoding: "utf8" }).trim();
+        execFileSync("git", args, {
+            windowsHide: true,
+            cwd: dir,
+            encoding: "utf8",
+            env: isolatedTestGitEnv(),
+        }).trim();
     const file = join(dir, "ARCHITECTURE.md");
     writeFileSync(file, architecture);
     writeFileSync(join(dir, "STRUCTURE.md"), "# Structure\n\n## Layout\nLayout.\n");
@@ -63,12 +70,14 @@ function retryFixture(
 ) {
     const repo = fixture(options.architecture);
     const models: unknown[] = [];
+    const prompts: string[] = [];
     const client = {
         session: {
             list: async () => ({ data: [{ id: "parent" }] }),
             create: async () => ({ data: { id: "child" } }),
-            prompt: async (args: { body: { model: unknown } }) => {
+            prompt: async (args: { body: { model: unknown; parts: { text: string }[] } }) => {
                 models.push(args.body.model);
+                prompts.push(args.body.parts[0].text);
                 options.onPrompt?.();
                 return {};
             },
@@ -89,20 +98,21 @@ function retryFixture(
         openOpenCodeDb: () => null,
     });
     const leaseKey = leaseKeyFor("maintain-docs", dir);
-    expect(acquireLease(db, "holder", leaseKey)).toBe(true);
-    const run = () =>
-        executor(
-            {
-                task: "maintain-docs",
-                schedule: "0 4 * * *",
-                timeoutMinutes: 20,
-                model: "test/docs-primary",
-                fallbackModels: ["test/docs-fallback"],
-                docsMaxTokens: options.docsMaxTokens,
-            },
-            { db, projectIdentity: dir, holderId: "holder", leaseKey },
-        );
-    return { ...repo, models, run };
+    const config = {
+        task: "maintain-docs" as const,
+        schedule: "0 4 * * *",
+        timeoutMinutes: 20,
+        model: "test/docs-primary",
+        fallbackModels: ["test/docs-fallback"],
+        docsMaxTokens: options.docsMaxTokens,
+    };
+    const run = () => {
+        expect(acquireLease(db, "holder", leaseKey)).toBe(true);
+        return executor(config, { db, projectIdentity: dir, holderId: "holder", leaseKey });
+    };
+    const runManual = () =>
+        runManualDream({ db, projectIdentity: dir, tasks: [config], executor, task: config.task });
+    return { ...repo, models, prompts, run, runManual };
 }
 
 test("maintain-docs stub model cannot edit docs, emits a proposal and skips the next run", async () => {
@@ -164,6 +174,41 @@ test("maintain-docs stub model cannot edit docs, emits a proposal and skips the 
     expect(second.detail).toBe("no commits since last run");
     expect(prompts).toBe(1);
     expect(readFileSync(file)).toEqual(before);
+});
+
+test.each([
+    "dismissed",
+    "applied",
+])("maintain-docs reviews deferred commits after the pending proposal is %s", async (resolution) => {
+    const change = { ...validChange, text: "## Core\nCurrent description of `src.ts`." };
+    const { git, file, prompts, runManual } = retryFixture([JSON.stringify([change]), "[]"], {
+        architecture: "# Architecture\n\n## Core\nOld description of `src.ts`.\n",
+    });
+    expect((await runManual()).ran).toEqual(["maintain-docs"]);
+    expect(listPendingDocsProposals(dir)).toHaveLength(1);
+    const [pending] = listPendingDocsProposals(dir);
+
+    writeFileSync(join(dir, "src.ts"), "export const core = false;\n");
+    git("add", "src.ts");
+    git("commit", "-qm", "change documented implementation");
+    expect((await runManual()).details).toEqual(["pending proposal matches current docs"]);
+    expect(prompts).toHaveLength(1);
+
+    if (resolution === "dismissed") {
+        rmSync(pending);
+    } else {
+        writeFileSync(file, `# Architecture\n\n${change.text}\n`);
+        git("add", "ARCHITECTURE.md");
+        git("commit", "-qm", "apply docs proposal");
+    }
+
+    const after = await runManual();
+    expect(after.details).toEqual(["no corrections proposed"]);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("+export const core = false;");
+    expect(getTaskScheduleState(db, dir, "maintain-docs")?.taskStateJson).toBe(
+        JSON.stringify({ head: git("rev-parse", "HEAD") }),
+    );
 });
 
 test("maintain-docs retries non-JSON prose with the fallback and writes only a proposal", async () => {

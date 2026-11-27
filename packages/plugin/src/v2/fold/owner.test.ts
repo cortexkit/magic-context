@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import released from "./__fixtures__/released-owner-rebound.json";
 import * as ownerModule from "./owner";
 import { FoldOwner, foldDigest } from "./owner";
 import { CHECKPOINT_NOTE } from "./summary";
@@ -18,6 +19,7 @@ function fixture() {
             sessionID: "s",
             watermark,
             runningCut,
+            checkpointID: runningCut === undefined ? undefined : `cut-${runningCut}`,
             materialize: () => `baseline ${++materializations}`,
         });
     const rendered = (summary: string) => ({
@@ -85,14 +87,14 @@ test("R3a cut before provisional watermark is a HARD divergence and is not bound
 test("I8 mutated host render forces one HARD and never replaces the pinned identity", async () => {
     const f = fixture();
     const pending = await f.supply(12, 20);
-    const original = f.rendered(pending.submitted);
+    const original = { ...f.rendered(pending.submitted), id: "cut-20" };
     const hard: string[] = [];
     const observe = (summary: string) =>
         f.owner.observe({
             sessionID: "s",
             cutSeq: 20,
             summary,
-            rendered: f.rendered(summary),
+            rendered: { ...f.rendered(summary), id: "cut-20" },
             onHard: (reason) => hard.push(reason),
         });
     await observe(pending.submitted);
@@ -243,6 +245,7 @@ test("a checkpoint answered with the note keeps its head in the fold record", as
         runningCut: 13,
         materialize: () => "frozen history head",
         checkpointText: note,
+        checkpointID: "cut",
     });
     // The host stores the note, so the identity a later pass compares with the
     // host's checkpoint row is the note's; the head stays in Magic Context's record.
@@ -265,7 +268,24 @@ test("a checkpoint answered with the note keeps its head in the fold record", as
     expect("head" in plain).toBe(false);
 });
 
-test("after a revert reuses a sequence number, a note record keeps its head only for checkpoints it answered", async () => {
+test("a first checkpoint, its running-row retry, and a later checkpoint each get their own head", async () => {
+    const f = fixture();
+    const answer = (checkpointID: string, runningCut: number) =>
+        f.owner.supply({
+            sessionID: "s",
+            watermark: 12,
+            runningCut,
+            materialize: () => `${checkpointID}'s head`,
+            checkpointText: CHECKPOINT_NOTE,
+            checkpointID,
+        });
+    const first = await answer("A", 13);
+    expect(first).toMatchObject({ head: "A's head", answered: ["A"] });
+    expect(await answer("A", 13)).toEqual(first);
+    expect(await answer("B", 14)).toMatchObject({ head: "B's head", answered: ["B"] });
+});
+
+test("a note checkpoint recovers rather than reusing an ambiguous or foreign head", async () => {
     const note = CHECKPOINT_NOTE;
     const rendered = (id: string) => ({
         id,
@@ -280,37 +300,60 @@ test("after a revert reuses a sequence number, a note record keeps its head only
             rendered: rendered(id),
             onHard: (reason) => hard.push(reason),
         });
-    const answer = (owner: FoldOwner, checkpointID: string) =>
+    const answer = (owner: FoldOwner, checkpointID?: string) =>
         owner.supply({
             sessionID: "s",
             watermark: 12,
             runningCut: 13,
-            materialize: () => "frozen history head",
+            materialize: () => {
+                if (checkpointID === "B") throw new Error("recovery belongs in the context pass");
+                return "old history head";
+            },
             checkpointText: note,
             checkpointID,
         });
-    // Checkpoint A is answered and served; after a revert, checkpoint B gets A's
-    // sequence number and the hook answers it with the same record.
-    const answeredB = fixture();
-    await answer(answeredB.owner, "A");
-    expect(await observe(answeredB.owner, "A", [])).toMatchObject({ head: "frozen history head" });
-    expect((await answer(answeredB.owner, "B")).answered).toEqual(["A", "B"]);
-    const hard: string[] = [];
-    const rebuilt = await observe(answeredB.owner, "B", hard);
-    expect(hard).toEqual(["boot_recovery"]);
-    expect(rebuilt.rendered?.id).toBe("B");
-    expect(rebuilt.head).toBe("frozen history head");
-    // B was answered another way (the hook never reached this record), so the
-    // record's head is A's, and the rebuilt record keeps none.
-    for (const observed of [true, false]) {
-        const other = fixture();
-        await answer(other.owner, "A");
-        if (observed) await observe(other.owner, "A", []);
-        const otherHard: string[] = [];
-        const foreign = await observe(other.owner, "B", otherHard);
-        expect(otherHard).toEqual(["boot_recovery"]);
-        expect(foreign.submitted).toBe(note);
-        expect(foreign.head).toBeUndefined();
-        expect(foreign.rendered?.id).toBe("B");
+    for (const prior of ["anonymous", "running", "polluted-running", "polluted-rendered"]) {
+        const f = fixture();
+        const old = await answer(f.owner, prior === "anonymous" ? undefined : "A");
+        if (prior.startsWith("polluted")) {
+            const owned = prior === "polluted-rendered" ? await observe(f.owner, "A", []) : old;
+            await f.storage.set("fold/v1/s", { ...owned, answered: ["A", "B"] });
+        }
+        const before = await f.owner.read("s");
+        expect((await answer(f.owner, "B")).submitted).toBe(note);
+        expect(await f.owner.read("s")).toEqual(before);
+        const hard: string[] = [];
+        const recovered = await observe(f.owner, "B", hard);
+        expect(recovered.head).toBeUndefined();
+        expect(recovered.rendered?.id).toBe("B");
+        expect(await observe(f.owner, "B", hard)).toEqual(recovered);
+        expect(hard).toEqual(["boot_recovery"]);
     }
+});
+
+// Captured from the released owner after answering the original checkpoint
+// (and optionally observing it), then answering and observing its replacement
+// at the same sequence.
+test.each([
+    released.rebound,
+    released.multiAnswer,
+])("a released note record already rendered under the replacement ID recovers once (%#)", async (record) => {
+    const f = fixture();
+    expect(record.head).toBe(released.a.head);
+    await f.storage.set("fold/v1/s", record);
+    const hard: string[] = [];
+    const observe = (owner: FoldOwner) =>
+        owner.observe({
+            sessionID: "s",
+            cutSeq: record.cutSeq,
+            summary: record.submitted,
+            rendered: record.rendered,
+            onHard: (reason) => hard.push(reason),
+        });
+    const recovered = await observe(f.owner);
+    expect(recovered.head).toBeUndefined();
+    expect(recovered.answered).toBeUndefined();
+    expect(recovered.rendered?.id).toBe(record.rendered.id);
+    expect(await observe(new FoldOwner(f.storage))).toEqual(recovered);
+    expect(hard).toEqual(["boot_recovery"]);
 });

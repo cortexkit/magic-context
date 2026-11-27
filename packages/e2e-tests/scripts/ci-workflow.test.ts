@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { readdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import openCode2Versions from "../opencode2-versions.json";
 import { failedRequiredJobs, slowUnitRequired } from "./check-ci-results";
 
 const root = resolve(import.meta.dir, "../../..");
@@ -8,7 +9,7 @@ const text = await Bun.file(resolve(root, ".github/workflows/ci.yml")).text();
 const releaseText = await Bun.file(resolve(root, ".github/workflows/release.yml")).text();
 const waitActionText = await Bun.file(resolve(root, ".github/actions/wait-ci-artifact/action.yml")).text();
 type Step = { name?: string; run?: string; if?: string; uses?: string; with?: Record<string, string>; env?: Record<string, string> };
-type Job = { name: string; needs?: string[]; if?: string; "timeout-minutes"?: number; permissions?: Record<string, string>; steps: Step[]; strategy?: { "fail-fast": boolean; matrix: { shard?: number[]; mode?: string[]; version?: string[] } } };
+type Job = { name: string; needs?: string[]; if?: string; env?: Record<string, string>; "timeout-minutes"?: number; permissions?: Record<string, string>; steps: Step[]; strategy?: { "fail-fast": boolean; matrix: { shard?: number[]; mode?: string[]; version?: string[] } } };
 const workflow = Bun.YAML.parse(text) as { jobs: Record<string, Job> };
 // Inspect the commands CI actually invokes, not a second copy of their shell bodies.
 for (const job of Object.values(workflow.jobs)) {
@@ -98,7 +99,7 @@ test("artifact consumers start setup immediately and gate tests on artifacts", (
         }
     }
     expect(workflow.jobs["e2e-host-opencode"]!.strategy).toEqual({ "fail-fast": false, matrix: { shard: [0, 1, 2, 3] } });
-    expect(workflow.jobs["e2e-host-opencode2"]!.strategy).toEqual({ "fail-fast": false, matrix: { shard: [0, 1], version: ["2.0.22", "2.1.0"] } });
+    expect(workflow.jobs["e2e-host-opencode2"]!.strategy).toEqual({ "fail-fast": false, matrix: { shard: [0, 1], version: openCode2Versions.compatibility } });
 });
 
 test("same-run artifact downloads retry transient failures and guard consumers", () => {
@@ -173,6 +174,17 @@ test("cache oracle and separate OC2 regressions run exactly once even after a su
     expect(regressions[0]!.run).toContain("marker-s3-runtime.test.ts || status=1");
     expect(regressions[0]!.if).toContain("matrix.shard == 0");
     expect(regressions[0]!.if).toContain("!cancelled()");
+});
+
+test("OpenCode 2.3.0 runs only the notification guard outside the compatibility matrix", () => {
+    const job = workflow.jobs["e2e-host-opencode2-230-notifications"];
+    expect(job).toBeDefined();
+    expect(job?.strategy).toBeUndefined();
+    expect(job?.env?.MC_E2E_OPENCODE2_VERSION).toBe("2.3.0");
+    expect(job?.steps.some((step) => step.run?.startsWith('bash scripts/ci/e2e-host-opencode2-install-the-selected-exact-host.sh "$MC_E2E_OPENCODE2_VERSION"'))).toBe(true);
+    const tests = job?.steps.flatMap((step) => step.run?.match(/^bun test .*$/gm) ?? []);
+    expect(tests).toEqual(["bun test tests/opencode2/hidden-run-notifications.test.ts"]);
+    expect(openCode2Versions.compatibility).not.toContain("2.3.0");
 });
 
 test("Rust archive consumers preserve all lib partitions and remaining target kinds", () => {

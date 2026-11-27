@@ -50,7 +50,7 @@ const sandbox = {
 	resolveSessionId: () =>
 		++sessionReads % 2 ? "synthetic-session" : undefined,
 	log() {},
-	Text: class {},
+	legacyTui: { Text: class {} },
 	piManagedSignature: () => "synthetic-signature",
 	preparePiDispatch: (messages) => ({ messages, structure: {} }),
 	// The served check keeps only numbers per message; its own test proves a

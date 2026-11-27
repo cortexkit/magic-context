@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { Database } from "../../../plugin/src/shared/sqlite";
+import { V2StoreReader } from "../../../plugin/src/v2/store-reader";
 import { MockProvider } from "../../src/mock-provider/server";
 import {
     conversionFixture, SHARED_MOCK_MODEL_ID, SHARED_MOCK_PROVIDER_ID, spawnOpencode1,
@@ -16,14 +17,18 @@ const RESULT_TEXT = "payload ".repeat(2_300);
 
 function seedConvertedTail(path: string, sessionID: string): void {
     const db = new Database(path);
+    const reader = new V2StoreReader(path);
     try {
         const rows = db.prepare("SELECT id, type, data FROM session_message WHERE session_id = ? ORDER BY seq")
             .all(sessionID) as Array<{ id: string; type: string; data: string }>;
         const user = rows.find((row) => row.type === "user");
         const tool = rows.find((row) => row.type === "assistant" && row.data.includes('"type":"tool"'));
-        const warmup = [...rows].reverse().find((row) => row.type === "assistant" && row.data.includes('"text":"warmup"'));
+        // Converted tool rows are inline; 2.4 records the new warmup response
+        // in session_part. Read the provider response in either host format.
+        const warmup = reader.history(sessionID).findLast((row) => row.type === "assistant" &&
+            row.data.content?.some((part) => part.type === "text" && part.text === "warmup"));
         if (!user || !tool || !warmup) throw new Error("conversion did not produce tool and provider-proven warmup rows");
-        const warmupTokens = (JSON.parse(warmup.data) as { tokens: unknown }).tokens;
+        const warmupTokens = warmup.data.tokens;
         const add = db.prepare(`INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
             SELECT ?, session_id, type, ?, time_created, time_updated, ? FROM session_message WHERE id = ?`);
         const max = db.prepare("SELECT MAX(seq) AS seq FROM session_message WHERE session_id = ?").get(sessionID) as { seq: number };
@@ -55,6 +60,7 @@ function seedConvertedTail(path: string, sessionID: string): void {
                 .run(seq, sessionID);
         })();
     } finally {
+        reader.close();
         db.close();
     }
 }

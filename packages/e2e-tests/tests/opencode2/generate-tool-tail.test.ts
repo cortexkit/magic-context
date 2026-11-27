@@ -249,9 +249,16 @@ test("OpenCode 2 generate replays the last runner wire prefix after an id-less t
 		const input = wireField(runner.rawBody!, "input");
 		const prefix = runner.rawBody!.slice(0, input.end - 1);
 		const wirePrefixEqual = side.rawBody!.startsWith(prefix);
-		const instructionsEqual =
-			wireField(side.rawBody!, "instructions").bytes ===
-			wireField(runner.rawBody!, "instructions").bytes;
+		// OpenCode 2.3+ puts Responses instructions in developer input items,
+		// already covered byte-for-byte by the raw prefix comparison above.
+		const instructions = (raw: string) => {
+			const body = JSON.parse(raw) as { instructions?: string; input: Array<{ role?: string }> };
+			if (body.instructions !== undefined) return wireField(raw, "instructions").bytes;
+			const developer = body.input.filter((item) => item.role === "developer");
+			expect(developer.length).toBeGreaterThan(0);
+			return JSON.stringify(developer);
+		};
+		const instructionsEqual = instructions(side.rawBody!) === instructions(runner.rawBody!);
 		const toolsEqual =
 			wireField(side.rawBody!, "tools").bytes ===
 			wireField(runner.rawBody!, "tools").bytes;

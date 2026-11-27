@@ -130,6 +130,7 @@ import {
     listDanglingCompartmentBoundaries,
 } from "./doctor-compartment-boundaries";
 import { reportUnresolvedHarnessRelabel } from "./doctor-harness-relabel";
+import { checkOpenCodeBackgroundCompaction } from "./doctor-opencode-background-compaction";
 import {
     clearPluginCache,
     type OpenCodePluginConfigUse,
@@ -1908,6 +1909,21 @@ export async function runDoctor(
         // running server's resolved config may differ from what the file reader sees.
         log.info(
             "Compaction check: file-based; the running server's resolved config may differ — `opencode debug config` is authoritative",
+        );
+
+        // Check before the conflict fixes below can turn off auto-compaction and hide the finding.
+        checkOpenCodeBackgroundCompaction(
+            cwd,
+            activeInstallation.version,
+            { compactionEnabled, fix: options.fix },
+            {
+                warn,
+                info: (message) => log.info(message),
+                wrote: (message) => {
+                    pass(message);
+                    fixed++;
+                },
+            },
         );
 
         if (conflictResult.hasConflict) {

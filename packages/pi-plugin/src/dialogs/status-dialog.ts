@@ -4,13 +4,7 @@ import type {
 	Theme,
 	ThemeColor,
 } from "@earendil-works/pi-coding-agent";
-import {
-	type Component,
-	matchesKey,
-	type TUI,
-	truncateToWidth,
-	visibleWidth,
-} from "@earendil-works/pi-tui";
+import type { Component } from "@earendil-works/pi-tui";
 import type { MagicContextConfig } from "@magic-context/core/config/schema/magic-context";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import {
@@ -31,6 +25,7 @@ import {
 	emptyMemoryImportanceHistogram,
 	getActiveMemoryImportanceHistogram,
 } from "@magic-context/core/features/magic-context/memory/memory-diagnostics";
+import { getProjectBindingWarning } from "@magic-context/core/features/magic-context/memory/project-binding-notice";
 import { getEmbeddingCoverageStatus } from "@magic-context/core/features/magic-context/project-embedding-registry";
 import {
 	getProtectionWindowForSession,
@@ -100,6 +95,15 @@ import {
 	resolvePiProvenInputFloor,
 } from "../pi-proven-floor";
 import { isPiRecompInFlight } from "../pi-recomp-runner";
+import {
+	canRenderPiRows,
+	matchesKey,
+	type PiRowsHost,
+	piOverlayOptions,
+	piTerminalRows,
+	truncateToWidth,
+	visibleWidth,
+} from "../pi-tui-compat";
 
 /** Countdown/usage cadence while dialog is open. */
 const REFRESH_INTERVAL_MS = 1000;
@@ -152,6 +156,7 @@ export interface StatusDialogDetail {
 	compartmentCount: number;
 	lastCompartmentRange: string | null;
 	memoryCount: number;
+	projectBindingWarning?: string;
 	memoryBlockCount: number;
 	memoryImportanceHistogram: MemoryImportanceHistogram;
 	sessionNoteCount: number;
@@ -242,6 +247,13 @@ export async function showStatusDialog(
 ): Promise<void> {
 	const sessionId = resolveSessionId(ctx);
 	if (!sessionId) throw new Error("No active Pi session is available.");
+	if (!canRenderPiRows) {
+		ctx.ui.notify(
+			formatPiStatusSummary(buildPiStatusDetail(pi, ctx, deps, sessionId)),
+			"info",
+		);
+		return;
+	}
 
 	await ctx.ui.custom<undefined>(
 		(tui, theme, _keybindings, done) =>
@@ -254,10 +266,7 @@ export async function showStatusDialog(
 				tui,
 				done,
 			}),
-		{
-			overlay: true,
-			overlayOptions: { anchor: "center", width: 78 },
-		},
+		piOverlayOptions(78),
 	);
 }
 
@@ -267,7 +276,7 @@ interface StatusDialogProps {
 	deps: StatusDialogDeps;
 	sessionId: string;
 	theme: Theme;
-	tui: TUI;
+	tui: PiRowsHost;
 	done: (value: undefined) => void;
 }
 
@@ -359,7 +368,7 @@ class StatusDialogComponent implements Component {
 		);
 		// Reserve the borders, title and close hint; only the body scrolls.
 		// The host clips overflowing overlays rather than scrolling them.
-		const rows = Math.max(0, this.props.tui.terminal.rows);
+		const rows = Math.max(0, piTerminalRows(this.props.tui));
 		const header = inner.slice(0, 1);
 		const footer = inner.slice(-1);
 		const body = inner.slice(header.length, inner.length - footer.length);
@@ -447,6 +456,7 @@ export function formatPiStatusSummary(s: StatusDialogDetail): string {
 				tokens: s.tailHygiene?.u ?? 0,
 			},
 			memoryCount: s.memoryCount,
+			projectBindingWarning: s.projectBindingWarning,
 			noteCount: s.sessionNoteCount + s.readySmartNoteCount,
 			embedding: s.embedding,
 			warnings: piStatusWarnings(s),
@@ -1212,6 +1222,7 @@ function buildStatusDetail(
 			return last ? `${last.startMessage}-${last.endMessage}` : null;
 		})(),
 		memoryCount: memoryImportanceHistogram.total,
+		projectBindingWarning: getProjectBindingWarning(deps.db, sessionId),
 		memoryBlockCount,
 		memoryImportanceHistogram,
 		sessionNoteCount: safeRead(

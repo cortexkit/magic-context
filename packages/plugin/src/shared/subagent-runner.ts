@@ -192,6 +192,14 @@ export interface CompletedSubagentToolCall {
     arguments: Record<string, unknown>;
 }
 
+export interface CurateMemoryToolCall {
+    id: string;
+    name: "ctx_memory";
+    arguments: Record<string, unknown>;
+    status: "pending" | "completed" | "error";
+    output?: string;
+}
+
 export type SubagentRunResult =
     | {
           ok: true;
@@ -209,6 +217,8 @@ export type SubagentRunResult =
           /** Completed, non-error tool results preserved by runners that can
            *  reconstruct invocation/result pairs from their transcript. */
           completedToolCalls?: CompletedSubagentToolCall[];
+          /** Real ctx_memory call outcomes, including refusals and unresolved calls, for curate. */
+          curateMemoryToolCalls?: CurateMemoryToolCall[];
           meta?: Record<string, unknown>;
       }
     | {

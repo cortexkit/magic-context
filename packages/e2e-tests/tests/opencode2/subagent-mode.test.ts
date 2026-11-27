@@ -209,8 +209,11 @@ for (const allowed of [true, false]) {
             });
             await f.turn(f.parent.id, "ISSUE-612-LAUNCH");
             expect(taskSent).toBe(true);
-            expect(childRequests).toHaveLength(2);
+            // OpenCode 2.3+ can idle the parent while the child is on its read step.
+            await eventually(() => childRequests.length >= 2, "both child requests");
             const childID = firstPassModes[0]!.id;
+            await f.client.session.wait({ sessionID: childID }, { signal: AbortSignal.timeout(30_000) });
+            expect(childRequests).toHaveLength(2);
             expect(firstPassModes).toEqual([
                 { id: childID, mode: 1 },
                 { id: childID, mode: 1 },

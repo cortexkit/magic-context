@@ -748,11 +748,10 @@ export class V2StoreReader {
 
     /**
      * The most recently updated top-level user session the host created in
-     * `directory`, or undefined when there is none. Children, Magic Context's
-     * own hidden runs and archived sessions are never returned. The session must
-     * be in this very directory: OpenCode 2 puts a child session in its parent's
-     * location, and only the plugin context of that location recognises the
-     * child, so a parent from a sibling checkout would strand the run.
+     * `directory`, or undefined when there is none. Exclude children, archived
+     * sessions, and Magic Context's internal runs and holders. The timer borrows
+     * a user session in this directory for task context and model selection, not
+     * as the parent of a hidden child.
      *
      * The directory is compared by `sameProjectDirectory`, not by SQL equality.
      * OpenCode 2 on Windows stores `D:/work/app` while the plugin's location is
@@ -771,7 +770,7 @@ export class V2StoreReader {
         const page = this.prepare(
             `SELECT id, COALESCE(directory, '') AS directory FROM session_v2
                  WHERE parent_id IS NULL${archived}
-                   AND COALESCE(json_extract(metadata, '$.magic_context'), '') <> 'hidden-run'
+                   AND COALESCE(json_extract(metadata, '$.magic_context'), '') NOT IN ('hidden-run', 'background-holder')
                  ORDER BY ${order} LIMIT ? OFFSET ?`,
         );
         const pageSize = 500;
@@ -783,9 +782,11 @@ export class V2StoreReader {
         }
     }
 
-    /** Native user activity on root sessions; internal children must never become
-     * retrospective input. Activity is read from the source, not project-binding
-     * times or optional activity keys in Magic Context's store. */
+    /** When the user was last active in each top-level session. The nightly task
+     * that learns from recent user sessions picks them by this, so Magic Context's
+     * own background runs and their holder sessions are left out. The time comes
+     * from the host's messages, not from project-binding times or optional
+     * activity keys in Magic Context's store. */
     rootSessionActivity(sessionIDs: readonly string[]): Map<string, number> {
         const roots = new Map<string, number>();
         for (let offset = 0; offset < sessionIDs.length; offset += 500) {
@@ -795,7 +796,7 @@ export class V2StoreReader {
                     WHERE session_id = session_v2.id AND type = 'user'
                 ) AS time FROM session_v2
                 WHERE parent_id IS NULL
-                  AND COALESCE(json_extract(metadata, '$.magic_context'), '') <> 'hidden-run'
+                  AND COALESCE(json_extract(metadata, '$.magic_context'), '') NOT IN ('hidden-run', 'background-holder')
                   AND id IN (${chunk.map(() => "?").join(",")})`).all(...chunk) as Array<{
                 id: string;
                 time: number | null;
@@ -1307,6 +1308,54 @@ export class V2StoreReader {
             `SELECT id, type, seq, time_created FROM session_message
                  WHERE session_id = ? AND seq <= ? ORDER BY seq ASC`,
         ).all(sessionID, throughSeq) as V2RowStamp[];
+    }
+
+    /** Exact body equality for candidate fork pairs, without decoding or returning the bodies. */
+    matchingForkBodies(parentID: string, forkID: string, throughSeq: number): Map<string, string> {
+        // Assistant content may be in a separate host table. Compare both ways:
+        // a missing, changed or extra part makes this pair unfit for inheritance.
+        const matchParts = this.hasPartTable()
+            ? `
+               AND NOT EXISTS (
+                   SELECT ordinal, type, call_id, data FROM session_part WHERE message_id = p.id
+                   EXCEPT SELECT ordinal, type, call_id, data FROM session_part WHERE message_id = f.id
+               ) AND NOT EXISTS (
+                   SELECT ordinal, type, call_id, data FROM session_part WHERE message_id = f.id
+                   EXCEPT SELECT ordinal, type, call_id, data FROM session_part WHERE message_id = p.id
+               )`
+            : "";
+        const rows = this.prepare(
+            `SELECT p.id AS parentId, f.id AS forkId FROM session_message p JOIN session_message f ON f.seq = p.seq
+             WHERE p.session_id = ? AND f.session_id = ? AND p.seq <= ?
+               AND p.type = f.type AND p.time_created = f.time_created AND p.data = f.data${matchParts}`,
+        ).all(parentID, forkID, throughSeq) as { parentId: string; forkId: string }[];
+        return new Map(rows.map(({ parentId, forkId }) => [parentId, forkId]));
+    }
+
+    /** Step through counted rows without reading past the consumer's decision. */
+    *iterateRawMessageRange(sessionID: string, from: number, to: number): Iterable<StoreRow> {
+        if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1 || to < from)
+            return;
+        // OpenCode 2.0.22 and 2.1.0 report SQLite API misuse when
+        // a consumer stops early and closes a native statement iterator.
+        let anchor: RawMessageOrdinalAnchor | undefined;
+        for (let after = from - 1; after < to; after += 1) {
+            const [row] = this.messagePage(sessionID, after, 1, to, anchor);
+            if (!row) return;
+            anchor = { id: row.id, timeCreated: row.time_created ?? 0 };
+            yield row;
+        }
+    }
+
+    /** Identify suffix replacement without reading any message bodies. */
+    messageCountAndNewestId(sessionID: string): [number, string | null] {
+        const row = this.prepare(`SELECT COUNT(*) AS count, (
+                SELECT id FROM session_message WHERE session_id = ? ORDER BY seq DESC LIMIT 1
+            ) AS newestId FROM session_message WHERE session_id = ?`).get(sessionID, sessionID) as {
+            count: number;
+            newestId: string | null;
+        };
+        return [row.count, row.newestId];
     }
 
     latestSequenceForIds(sessionID: string, ids: readonly string[]): number {

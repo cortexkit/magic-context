@@ -4,16 +4,13 @@ import type {
 	ExtensionUIContext,
 	Theme,
 } from "@earendil-works/pi-coding-agent";
-import {
-	type Component,
-	type TUI,
-	truncateToWidth,
-} from "@earendil-works/pi-tui";
+import type { Component, TUI } from "@earendil-works/pi-tui";
 import {
 	TITLE_DONE_STATUSES,
 	TODO_PRIORITIES,
 	TODO_STATUSES,
 } from "@magic-context/core/hooks/magic-context/todo-view";
+import { canRenderPiRows, truncateToWidth } from "../pi-tui-compat";
 
 export const TODO_TOOL_NAME = "todowrite";
 export const TODOS_COMMAND_NAME = "todos";
@@ -407,7 +404,7 @@ export class TodoOverlay {
 	private uiCtx: ExtensionUIContext | undefined;
 	private sessionId: string | undefined;
 	private widgetRegistered = false;
-	private tui: TUI | undefined;
+	private tui: Pick<TUI, "requestRender"> | undefined;
 	private completedTaskIdsPendingHide = new Set<string>();
 	private hiddenCompletedTaskIds = new Set<string>();
 	private lastTodoKeys = new Set<string>();
@@ -426,7 +423,13 @@ export class TodoOverlay {
 	}
 
 	update(sessionId = this.sessionId): void {
-		if (!this.uiCtx || !this.sessionId || sessionId !== this.sessionId) return;
+		if (
+			!canRenderPiRows ||
+			!this.uiCtx ||
+			!this.sessionId ||
+			sessionId !== this.sessionId
+		)
+			return;
 		const todos = getTodoSnapshot(this.sessionId).todos;
 		this.pruneCompletedDisplayState(todos);
 		const visible = this.selectOverlayTodos(todos);
@@ -449,12 +452,15 @@ export class TodoOverlay {
 				WIDGET_KEY,
 				(tui, theme) => {
 					this.tui = tui;
+					const clearRegistration = () => {
+						if (this.tui !== tui) return;
+						this.widgetRegistered = false;
+						this.tui = undefined;
+					};
 					return {
 						render: (width: number) => this.renderWidget(theme, width),
-						invalidate: () => {
-							this.widgetRegistered = false;
-							this.tui = undefined;
-						},
+						invalidate: clearRegistration,
+						dispose: clearRegistration,
 					};
 				},
 				{ placement: "aboveEditor" },

@@ -18,13 +18,14 @@ test("OC2 retrospective reads native oldest-first bounded user history, not stal
         CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT);
         CREATE TABLE message(id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
         CREATE TABLE part(id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
-        INSERT INTO session_v2 VALUES ('root', NULL, '{}'), ('child', 'root', '{}'), ('foreign', NULL, '{}'), ('hidden', NULL, '{"magic_context":"hidden-run"}');
+        INSERT INTO session_v2 VALUES ('root', NULL, '{}'), ('child', 'root', '{}'), ('foreign', NULL, '{}'), ('hidden', NULL, '{"magic_context":"hidden-run"}'), ('holder', NULL, '{"magic_context":"background-holder"}');
+        INSERT INTO session_message VALUES ('holder-prompt', 'holder', 'user', 0, 400, '{"text":"PRIVATE_HOLDER_PROMPT"}');
         INSERT INTO message VALUES ('old', 'root', 99999, '{"role":"user"}');
         INSERT INTO part VALUES ('old', 'old', 'root', 99999, '{"type":"text","text":"STALE_LEGACY"}');`);
     context.exec(`CREATE TABLE session_projects(session_id TEXT, harness TEXT, project_path TEXT);
         CREATE TABLE session_meta(session_id TEXT, is_subagent INTEGER);
         CREATE TABLE schema_migrations_meta(key TEXT, value TEXT);
-        INSERT INTO session_projects VALUES ('root', 'opencode2', 'project'), ('child', 'opencode2', 'project'), ('foreign', 'opencode2', 'other'), ('legacy', 'opencode', 'project'), ('hidden', 'opencode2', 'project');
+        INSERT INTO session_projects VALUES ('root', 'opencode2', 'project'), ('child', 'opencode2', 'project'), ('foreign', 'opencode2', 'other'), ('legacy', 'opencode', 'project'), ('hidden', 'opencode2', 'project'), ('holder', 'opencode2', 'project');
         INSERT INTO schema_migrations_meta VALUES ('retrospective_activity:root', '1000'), ('retrospective_activity:child', '1000'), ('retrospective_activity:foreign', '1000'), ('retrospective_activity:legacy', '1000'), ('retrospective_activity:hidden', '1000');`);
     const insert = host.prepare("INSERT INTO session_message VALUES (?, 'root', ?, ?, ?, ?)");
     insert.run("z", "user", 4, 100, JSON.stringify({ text: "first real user" }));
@@ -85,6 +86,7 @@ test("OC2 retrospective reads native oldest-first bounded user history, not stal
         ]);
         const page = provider.readUserMessagesSince("root", 0, 2);
         expect(page.truncated).toBe(true);
+        expect(page.firstOmittedTs).toBe(300);
         expect(
             page.messages.map((row) => [
                 row.ts,
@@ -110,7 +112,7 @@ test("OC2 retrospective reads native oldest-first bounded user history, not stal
         const window = await readRetrospectiveScanWindow(provider, "project", 0, 0, {
             capPerSession: 2,
         });
-        expect(window.maxScannedTs).toBe(199);
+        expect(window.maxScannedTs).toBe(200);
         expect(JSON.stringify(window)).not.toMatch(
             /PRIVATE|SECRET|STALE|SYNTHETIC_PART|IGNORED_PART/,
         );

@@ -27,8 +27,10 @@ for (const [host, path, functions] of [
         const inspected: string[] = [];
         const violations: string[] = [];
         function visit(node: ts.Node): void {
+            // Overload signatures have no body; only the implementation is checked.
             if (
                 ts.isFunctionDeclaration(node) &&
+                node.body &&
                 node.name &&
                 functions.some((name) => name === node.name?.text)
             ) {

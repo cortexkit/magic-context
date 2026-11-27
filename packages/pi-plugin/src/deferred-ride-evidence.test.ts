@@ -27,6 +27,10 @@ import {
 } from "./context-handler";
 import { signalPiDeferredCompactionMarkerDrain } from "./index";
 import {
+	injectM0M1Pi,
+	materializeM0PiWithRetry,
+} from "./inject-compartments-pi";
+import {
 	assistantMessage,
 	assistantToolCall,
 	createFakePi,
@@ -314,6 +318,98 @@ test("Pi wrapup serves the new summary and cut once without a pressure-backstop 
 		expect(hasPendingMaterialization(h.id)).toBe(false);
 		expect(JSON.stringify(await h.pass(40))).toBe(JSON.stringify(after));
 	} finally {
+		h.close();
+	}
+});
+
+test("Pi wrapup keeps its grant when a soft refresh serves the old history head", async () => {
+	const h = rideHarness();
+	let writes = 0;
+	let race = false;
+	const restore = __test.setInjectM0M1PiForTests((state, ...args) =>
+		injectM0M1Pi(
+			{
+				...state,
+				beforeCacheCommitForTest: () => {
+					if (!race || writes++ !== 0) return;
+					h.db
+						.query(
+							"UPDATE session_meta SET cached_m0_materialized_at = cached_m0_materialized_at + 1 WHERE session_id = ?",
+						)
+						.run(h.id);
+				},
+			},
+			...args,
+		),
+	);
+	try {
+		const before = JSON.stringify(await h.pass(40));
+		h.publish();
+		signalPiPendingMaterialization(h.id, "user_wrapup");
+		race = true;
+		expect(JSON.stringify(await h.pass(40))).toBe(before);
+		expect(writes).toBe(1);
+		expect(hasPendingMaterialization(h.id)).toBe(true);
+		const after = JSON.stringify(await h.pass(40));
+		expect(after).toContain("Newly published facts");
+		expect(hasPendingMaterialization(h.id)).toBe(false);
+		expect(JSON.stringify(await h.pass(40))).toBe(after);
+	} finally {
+		restore();
+		h.close();
+	}
+});
+
+test.each([
+	"fold",
+	"m[1]",
+] as const)("Pi wrapup spends its grant when the replayed %s already covers the publication", async (writer) => {
+	const h = rideHarness();
+	let writes = 0;
+	let restore: (() => void) | undefined;
+	try {
+		await h.pass(40);
+		h.publish();
+		if (writer === "m[1]") {
+			signalPiPendingMaterialization(h.id, "user_flush");
+			expect(JSON.stringify(await h.pass(40))).toContain(
+				"Newly published facts",
+			);
+			await h.pass(40);
+			await h.pass(40);
+		}
+		signalPiPendingMaterialization(h.id, "user_wrapup");
+		restore = __test.setInjectM0M1PiForTests((state, ...args) =>
+			injectM0M1Pi(
+				{
+					...state,
+					beforeCacheCommitForTest: () => {
+						if (writes++ !== 0) return;
+						if (writer === "fold") {
+							const fold = materializeM0PiWithRetry(state, h.db);
+							expect(fold.m0).toContain("Newly published facts");
+						} else {
+							h.db
+								.query(
+									"UPDATE session_meta SET cached_m0_materialized_at = cached_m0_materialized_at + 1 WHERE session_id = ?",
+								)
+								.run(h.id);
+						}
+					},
+				},
+				...args,
+			),
+		);
+
+		const served = JSON.stringify(await h.pass(40));
+		expect(writes).toBe(1);
+		expect(served).toContain("Newly published facts");
+		expect(hasPendingMaterialization(h.id)).toBe(false);
+		h.queue();
+		expect(JSON.stringify(await h.pass(40))).toBe(served);
+		expect(getPendingOps(h.db, h.id)).toHaveLength(1);
+	} finally {
+		restore?.();
 		h.close();
 	}
 });

@@ -32,7 +32,9 @@ const {
     getMemoryCount,
     getMemoriesByProject,
     insertMemory,
+    updateMemoryContent,
 } = await import("./storage-memory");
+const { loadAllEmbeddings } = await import("./storage-memory-embeddings");
 const { embedPromotedFacts, promoteSessionFactsDurable } = await import("./promotion");
 
 const TEST_PROJECT_PATH = "/repo/project";
@@ -462,6 +464,45 @@ describe("promotion", () => {
             }>;
             expect(rows).toHaveLength(1);
             expect(rows[0].model_id).toBe(registeredModelId);
+        });
+
+        it("embeds current text for a promoted memory edited while an earlier fact is in flight", async () => {
+            db = makeMemoryDatabase();
+            const first = "First promoted fact";
+            const second = "Original second promoted fact";
+            const edited = "Edited second fact";
+            const { newMemoryRefs } = promoteSessionFactsDurable(db, "ses-1", TEST_PROJECT_PATH, [
+                { category: "ARCHITECTURE_DECISIONS", content: first },
+                { category: "ARCHITECTURE_DECISIONS", content: second },
+            ]);
+            const secondId = newMemoryRefs[1].memoryId;
+            const modelId = registerTestEmbeddingProvider(db);
+            const started = Promise.withResolvers<void>();
+            const release = Promise.withResolvers<void>();
+            const inputs: string[] = [];
+            mockEmbedText.mockImplementation(async (text: string) => {
+                inputs.push(text);
+                if (text === first) {
+                    started.resolve();
+                    await release.promise;
+                }
+                return { vector: new Float32Array([text.length, 1]) };
+            });
+
+            const inFlight = embedPromotedFacts(db, "ses-1", TEST_PROJECT_PATH, newMemoryRefs);
+            await started.promise;
+            try {
+                updateMemoryContent(db, secondId, edited, computeNormalizedHash(edited));
+            } finally {
+                release.resolve();
+                await inFlight;
+            }
+
+            const embeddings = loadAllEmbeddings(db, TEST_PROJECT_PATH, modelId);
+            expect({ inputs, storedSecondLength: embeddings.get(secondId)?.embedding[0] }).toEqual({
+                inputs: [first, edited],
+                storedSecondLength: edited.length,
+            });
         });
 
         it("discards the stale vector when the memory is edited while embedding is in flight", async () => {

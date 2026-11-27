@@ -7,9 +7,11 @@ import {
     getEmergencyInputSample,
 } from "../../features/magic-context/storage-meta-persisted";
 import { Database } from "../../shared/sqlite";
+import { estimateMessageTokens } from "./final-wire-token-estimate";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike, TagTarget } from "./tag-messages";
+import { createToolDropTarget, type ToolCallIndex, ToolMutationBatch } from "./tool-drop-target";
 
 function makeMemoryDatabase(): Database {
     const d = new Database(":memory:");
@@ -188,6 +190,68 @@ describe("applyHeuristicCleanup", () => {
     });
 
     describe("#given the tiered emergency drop config (>=85% pass)", () => {
+        it("credits the image stripped from a recent tool skeleton at the force band", () => {
+            const pngHeader = Buffer.from(
+                "89504e470d0a1a0a0000000d49484452000007d0000005dc",
+                "hex",
+            );
+            const part = {
+                type: "tool",
+                tool: "screenshot",
+                callID: "image-call",
+                state: {
+                    status: "completed",
+                    input: {},
+                    output: "x",
+                    attachments: [
+                        {
+                            type: "file",
+                            mime: "image/png",
+                            url: `data:image/png;base64,${pngHeader.toString("base64")}`,
+                        },
+                    ],
+                },
+            };
+            const message: MessageLike = {
+                info: { id: "assistant", role: "assistant" },
+                parts: [part],
+            };
+            const index: ToolCallIndex = new Map([
+                [
+                    part.callID,
+                    { hasResult: true, occurrences: [{ message, part, kind: "result" }] },
+                ],
+            ]);
+            const target = createToolDropTarget(
+                part.callID,
+                [],
+                index,
+                new ToolMutationBatch([message]),
+                1,
+            );
+            insertTag(db, SESSION, part.callID, "tool", 1, 1, 0, part.tool);
+            const before = estimateMessageTokens(message).toolCall;
+
+            const result = applyHeuristicCleanup(SESSION, db, new Map([[1, target]]), new Map(), {
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
+                emergency: {
+                    currentTotalInputTokens: 9000,
+                    ceilingTokens: 7000,
+                    usagePercentage: 90,
+                },
+            });
+
+            expect(result.emergencyDroppedTools).toBe(1);
+            expect(getTagsBySession(db, SESSION)[0]?.dropMode).toBe("skeleton_stripped");
+            expect(message.parts[0]).toMatchObject({
+                state: { input: {}, attachments: [], output: "[dropped \u00a71\u00a7]" },
+            });
+            expect(result.emergencyReclaimedTokens).toBe(
+                before - estimateMessageTokens(message).toolCall,
+            );
+        });
+
         it("#then drops oldest tool outputs down to the reclaim target, full-drop", () => {
             //#given a tail of large tool outputs well over the ceiling. fixedFloor is
             // derived as currentTotalInputTokens - Σ(active tag tokens), so with only

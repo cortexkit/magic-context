@@ -1027,13 +1027,20 @@ describe("subagent-runner pure helpers", () => {
 			expect(historianArgs).toContain("--no-rules");
 			expect(historianArgs).not.toContain("--no-prompt-templates");
 			expect(historianArgs).not.toContain("--no-context-files");
-			expect(historianArgs).toEqual(expect.arrayContaining(["--no-tools"]));
+			expect(historianArgs).toContain("--tools=");
+			expect(historianArgs).not.toContain("--no-tools");
+			const allowlistFlag = historianArgs.indexOf(
+				"--magic-context-tool-allowlist",
+			);
+			expect(allowlistFlag).toBeGreaterThan(-1);
+			expect(historianArgs[allowlistFlag + 1]).toBe("[]");
 
 			const dreamerArgs = buildArgsForTest({
 				...baseOptions,
 				agent: "dreamer",
 			});
-			expect(dreamerArgs).toContain("--no-tools");
+			expect(dreamerArgs).toContain("--tools=");
+			expect(dreamerArgs).not.toContain("--no-tools");
 			expect(dreamerArgs).not.toContain("--tools");
 		} finally {
 			rmSync(root, { recursive: true, force: true });
@@ -1184,7 +1191,8 @@ describe("subagent-runner pure helpers", () => {
 			{ ...baseOptions, agent: "dreamer-memory-mapper" },
 			{ targetHarness: "omp", hostToolNames: [] },
 		);
-		expect(args).toContain("--no-tools");
+		expect(args).toContain("--tools=");
+		expect(args).not.toContain("--no-tools");
 		expect(args).not.toContain("--tools");
 	});
 
@@ -2234,6 +2242,73 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 			],
 			durationMs: expect.any(Number),
 			meta: { stderr: undefined },
+		});
+	});
+
+	it("preserves Pi curate call IDs, text, errors and missing results without capturing other tools", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+		const resultPromise = runner.run({
+			...baseOptions,
+			agent: "dreamer",
+			accountingTask: "curate",
+		});
+		const calls = ["refused", "error", "pending", "read-other"].map((id) => ({
+			type: "toolCall",
+			id,
+			name: id === "read-other" ? "read" : "ctx_memory",
+			arguments: { action: "archive", ids: [1] },
+		}));
+		const refusal =
+			"Skipped archive for memory [ID: 1]: curate safety refusal (missing-active-same-category-successor); refused=1.";
+		const messages = [
+			{ role: "assistant", content: calls, stopReason: "toolUse" },
+			...[
+				{ id: "refused", name: "ctx_memory", text: refusal, isError: false },
+				{ id: "error", name: "ctx_memory", text: "tool failed", isError: true },
+				{
+					id: "read-other",
+					name: "read",
+					text: "file contents",
+					isError: false,
+				},
+			].map(({ id, name, text, isError }) => ({
+				role: "toolResult",
+				toolCallId: id,
+				toolName: name,
+				content: [{ type: "text", text }],
+				isError,
+			})),
+		];
+		for (const message of messages)
+			child.writeStdoutLine({ type: "message_end", message });
+		child.emitClose(0);
+		expect(await resultPromise).toMatchObject({
+			ok: true,
+			assistantText: "",
+			toolCallCount: 4,
+			curateMemoryToolCalls: [
+				{
+					id: "refused",
+					name: "ctx_memory",
+					arguments: calls[0]?.arguments,
+					status: "completed",
+					output: refusal,
+				},
+				{
+					id: "error",
+					name: "ctx_memory",
+					arguments: calls[1]?.arguments,
+					status: "error",
+					output: "tool failed",
+				},
+				{
+					id: "pending",
+					name: "ctx_memory",
+					arguments: calls[2]?.arguments,
+					status: "pending",
+				},
+			],
 		});
 	});
 
@@ -4927,7 +5002,8 @@ for (const targetHarness of ["pi", "omp"] as const) {
 					onProgress: (event) => progress.push(event),
 				});
 				const args = (spawnImpl.mock.calls as unknown[][])[0]?.[1] as string[];
-				expect(args.includes("--no-tools")).toBe(
+				const emptyTools = targetHarness === "omp" ? "--tools=" : "--no-tools";
+				expect(args.includes(emptyTools)).toBe(
 					agent !== "dreamer-memory-mapper",
 				);
 				expect(

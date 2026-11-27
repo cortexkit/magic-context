@@ -1,11 +1,13 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import type { HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-types";
 import { createDreamTimerModuleClient } from "../../../plugin/dream-timer-module-client";
 import * as logger from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { userFacingFailureCode } from "../../../shared/user-facing-codes";
+import { toolLoopMessages } from "../../../v2/hidden-completion";
 import {
     ensureContextStoreUuid,
     installAuthorityManagedMarker,
@@ -134,7 +136,208 @@ name: ctx_memory
 arguments:
 {"action":"archive","reason":"与全局用户画像重复","ids":[6]}`;
 
+const CONTENT_LOSS =
+    "Skipped update for memory [ID: 1]: curate safety refusal (content-loss); refused=1.";
+const NO_SUCCESSOR =
+    "Skipped archive for memory [ID: 1]: curate safety refusal (missing-active-same-category-successor); refused=2.";
+
+function curateOutcomeFixture(
+    db: Database,
+    transport: "hidden" | "child",
+    calls: Parameters<typeof curateToolMessages>[0],
+    text?: string,
+) {
+    const project = "/repo/curate-result";
+    for (const category of ["PROJECT_RULES", "ARCHITECTURE"] as const) {
+        insertMemory(db, { projectPath: project, category, content: `${category} fixture` });
+    }
+    const models: string[] = [];
+    const prompts: string[] = [];
+    const deps = { sessionDirectory: project, openOpenCodeDb: () => null };
+    const collectMessages = () => curateToolMessages(calls, text);
+    const capture = (body: { model?: { modelID?: string }; parts?: Array<{ text?: string }> }) => {
+        models.push(body.model?.modelID ?? "");
+        prompts.push(body.parts?.[0]?.text ?? "");
+    };
+    const usage = { input: 113, output: 10, cacheRead: 0, cacheWrite: 0 };
+    let updateBudget: ((update: { spent: number; finalizeFired: boolean }) => void) | undefined;
+    const hiddenCompletionExecutor: HiddenCompletionExecutor = {
+        capabilities: { tools: true, harness: "opencode2" },
+        async open({ metadata }) {
+            updateBudget = metadata?.onBudgetUpdate as typeof updateBudget;
+            return { id: "curate-test-child" };
+        },
+        async attempt(_handle, request) {
+            capture(request.body as Parameters<typeof capture>[0]);
+            updateBudget?.({ spent: usage.input, finalizeFired: false });
+        },
+        async collect() {
+            const observedMessages = collectMessages().flatMap(({ parts }) =>
+                parts.flatMap((part): unknown[] => {
+                    if (!("state" in part)) return [];
+                    const call = {
+                        role: "assistant",
+                        content: [
+                            {
+                                type: "tool-call",
+                                id: part.callID,
+                                name: part.tool,
+                                input: part.state.input,
+                            },
+                        ],
+                    };
+                    if (part.state.status === "pending") return [call];
+                    const result =
+                        part.state.status === "error"
+                            ? {
+                                  resultType: "error",
+                                  result: { error: part.state.error, content: [] },
+                              }
+                            : { result: { type: "text", value: part.state.output } };
+                    return [
+                        call,
+                        {
+                            role: "tool",
+                            content: [{ type: "tool-result", id: part.callID, ...result }],
+                        },
+                    ];
+                }),
+            );
+            return {
+                text: text ?? null,
+                usage,
+                lengthCapped: false,
+                messages: toolLoopMessages({ observedMessages } as never),
+            };
+        },
+        async close() {},
+    };
+    const executor = createDreamTaskExecutor(
+        transport === "hidden"
+            ? { ...deps, hiddenCompletionExecutor, parentSessionId: "curate-test-parent" }
+            : {
+                  ...deps,
+                  client: {
+                      session: {
+                          list: async () => ({
+                              data: [{ id: "curate-test-parent", title: "Parent" }],
+                          }),
+                          create: async () => ({ data: { id: "curate-test-child" } }),
+                          prompt: async ({ body }: { body: Parameters<typeof capture>[0] }) => {
+                              capture(body);
+                              return {};
+                          },
+                          messages: async () => ({ data: collectMessages() }),
+                          delete: async () => ({}),
+                      },
+                  } as never,
+                  readTokenBudget: () => ({ spent: usage.input, finalizeFired: false }),
+              },
+    );
+    const config: DreamTaskRuntimeConfig = {
+        task: "curate",
+        schedule: "0 4 * * 0",
+        timeoutMinutes: 5,
+        model: "test/primary",
+        fallbackModels: ["test/fallback"],
+        tokenBudget: 1000,
+    };
+    const run = () =>
+        runManualDream({ db, projectIdentity: project, tasks: [config], executor, task: "curate" });
+    return { project, models, prompts, run };
+}
+
 describe("createDreamTaskExecutor — curate", () => {
+    describe.each(["hidden", "child"] as const)("%s transport", (transport) => {
+        test("completes all-refused curation without fallback and rotates the category", async () => {
+            db = freshDb();
+            const { project, models, prompts, run } = curateOutcomeFixture(db, transport, [
+                { action: "update", status: "completed", output: CONTENT_LOSS },
+                { action: "archive", status: "completed", output: NO_SUCCESSOR },
+                {
+                    action: "update",
+                    status: "completed",
+                    output: CONTENT_LOSS.replace("refused=1", "refused=3"),
+                },
+            ]);
+            const result = await run();
+            const detail =
+                "curate: PROJECT_RULES (1); curate: no changes; 3 operations refused (content-loss ×2, missing-active-same-category-successor ×1)";
+            expect(result).toMatchObject({
+                ran: ["curate"],
+                failed: [],
+                details: [detail],
+                backlogAfter: { curate: { pending: 1, total: 1, category: "PROJECT_RULES" } },
+            });
+            expect(models).toEqual(["primary"]);
+            expect(getMemoriesByProject(db, project)).toHaveLength(2);
+            const recorded = getDreamRuns(db, project)[0]!;
+            expect(recorded.memory_changes_json).toBeNull();
+            expect(JSON.parse(recorded.tasks_json)[0]).toMatchObject({
+                status: "completed",
+                progress: detail,
+                backlog: { pendingAtStart: 1, pendingAtEnd: 1, processed: 0 },
+                tokenBudget: { budget: 1000, spent: 113, banked: 0 },
+            });
+            await run();
+            expect(prompts).toHaveLength(2);
+            expect(prompts[1]).toContain("whole of the `ARCHITECTURE` category");
+        });
+
+        test("reports applied, refused, and unrecognised curate mutations together", async () => {
+            db = freshDb();
+            const { models, run } = curateOutcomeFixture(db, transport, [
+                { action: "merge", status: "completed" },
+                { action: "archive", status: "completed", output: NO_SUCCESSOR },
+                { action: "update", status: "completed", output: "Error: unsafe target" },
+                { action: "get", status: "completed", output: "Found 1 active memory:" },
+                { action: "list", status: "completed", output: "No active memories found." },
+            ]);
+            const log = spyOn(logger, "log");
+            try {
+                expect(await run()).toMatchObject({
+                    ran: ["curate"],
+                    failed: [],
+                    details: [
+                        "curate: PROJECT_RULES (1); curate: 1 memory operation applied (merge); 1 operation refused (missing-active-same-category-successor ×1); 1 with an unrecognised result",
+                    ],
+                });
+                expect(models).toEqual(["primary"]);
+                expect(log).toHaveBeenCalledWith("[dreamer] curate result summary: unrecognised=1");
+            } finally {
+                log.mockRestore();
+            }
+        });
+
+        test.each([
+            "pending",
+            "error",
+            "unknown",
+        ] as const)("does not let a refusal mask a %s call and rotates after the non-transient failure", async (kind) => {
+            db = freshDb();
+            const { project, models, prompts, run } = curateOutcomeFixture(
+                db,
+                transport,
+                [
+                    { action: "archive", status: "completed", output: NO_SUCCESSOR },
+                    {
+                        action: "update",
+                        status: kind === "unknown" ? "completed" : kind,
+                        output: "Skipped update for memory [ID: 1]: curate safety refusal (unknown-reason); refused=2.",
+                    },
+                ],
+                "curation finished",
+            );
+            expect(await run()).toMatchObject({ ran: [], failed: ["curate"] });
+            expect(models).toEqual(["primary", "fallback"]);
+            expect(JSON.parse(getDreamRuns(db, project)[0]!.tasks_json)[0]).toMatchObject({
+                failure: { failure_class: "parse_failed" },
+            });
+            await run();
+            expect(prompts[2]).toContain("whole of the `ARCHITECTURE` category");
+        });
+    });
+
     test("drives separate children for category snapshot chunks", async () => {
         db = freshDb();
         const project = "/repo/chunked-curate";
@@ -459,6 +662,11 @@ describe("createDreamTaskExecutor — curate", () => {
             projectPath: project,
             category: "ARCHITECTURE",
             content: "Architecture remains the retry scope.",
+        });
+        insertMemory(db, {
+            projectPath: project,
+            category: "CONSTRAINTS",
+            content: "A populated next category must wait for the retry.",
         });
         const prompts: string[] = [];
         let attempts = 0;
@@ -2348,6 +2556,163 @@ describe("createDreamTaskExecutor — compress-cues", () => {
 });
 
 describe("createDreamTaskExecutor — retrospective", () => {
+    test("persists the newest sent cohort and never hands its rows back as new work", async () => {
+        db = freshDb();
+        const project = "/repo/retrospective-saturated-cohort";
+        const start = Date.now() - 1000;
+        const config = {
+            task: "retrospective",
+            schedule: "0 5 * * *",
+            timeoutMinutes: 20,
+        } as const;
+        writeTaskScheduleState(db, {
+            projectPath: project,
+            task: config.task,
+            nextDueAt: null,
+            lastRunAt: null,
+            schedule: config.schedule,
+            lastStatus: null,
+            lastError: null,
+            retryCount: 0,
+            retrospectiveWatermarkMs: start,
+        });
+        const rows = Array.from({ length: 81 }, (_, ordinal) => ({
+            sessionId: "root",
+            ordinal,
+            role: "user" as const,
+            text: `new-row-${ordinal};`,
+            followsAssistantReply: true,
+            ts: start + (ordinal < 80 ? 1 : 2),
+        }));
+        const prompted: string[][] = [];
+        const executor = createDreamTaskExecutor({
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+            client: {
+                session: {
+                    list: async () => ({ data: [{ id: "parent", title: "ordinary session" }] }),
+                    create: async () => ({ data: { id: "retro-child" } }),
+                    prompt: async (request: { body?: { parts?: Array<{ text: string }> } }) => {
+                        prompted.push(request.body?.parts?.[0]?.text.match(/new-row-\d+;/g) ?? []);
+                        return {};
+                    },
+                    messages: async () => ({ data: assistantMessages("n") }),
+                    delete: async () => ({}),
+                },
+            } as never,
+            retrospectiveRawProvider: {
+                listProjectSessions: () => [{ sessionId: "root", updatedAt: start + 2 }],
+                readOldestMessageTimesSince: (_ids, since) => {
+                    const first = rows.find(({ ts }) => ts > since);
+                    return first ? new Map([["root", first.ts]]) : new Map();
+                },
+                readUserMessagesSince: (_id, since, cap) => {
+                    const pending = rows.filter(({ ts }) => ts > since);
+                    return {
+                        messages: pending.slice(0, cap),
+                        truncated: pending.length > cap,
+                        firstOmittedTs: pending[cap]?.ts,
+                    };
+                },
+                readUserMessagesBefore: () => [],
+            },
+        });
+        const run = () =>
+            runManualDream({
+                db: db!,
+                projectIdentity: project,
+                tasks: [config],
+                executor,
+                task: config.task,
+            });
+        expect((await run()).ran).toEqual([config.task]);
+        expect(getTaskScheduleState(db, project, config.task)?.retrospectiveWatermarkMs).toBe(
+            start + 1,
+        );
+        expect((await run()).ran).toEqual([config.task]);
+        expect(getTaskScheduleState(db, project, config.task)?.retrospectiveWatermarkMs).toBe(
+            start + 2,
+        );
+        expect(prompted).toEqual([rows.slice(0, 80).map(({ text }) => text), ["new-row-80;"]]);
+    });
+
+    test("logs the retrospective scan frontier and the watermark read back after scheduling", async () => {
+        db = freshDb();
+        const project = "/repo/retrospective-watermark-log";
+        const watermarkMs = Date.now() - 1000;
+        const scannedTs = watermarkMs + 1;
+        const config = {
+            task: "retrospective",
+            schedule: "0 5 * * *",
+            timeoutMinutes: 20,
+        } as const;
+        writeTaskScheduleState(db, {
+            projectPath: project,
+            task: config.task,
+            nextDueAt: null,
+            lastRunAt: null,
+            schedule: config.schedule,
+            lastStatus: null,
+            lastError: null,
+            retryCount: 0,
+            retrospectiveWatermarkMs: watermarkMs,
+        });
+        const executor = createDreamTaskExecutor({
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+            retrospectiveRawProvider: {
+                listProjectSessions: () => [{ sessionId: "root", updatedAt: scannedTs }],
+                readUserMessagesSince: () => ({
+                    messages: [
+                        {
+                            sessionId: "root",
+                            ordinal: 1,
+                            role: "user",
+                            text: "First turn",
+                            ts: scannedTs,
+                        },
+                    ],
+                    truncated: false,
+                }),
+                readUserMessagesBefore: () => [],
+            },
+        });
+        // Sample the row when the line is emitted, not only after the task returns.
+        const diagnostic: Array<{ line: string; storedAtLog?: number | null }> = [];
+        const logSpy = spyOn(logger, "log").mockImplementation((line) => {
+            if (line.includes("retrospective: watermark")) {
+                diagnostic.push({
+                    line,
+                    storedAtLog: getTaskScheduleState(db!, project, config.task)
+                        ?.retrospectiveWatermarkMs,
+                });
+            }
+        });
+        try {
+            const result = await runManualDream({
+                db,
+                projectIdentity: project,
+                tasks: [config],
+                executor,
+                task: config.task,
+            });
+            expect(result.ran).toEqual(["retrospective"]);
+            expect(getTaskScheduleState(db, project, config.task)?.retrospectiveWatermarkMs).toBe(
+                scannedTs,
+            );
+            expect(diagnostic).toEqual([
+                {
+                    line: expect.stringContaining(
+                        `start=${watermarkMs} maxScannedTs=${scannedTs} patch=${scannedTs} stored=${scannedTs}`,
+                    ),
+                    storedAtLog: scannedTs,
+                },
+            ]);
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
     test("probe-only opening user line skips the gate and completes with an explicit no-op", async () => {
         db = freshDb();
         const project = "/repo/retrospective-probe-only";

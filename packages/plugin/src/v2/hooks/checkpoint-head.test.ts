@@ -6,16 +6,22 @@ import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage-db";
+import { isRealUserRequest } from "../../hooks/magic-context/active-anthropic-turn";
 import { estimateFinalWireInputTokens } from "../../hooks/magic-context/final-wire-token-estimate";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
+import type { MessageLike } from "../../hooks/magic-context/tag-messages";
+import { toolReclaimDistanceEntries } from "../../hooks/magic-context/tool-reclaim";
 import * as transformModule from "../../hooks/magic-context/transform";
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import released from "../fold/__fixtures__/released-owner-rebound.json";
 import { type FoldIdentity, FoldOwner } from "../fold/owner";
 import { CHECKPOINT_NOTE } from "../fold/summary";
 import * as readerModule from "../store-reader";
 import { registerContext } from "./context";
+import * as generate from "./generate";
+import { HiddenChildHook } from "./hidden-child";
 import { HEAD_IDS } from "./payload";
 import * as storageGate from "./storage-gate";
 import type { SessionContext, V2Context } from "./types";
@@ -72,12 +78,14 @@ async function fixture(
     let permission = false;
     let insideTransformHadRecent = false;
     let insideHostEstimate: { tokens: number; pressureTokens: number } | undefined;
+    let transformInput: MessageLike[] = [];
     const transform = spyOn(transformModule, "createTransform").mockImplementation((deps) => {
         const handler = async (_input: unknown, output: any) => {
             insideTransformHadRecent = JSON.stringify(await storage.get("fold/v1/s")).includes(
                 "<recent-context>",
             );
             insideHostEstimate = deps.hostInputEstimate?.("s");
+            transformInput = [...output.messages];
             if (options.head !== false)
                 output.messages.unshift(
                     ...HEAD_IDS.map((id) => ({
@@ -118,7 +126,7 @@ async function fixture(
             get: async () => ({ location: { directory: dir } }),
         },
     } as unknown as V2Context;
-    const duties = await registerContext(host);
+    let duties = await registerContext(host);
     const checkpoint = {
         id: "cut",
         role: "user",
@@ -144,7 +152,7 @@ async function fixture(
         runningCut: 2,
         materialize: () => summary,
         ...(options.stored === undefined ? {} : { checkpointText: options.stored }),
-        ...(options.checkpointID === undefined ? {} : { checkpointID: options.checkpointID }),
+        checkpointID: options.checkpointID ?? "cut",
     });
     return {
         db,
@@ -157,6 +165,12 @@ async function fixture(
         },
         insideTransformHadRecent: () => insideTransformHadRecent,
         insideHostEstimate: () => insideHostEstimate,
+        transformInput: () => transformInput,
+        async restart() {
+            await duties.dispose();
+            hooks.clear();
+            duties = await registerContext(host);
+        },
         async close() {
             await duties.dispose();
             transform.mockRestore();
@@ -169,6 +183,76 @@ async function fixture(
         },
     };
 }
+
+test("native synthetic provenance is the same in a live window and after checkpoint restore", async () => {
+    const f = await fixture();
+    try {
+        f.source.exec(`INSERT INTO session_message VALUES
+            ('auto','s','synthetic',3,300,300,'{"text":"integration update"}'),
+            ('human','s','user',4,400,400,'{"text":"human question"}');`);
+        const auto = {
+            id: "auto",
+            role: "user",
+            content: [{ type: "text", text: "integration update" }],
+        };
+        const human = {
+            id: "human",
+            role: "user",
+            content: [{ type: "text", text: "human question" }],
+        };
+        const turnDecisions = () =>
+            ["auto", "human"].map((id) => {
+                const row = f.transformInput().find((message) => message.info.id === id)!;
+                return [
+                    isRealUserRequest(row),
+                    toolReclaimDistanceEntries([row], new Map())[0]?.userTurn,
+                ];
+            });
+        const live = f.draft();
+        live.messages.push(structuredClone(auto), structuredClone(human));
+        await f.hooks.get("context")!(live);
+        const liveDecisions = turnDecisions();
+        expect(live.messages.find((row) => row.id === "auto")).toEqual(auto);
+        expect(live.messages.find((row) => row.id === "human")).toEqual(human);
+
+        // Move the native rows behind the same local checkpoint; the host now
+        // leaves them out and the adapter rebuilds them from storage.
+        f.source.exec("UPDATE session_message SET seq = 5 WHERE id = 'cut';");
+        const restored = f.draft();
+        await f.hooks.get("context")!(restored);
+        expect(restored.messages.find((row) => row.id === "auto")).toEqual(auto);
+        expect(turnDecisions()).toEqual([
+            [false, false],
+            [true, true],
+        ]);
+        expect(liveDecisions).toEqual(turnDecisions());
+    } finally {
+        await f.close();
+    }
+});
+
+test("hidden maintenance requests skip both replay anchoring and replay capture", async () => {
+    const f = await fixture();
+    const owns = spyOn(HiddenChildHook.prototype, "owns").mockReturnValue(true);
+    const apply = spyOn(HiddenChildHook.prototype, "apply").mockReturnValue(true);
+    const anchor = spyOn(generate, "generateReplayAnchor");
+    const capture = spyOn(generate.V2GenerateReplay.prototype, "capture");
+    try {
+        const draft = f.draft();
+        const bytes = JSON.stringify(draft);
+        await f.hooks.get("context")!(draft);
+        expect(apply).toHaveBeenCalledTimes(1);
+        expect(JSON.stringify(draft)).toBe(bytes);
+        expect(anchor).not.toHaveBeenCalled();
+        expect(capture).not.toHaveBeenCalled();
+    } finally {
+        capture.mockRestore();
+        anchor.mockRestore();
+        apply.mockRestore();
+        owns.mockRestore();
+        await f.close();
+    }
+});
 
 test("checkpoint strip uses this pass's final permission, persists once, and replays on defers", async () => {
     const f = await fixture();
@@ -232,11 +316,12 @@ test("compaction summary overrides the host keepID with an own undefined key", a
         const draft = f.draft();
         await f.hooks.get("compaction")!(draft);
         // The host stores the fixed note; Magic Context's own fold record keeps
-        // the history head the checkpoint stands for.
+        // the history head the checkpoint stands for. This request has no running
+        // checkpoint row, so the record the fixture bound to the stored
+        // checkpoint stays, and its head is the text it stored.
         expect(draft.result?.summary).toBe(CHECKPOINT_NOTE);
-        expect(((await f.storage.get("fold/v1/s")) as FoldIdentity).head).toContain(
-            "session-history",
-        );
+        const owned = (await f.storage.get("fold/v1/s")) as FoldIdentity;
+        expect(owned.head ?? owned.submitted).toContain("session-history");
         expect(Object.hasOwn(draft.result?.metadata ?? {}, "keepID")).toBe(true);
         expect({ keepID: "host-default", ...draft.result?.metadata }.keepID).toBeUndefined();
         expect(JSON.parse(JSON.stringify(draft.result)).metadata).toEqual({});
@@ -268,6 +353,87 @@ test("a checkpoint that stores the note is served and measured with the head its
         expect(note.messages).not.toContain("Magic Context added a compaction marker");
         expect(note.messages).toBe(before.messages);
         expect(note.estimate).toEqual(before.estimate);
+    }
+});
+
+test("a new legacy checkpoint cannot inherit a reverted checkpoint's head at the same sequence", async () => {
+    const logs = spyOn(logger, "sessionLog");
+    const f = await fixture({ stored: CHECKPOINT_NOTE, head: false, checkpointID: "cut" });
+    try {
+        const earlier = f.draft();
+        await f.hooks.get("context")!(earlier);
+        const oldHead = "<session-history>summary</session-history>";
+        expect(JSON.stringify(earlier.messages)).toContain(oldHead);
+        expect(((await f.storage.get("fold/v1/s")) as FoldIdentity).rendered?.id).toBe("cut");
+
+        f.source.exec(`DELETE FROM session_message WHERE id = 'cut';
+            INSERT INTO session_message VALUES ('replacement','s','compaction',2,300,300,
+                '{"status":"running","reason":"auto","mode":"local"}');`);
+        const compaction = f.draft();
+        compaction.messages = [
+            { id: "u1", role: "user", content: [{ type: "text", text: "unarchived source" }] },
+        ];
+        await f.hooks.get("compaction")!(compaction);
+        expect(compaction.result?.summary).toBe(CHECKPOINT_NOTE);
+        f.source
+            .prepare("UPDATE session_message SET data = ? WHERE id = 'replacement'")
+            .run(JSON.stringify({ status: "completed", summary: CHECKPOINT_NOTE, mode: "local" }));
+
+        const pass = async () => {
+            const outgoing = f.draft();
+            outgoing.messages[0]!.id = "replacement";
+            await f.hooks.get("context")!(outgoing);
+            return JSON.stringify(outgoing.messages);
+        };
+        const recovered = await pass();
+        expect(recovered).not.toContain(oldHead);
+        expect(recovered).not.toContain("<conversation-checkpoint>");
+        expect(recovered).toContain("unarchived source");
+        expect(await pass()).toBe(recovered);
+        await f.restart();
+        expect(await pass()).toBe(recovered);
+        const lines = logs.mock.calls.map((args) => args.map(String).join(" "));
+        expect(lines.filter((line) => line.includes("HARD reason=boot_recovery"))).toHaveLength(1);
+    } finally {
+        logs.mockRestore();
+        await f.close();
+    }
+});
+
+test("upgrading after the released owner served a reverted head recovers on the next context pass", async () => {
+    const f = await fixture({ stored: CHECKPOINT_NOTE, head: false });
+    const logs = spyOn(logger, "sessionLog");
+    try {
+        await f.storage.set("fold/v1/s", released.a);
+        const first = f.draft();
+        await f.hooks.get("context")!(first);
+        expect(JSON.stringify(first.messages)).toContain(released.a.head);
+
+        f.source.exec("DELETE FROM session_message WHERE id = 'cut'");
+        f.source
+            .prepare(
+                "INSERT INTO session_message VALUES ('replacement','s','compaction',2,300,300,?)",
+            )
+            .run(JSON.stringify({ status: "completed", summary: CHECKPOINT_NOTE, mode: "local" }));
+        // The released owner already answered and observed the replacement.
+        await f.storage.set("fold/v1/s", released.rebound);
+        await f.restart();
+        const pass = async () => {
+            const draft = f.draft();
+            draft.messages = [structuredClone(released.rebound.rendered)];
+            await f.hooks.get("context")!(draft);
+            return JSON.stringify(draft.messages);
+        };
+        const recovered = await pass();
+        expect(recovered).not.toContain(released.a.head);
+        expect(recovered).toContain("unarchived source");
+        expect(await pass()).toBe(recovered);
+        expect(
+            logs.mock.calls.filter((args) => args[1] === "HARD reason=boot_recovery"),
+        ).toHaveLength(1);
+    } finally {
+        logs.mockRestore();
+        await f.close();
     }
 });
 
@@ -345,13 +511,10 @@ test("a note checkpoint whose rebuilt record has no head serves restored history
     }
 });
 
-test("a note checkpoint the rebuilt record answered keeps serving the recorded head", async () => {
-    // The fold record answered this checkpoint row too (a revert let it reuse the
-    // sequence number of the checkpoint it was served for), so its head carries over.
+test("a note checkpoint keeps serving the head recorded for its own row", async () => {
     for (const head of [true, false]) {
         const f = await fixture({ stored: CHECKPOINT_NOTE, head, checkpointID: "cut" });
         try {
-            await rebindToRevertedCheckpoint(f);
             const first = f.draft();
             await f.hooks.get("context")!(first);
             const served = JSON.stringify(first.messages);

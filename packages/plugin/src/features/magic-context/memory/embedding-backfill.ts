@@ -5,6 +5,8 @@ import {
     contentSha256,
     embedItemsWindowBounded,
     getProjectEmbeddingSnapshot,
+    readSearchBackfillCursor,
+    writeSearchBackfillCursor,
 } from "../project-embedding-registry";
 import {
     type StoredMemoryEmbedding,
@@ -20,20 +22,33 @@ export async function ensureMemoryEmbeddings(args: {
     projectIdentity: string;
     memories: Memory[];
     existingEmbeddings: Map<number, StoredMemoryEmbedding>;
+    expectedEmbedding?: { modelId: string; generation?: number };
 }): Promise<Map<number, StoredMemoryEmbedding>> {
     if (isEmbeddingHostBusy()) return args.existingEmbeddings;
     const snapshot = getProjectEmbeddingSnapshot(args.projectIdentity);
-    if (!snapshot?.enabled) {
+    const expected = args.expectedEmbedding;
+    // The cache belongs to the query's model, which may no longer be active.
+    if (
+        !snapshot?.enabled ||
+        (expected &&
+            (snapshot.modelId !== expected.modelId ||
+                (expected.generation !== undefined && snapshot.generation !== expected.generation)))
+    ) {
         return args.existingEmbeddings;
     }
 
-    // Candidates arrive in whatever order the caller loaded them, and the
-    // background embedding job's query has no order either. Choosing by memory
-    // ID makes the search budget pick the same rows every time.
-    const missingMemories = args.memories
+    const missing = args.memories
         .filter((memory) => !args.existingEmbeddings.has(memory.id))
-        .sort((a, b) => a.id - b.id)
-        .slice(0, SEARCH_BACKFILL_LIMIT);
+        .sort((a, b) => a.id - b.id);
+    // Start in ID order. After a capped batch with missing vectors, give the
+    // untried rows a turn before retrying the older misses.
+    const capped = missing.length > SEARCH_BACKFILL_LIMIT;
+    const cursor = capped
+        ? readSearchBackfillCursor(args.projectIdentity, snapshot.generation)
+        : undefined;
+    const next = cursor === undefined ? 0 : missing.findIndex((memory) => memory.id > cursor);
+    const start = Math.max(0, next);
+    const missingMemories = missing.slice(start, start + SEARCH_BACKFILL_LIMIT);
     if (missingMemories.length === 0) {
         return args.existingEmbeddings;
     }
@@ -51,7 +66,13 @@ export async function ensureMemoryEmbeddings(args: {
             args.projectIdentity,
             { maxItemsPerCall: SEARCH_BACKFILL_REQUEST_SIZE },
         );
-        if (!result) {
+        const currentSnapshot = getProjectEmbeddingSnapshot(args.projectIdentity);
+        if (
+            !result ||
+            result.modelId !== snapshot.modelId ||
+            result.generation !== snapshot.generation ||
+            currentSnapshot?.generation !== snapshot.generation
+        ) {
             return args.existingEmbeddings;
         }
 
@@ -87,9 +108,17 @@ export async function ensureMemoryEmbeddings(args: {
             })
             .immediate();
 
-        const currentSnapshot = getProjectEmbeddingSnapshot(args.projectIdentity);
-        if (!currentSnapshot || currentSnapshot.generation !== result.generation) {
-            return args.existingEmbeddings;
+        if (capped && (cursor !== undefined || result.vectors.size < missingMemories.length)) {
+            const nextCursor =
+                start + missingMemories.length < missing.length
+                    ? missingMemories.at(-1)?.id
+                    : undefined;
+            writeSearchBackfillCursor(
+                args.projectIdentity,
+                snapshot.generation,
+                cursor,
+                nextCursor,
+            );
         }
 
         // Transaction committed — safe to merge into caller's cache

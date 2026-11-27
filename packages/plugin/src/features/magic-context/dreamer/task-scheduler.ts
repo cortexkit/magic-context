@@ -91,6 +91,16 @@ export interface TaskExecutorContext {
     holderId: string;
     leaseKey: string;
     leaseAcquisition?: LeaseAcquisition;
+    /** Capture the latest timestamp reached by the scan, before the schedule update. */
+    onRetrospectiveScan?: (scan: RetrospectiveScanDiagnostic) => void;
+}
+
+interface RetrospectiveScanDiagnostic {
+    watermarkMs: number;
+    maxScannedTs: number;
+    usableInputTokens: number;
+    recencyCutoffMs: number;
+    budgetTruncated: boolean;
 }
 
 export type TaskExecutor = (
@@ -476,6 +486,7 @@ async function runDomainGroup(
             }
 
             let outcome: TaskExecOutcome;
+            const diagnostics: { retrospectiveScan?: RetrospectiveScanDiagnostic } = {};
             const startedAt = Date.now();
             try {
                 outcome = await executor(due.config, {
@@ -484,6 +495,13 @@ async function runDomainGroup(
                     holderId,
                     leaseKey,
                     leaseAcquisition: acquisition,
+                    ...(due.config.task === "retrospective"
+                        ? {
+                              onRetrospectiveScan: (scan) => {
+                                  diagnostics.retrospectiveScan = scan;
+                              },
+                          }
+                        : {}),
                 });
             } catch (error) {
                 outcome = { status: "failed", transient: true, error: String(error) };
@@ -511,6 +529,14 @@ async function runDomainGroup(
                     outcome.schedulePatch,
                     startedAt,
                 );
+                const scan = diagnostics.retrospectiveScan;
+                if (scan) {
+                    const stored = readRetrospectiveWatermark(db, projectIdentity, due.config.task);
+                    log(
+                        `[dreamer] retrospective: watermark start=${scan.watermarkMs} maxScannedTs=${scan.maxScannedTs} patch=${outcome.schedulePatch?.retrospectiveWatermarkMs ?? "none"} stored=${stored ?? "none"} usableInputTokens=${scan.usableInputTokens} recencyCutoffMs=${scan.recencyCutoffMs} budgetTruncated=${scan.budgetTruncated}`,
+                        { projectIdentity },
+                    );
+                }
                 cb?.onRan?.(due.config.task, outcome.detail, outcome.backlog);
             } else if (outcome.transient) {
                 recordTransientFailure(

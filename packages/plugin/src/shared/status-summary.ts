@@ -37,6 +37,7 @@ export interface UserStatusSummary {
     dreamerRunner?: RunnerStatus;
     warnings: UserFacingFailureKey[];
     hiddenVariantWarnings?: string[];
+    projectBindingWarning?: string;
     dreamerSkipped?: readonly string[];
     dreamerQuotas?: readonly string[];
     hiddenModelSkips?: readonly string[];
@@ -50,6 +51,7 @@ export interface UserStatusSummary {
 export interface StatusWarningInput {
     readonly lastTransformError?: string | null;
     readonly historianFailureCount?: number;
+    readonly forkHistoryGap?: boolean;
     readonly configParseFailures?: readonly unknown[];
     readonly embedding?: { readonly state: string };
     readonly loggerDiagnostics?: { readonly swallowedWriteCount?: number };
@@ -65,7 +67,8 @@ export interface StatusWarningInput {
 export function statusWarningsFromDetail(detail: StatusWarningInput): UserFacingFailureKey[] {
     const warnings: UserFacingFailureKey[] = [];
     if (detail.lastTransformError) warnings.push("transform_update_failed");
-    if ((detail.historianFailureCount ?? 0) > 0) warnings.push("historian_unavailable");
+    if (detail.forkHistoryGap) warnings.push("fork_history_gap");
+    else if ((detail.historianFailureCount ?? 0) > 0) warnings.push("historian_unavailable");
     if ((detail.configParseFailures?.length ?? 0) > 0) warnings.push("configuration_warning");
     if (detail.embedding?.state === "stopped") warnings.push("embedding_unavailable");
     if ((detail.loggerDiagnostics?.swallowedWriteCount ?? 0) > 0) {
@@ -131,6 +134,7 @@ export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary
         compactionMarker: detail.compactionMarker,
         warnings: statusWarningsFromDetail(detail),
         hiddenVariantWarnings: detail.hiddenVariantWarnings ?? [],
+        projectBindingWarning: detail.projectBindingWarning,
         dreamerSkipped: detail.dreamerSkipped,
         hiddenModelSkips: detail.hiddenModelSkips,
         dreamerQuotas: [
@@ -257,6 +261,10 @@ export function renderUserStatusSummary(
             : ["Magic Context Status", ...values.map(([label, value]) => `${label}: ${value}`)];
     for (const warning of summary.hiddenVariantWarnings ?? []) {
         lines.push(style === "markdown" ? `- **Warning:** ${warning}` : `Warning: ${warning}`);
+    }
+    if (summary.projectBindingWarning) {
+        const label = style === "markdown" ? "- **Warning:**" : "Warning:";
+        lines.push(`${label} ${summary.projectBindingWarning}`);
     }
     for (const warning of summary.warnings) {
         lines.push(

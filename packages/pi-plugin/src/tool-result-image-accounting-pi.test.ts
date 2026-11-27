@@ -2,6 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { getProtectionWindowForSession } from "@magic-context/core/features/magic-context/protection-window";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
+import type { MessageLike } from "@magic-context/core/hooks/magic-context/tag-messages";
+import { toolReclaimDistanceEntries } from "@magic-context/core/hooks/magic-context/tool-reclaim";
 import type { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
@@ -9,9 +11,10 @@ import { piToolImageCostTokens } from "./pi-overflow-recovery";
 import { estimatePiOutgoingInputTokens } from "./pi-raw-fallback";
 import {
 	PI_NON_VISION_TOOL_IMAGE_PLACEHOLDER,
+	PI_NON_VISION_USER_IMAGE_PLACEHOLDER,
+	piImageWireTokens,
 	piMessagesWithWireImages,
 	piModelAcceptsImages,
-	piToolImageWireTokens,
 	STRIPPED_IMAGE_MARKER,
 } from "./strip-processed-images-pi";
 import { assistantToolCall, createTestDb } from "./test-utils.test";
@@ -20,6 +23,32 @@ import { createPiTranscript } from "./transcript-pi";
 
 // A generated image as Pi carries it: several hundred kilobytes of base64.
 const IMAGE_DATA = "iVBORw0KGgo".repeat(60_000);
+
+it.each([
+	[true, true, STRIPPED_IMAGE_MARKER],
+	[false, false, PI_NON_VISION_USER_IMAGE_PLACEHOLDER],
+])("prices user images for reclaim distance at wire cost (frozen=%s, vision=%s)", (stripped, modelAcceptsImages, expected) => {
+	const image = { type: "image", data: IMAGE_DATA, mimeType: "image/png" };
+	const raw = [{ role: "user", content: [image], timestamp: 1 }];
+	const before = JSON.stringify(raw);
+	const transcript = createPiTranscript(raw, "image-distance", ["user-image"], {
+		imageTokens: () =>
+			piImageWireTokens({
+				block: image,
+				role: "user",
+				stripped,
+				modelAcceptsImages,
+			}),
+	});
+	const distance = toolReclaimDistanceEntries(
+		transcript.messages as unknown as MessageLike[],
+		new Map(),
+	);
+	expect(distance.map((entry) => entry.tokens)).toEqual([
+		estimateTokens(expected),
+	]);
+	expect(JSON.stringify(transcript.getOutputMessages())).toBe(before);
+});
 
 function imageToolResult(
 	callId: string,
@@ -67,13 +96,13 @@ function tagPass(
 	makeMessages: () => unknown[],
 	entryIds: string[],
 	reuse: boolean,
-	toolImageTokens?: (messageIndex: number, partIndex: number) => number,
+	imageTokens?: (messageIndex: number, partIndex: number) => number,
 ) {
 	const transcript = createPiTranscript(
 		makeMessages() as never,
 		sessionId,
 		entryIds,
-		{ toolImageTokens },
+		{ imageTokens },
 	);
 	tagTranscript(sessionId, transcript, tagger, db, {
 		reuseMessageIds: reuse ? new Set(entryIds) : undefined,
@@ -229,7 +258,8 @@ describe("Pi tool-result images the request does not carry", () => {
 			tagger.initFromDb(sessionId, db);
 			let frozen = new Set<string>();
 			const wireTokens = (messageIndex: number, partIndex: number) =>
-				piToolImageWireTokens({
+				piImageWireTokens({
+					role: "toolResult",
 					block: blockAt(messageIndex, partIndex),
 					stripped: frozen.has(entryIds[messageIndex] ?? ""),
 					modelAcceptsImages: true,
@@ -265,7 +295,8 @@ describe("Pi tool-result images the request does not carry", () => {
 			const tagger = createTagger();
 			tagger.initFromDb(sessionId, db);
 			const textOnly = (messageIndex: number, partIndex: number) =>
-				piToolImageWireTokens({
+				piImageWireTokens({
+					role: "toolResult",
 					block: blockAt(messageIndex, partIndex),
 					stripped: false,
 					modelAcceptsImages: piModelAcceptsImages({ input: ["text"] }),

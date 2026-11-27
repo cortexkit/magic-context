@@ -93,6 +93,15 @@ function rowLabels(sectionTitle: string, overrides: Partial<StatusViewSource> = 
 }
 
 describe("status view model", () => {
+    test("shows the previous-project memory warning with its pasteable command", () => {
+        const text =
+            "2 memories stayed under this session's previous project. Nothing was moved.\nReview the merge first:\nnpx @cortexkit/magic-context@latest doctor merge-identities --from dir:old --to git:new\nIt shows what would move. Add --apply to move them.";
+        expect(view({ projectBindingWarning: text }).warnings).toContainEqual({
+            text,
+            tone: "warning",
+        });
+        expect(view().warnings).toEqual([]);
+    });
     test("shows dropped hidden-run variants as warnings", () => {
         expect(
             view({ hiddenVariantWarnings: ["variant 'medium' not offered by example/model"] })

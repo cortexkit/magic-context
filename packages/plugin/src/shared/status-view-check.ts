@@ -336,6 +336,7 @@ export function checkStatusViewSource(candidate: unknown):
         // dropped rather than rendered as a crash.
         warnings: optional.readArray("warnings", isUserFacingFailureKey),
         hiddenVariantWarnings: optional.readArray("hiddenVariantWarnings", isString),
+        projectBindingWarning: optional.read("projectBindingWarning", isString),
         unconfirmedMigrationHolders: optional.read(
             "unconfirmedMigrationHolders",
             isUnconfirmedMigrationHolders,
@@ -394,6 +395,7 @@ function warningInputFrom(raw: Fields, optional: OptionalFields): StatusWarningI
     return {
         lastTransformError: optional.read("lastTransformError", isNullableString) ?? null,
         historianFailureCount: optional.read("historianFailureCount", isNumber),
+        forkHistoryGap: raw.forkHistoryGap === true,
         configParseFailures: optional.readArray("configParseFailures", isConfigParseFailure),
         embedding:
             isRecord(raw.embedding) && isString(raw.embedding.state)

@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolatedTestGitEnv } from "../../../shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import {
     __resetVerificationPathsForTests,
@@ -15,6 +16,7 @@ test("normalizing fifty exact tracked files uses one repository lookup and one t
     const git = (...args: string[]) =>
         execFileSync("git", args, {
             cwd: dir,
+            env: isolatedTestGitEnv(),
             encoding: "utf8",
             timeout: 10000,
             windowsHide: true,
@@ -31,6 +33,7 @@ test("normalizing fifty exact tracked files uses one repository lookup and one t
                 return {
                     stdout: execFileSync(binary, args, {
                         cwd: options.cwd,
+                        env: isolatedTestGitEnv(),
                         encoding: "utf8",
                         timeout: 10000,
                         windowsHide: true,

@@ -86,6 +86,20 @@ export interface CoordinateRebaseNotice {
      * of sessions stamped by an older build from running again.
      */
     neighbourRecoveryAt: number | null;
+    /**
+     * Set only on a fork. Summaries must normally follow each other without a
+     * gap. A session converted from OpenCode 1 is allowed gaps, because the
+     * conversion renumbered its messages; this notice is what records that
+     * conversion. A fork was never converted itself, so it lists the gaps it
+     * copied from such a parent, and only those are allowed. An empty list
+     * allows none.
+     */
+    inheritedGaps?: InheritedCoordinateGap[];
+}
+
+export interface InheritedCoordinateGap {
+    start: number;
+    end: number;
 }
 
 /** One compartment named in the rebase notice: its sequence and message range. */
@@ -207,6 +221,22 @@ export function readCoordinateRebaseNotice(
                 : [];
         return {
             generation: record.generation,
+            ...(Object.hasOwn(record, "inheritedGaps")
+                ? {
+                      inheritedGaps: Array.isArray(record.inheritedGaps)
+                          ? record.inheritedGaps.flatMap((gap) =>
+                                gap &&
+                                typeof gap === "object" &&
+                                Number.isSafeInteger(gap.start) &&
+                                Number.isSafeInteger(gap.end) &&
+                                gap.start >= 1 &&
+                                gap.end >= gap.start
+                                    ? [{ start: gap.start as number, end: gap.end as number }]
+                                    : [],
+                            )
+                          : [],
+                  }
+                : {}),
             previousGeneration:
                 record.previousGeneration === "v1" || record.previousGeneration === "v2"
                     ? record.previousGeneration
@@ -1245,8 +1275,11 @@ export function recoverUnresolvedCompartments(
             const derivedSequences = new Set(result.derived.map((note) => note.sequence));
             const notice: CoordinateRebaseNotice = {
                 generation,
+                ...(previous?.inheritedGaps !== undefined
+                    ? { inheritedGaps: previous.inheritedGaps }
+                    : {}),
                 previousGeneration: previous?.previousGeneration ?? null,
-                at: previous?.at ?? now,
+                at: previous?.at || now,
                 unresolvedCompartments: result.unresolved.length,
                 discardedReductions: previous?.discardedReductions ?? 0,
                 droppedDepthRows: previous?.droppedDepthRows ?? 0,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
     Database,
@@ -113,11 +113,24 @@ describe("SQLite runtime selector", () => {
         );
         const path = join(directory, "context.db");
         try {
-            const writer = new Database(path);
-            writer.exec(
-                "PRAGMA journal_mode=WAL; CREATE TABLE sample (value INTEGER); INSERT INTO sample VALUES (42); PRAGMA wal_checkpoint(TRUNCATE)",
-            );
-            writer.close();
+            const source = join(directory, "writer.db");
+            const writer = new Database(source);
+            try {
+                expect(writer.prepare("PRAGMA journal_mode=WAL").get()).toEqual({
+                    journal_mode: "wal",
+                });
+                writer.exec("CREATE TABLE sample (value INTEGER); INSERT INTO sample VALUES (42)");
+                expect(writer.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get()).toEqual({
+                    busy: 0,
+                    log: 0,
+                    checkpointed: 0,
+                });
+            } finally {
+                writer.close();
+            }
+            // Apple's SQLite may keep the sidecars after close. Copy only the
+            // fully checkpointed main file, which is still in WAL mode.
+            copyFileSync(source, path);
             expect(existsSync(`${path}-wal`)).toBe(false);
             expect(existsSync(`${path}-shm`)).toBe(false);
 

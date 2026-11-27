@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -9,6 +10,7 @@ import type { HiddenCompletionExecutor } from "../../../hooks/magic-context/comp
 import * as logger from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { isolatedTestGitEnv } from "../../../shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { insertMemory } from "../memory";
 import {
@@ -31,6 +33,7 @@ import {
     shouldRequeueIndependentMapping,
     validateClientMapMemories,
 } from "./map-memories";
+import { getDreamState, setDreamState } from "./storage-dream-state";
 import { DreamTokenBudgetExceeded, TOKEN_BUDGET_FINALIZE_MESSAGE } from "./token-budget";
 
 const tempDirs: string[] = [];
@@ -162,6 +165,7 @@ function timedMapExecutor(
     advanceClock: (elapsedMs: number) => void,
     durationFor: (ids: number[]) => number,
     partialFor: (ids: number[]) => number[] = () => [],
+    completedFor: (ids: number[]) => number[] = (ids) => ids,
 ) {
     const calls: Array<{ ids: number[]; sliceMs: number }> = [];
     let sliceMs = 0;
@@ -178,7 +182,7 @@ function timedMapExecutor(
             calls.push({ ids, sliceMs });
             const durationMs = durationFor(ids);
             const timedOut = durationMs > sliceMs;
-            const committedIds = timedOut ? partialFor(ids) : ids;
+            const committedIds = timedOut ? partialFor(ids) : completedFor(ids);
             text = `<mappings>${committedIds.map((id) => `<memory id="${id}" independent="true"/>`).join("")}${timedOut ? "" : "</mappings>"}`;
             let elapsedMs = Math.min(durationMs, sliceMs);
             // Simulate the heartbeat that would renew the lease during real work.
@@ -201,6 +205,134 @@ function timedMapExecutor(
 }
 
 describe("mapMemories disposition", () => {
+    test("a child-start failure does not count or postpone an eligible mapping retry", async () => {
+        const db = freshDb();
+        try {
+            const projectIdentity = "git:map-start-failure-retry";
+            const dir = tempProject();
+            const memory = insertMemory(db, {
+                projectPath: projectIdentity,
+                category: "ARCHITECTURE",
+                content: "Mapping awaits a working transport.",
+            });
+            const key = `map-memories:retry:${projectIdentity}`;
+            const prior = {
+                [memory.id]: {
+                    content: createHash("sha256")
+                        .update(`ARCHITECTURE\n${memory.content}`)
+                        .digest("hex"),
+                    failures: 3,
+                    deferUntil: Date.now() - 1,
+                },
+            };
+            setDreamState(db, key, JSON.stringify(prior));
+            const args = mapArgs(db, dir, projectIdentity);
+            args.client = {
+                session: {
+                    create: async () => {
+                        throw new Error("transport offline");
+                    },
+                },
+            } as never;
+
+            expect(await mapMemories(args)).toMatchObject({
+                complete: false,
+                failureStage: "child-start",
+            });
+            expect(JSON.parse(getDreamState(db, key) ?? "null")).toEqual(prior);
+            expect(selectMapMemoryInputs(db, projectIdentity, dir).map(({ id }) => id)).toEqual([
+                memory.id,
+            ]);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("a timeout split and its repeated omissions count only one mapper failure per memory", async () => {
+        const db = freshDb();
+        let now = Date.now();
+        const clock = spyOn(Date, "now").mockImplementation(() => now);
+        try {
+            const projectIdentity = "git:map-split-retry-count";
+            const dir = tempProject();
+            for (let index = 0; index < 6; index += 1) {
+                insertMemory(db, {
+                    projectPath: projectIdentity,
+                    category: "ARCHITECTURE",
+                    content: `Split mapping fact ${index}.`,
+                });
+            }
+            const missing = selectMapMemoryInputs(db, projectIdentity, dir)[0]!.id;
+            const args = mapArgs(db, dir, projectIdentity);
+            args.deadline = now + 7 * MAP_BATCH_FLOOR_MS;
+            const mapper = timedMapExecutor(
+                args,
+                (ms) => (now += ms),
+                (ids) => (ids.length === 5 ? args.deadline - now + 1 : 1),
+                () => [],
+                (ids) => ids.filter((id) => id !== missing),
+            );
+            args.hiddenCompletionExecutor = mapper.executor;
+
+            await mapMemories(args);
+            expect(mapper.calls[0]?.ids).toHaveLength(5);
+            expect(mapper.calls[1]?.ids).toContain(missing);
+            expect(
+                JSON.parse(getDreamState(db, `map-memories:retry:${projectIdentity}`) ?? "null"),
+            ).toMatchObject({ [missing]: { failures: 1, deferUntil: 0 } });
+            expect(mapper.calls.at(-1)?.ids).toEqual([missing]);
+        } finally {
+            clock.mockRestore();
+            closeQuietly(db);
+        }
+    });
+
+    test("repeated mapper omissions wait seven days at most and a later mapping clears the retry", async () => {
+        const db = freshDb();
+        let now = Date.now();
+        const clock = spyOn(Date, "now").mockImplementation(() => now);
+        try {
+            const projectIdentity = "git:map-seven-day-retry";
+            const dir = tempProject();
+            const memory = insertMemory(db, {
+                projectPath: projectIdentity,
+                category: "ARCHITECTURE",
+                content: "A mapping that repeatedly returns no decision.",
+            });
+            const key = `map-memories:retry:${projectIdentity}`;
+            setDreamState(
+                db,
+                key,
+                JSON.stringify({
+                    [memory.id]: {
+                        content: createHash("sha256")
+                            .update(`ARCHITECTURE\n${memory.content}`)
+                            .digest("hex"),
+                        failures: 20,
+                        deferUntil: now - 1,
+                    },
+                }),
+            );
+            const args = mapArgs(db, dir, projectIdentity);
+            args.client = scriptedMapClient(() => "<mappings></mappings>").client as never;
+            await mapMemories(args);
+            const dueAt = now + 7 * 24 * 3_600_000;
+            expect(JSON.parse(getDreamState(db, key) ?? "null")).toMatchObject({
+                [memory.id]: { failures: 21, deferUntil: dueAt },
+            });
+            now = dueAt - 1;
+            expect(selectMapMemoryInputs(db, projectIdentity, dir)).toEqual([]);
+            now = dueAt;
+            const next = mapArgs(db, dir, projectIdentity);
+            next.client = successfulMapClient() as never;
+            expect(await mapMemories(next)).toMatchObject({ independent: 1, complete: true });
+            expect(JSON.parse(getDreamState(db, key) ?? "null")).toEqual({});
+        } finally {
+            clock.mockRestore();
+            closeQuietly(db);
+        }
+    });
+
     test("banks a completed batch and reports the deadline remainder", async () => {
         const db = freshDb();
         try {
@@ -458,7 +590,7 @@ describe("mapMemories disposition", () => {
         }
     });
 
-    test("two consecutive singleton timeouts trip the breaker and defer the failed memories", async () => {
+    test("two consecutive singleton timeouts stop the run without deferring the memories", async () => {
         const db = freshDb();
         try {
             const projectIdentity = "git:map-timeout-breaker";
@@ -498,7 +630,7 @@ describe("mapMemories disposition", () => {
             const selectable = selectMapMemoryInputs(db, projectIdentity, dir).map(
                 (memory) => memory.id,
             );
-            expect(selectable).toEqual(initialIds.slice(2));
+            expect(selectable).toEqual(initialIds);
             expect(selectMapMemoryInputs(db, projectIdentity, dir, true)).toHaveLength(61);
         } finally {
             closeQuietly(db);
@@ -693,7 +825,7 @@ describe("mapMemories disposition", () => {
         }
     });
 
-    test("defers an id omitted twice and resumes after backoff", async () => {
+    test("retries only the omitted id and lets a later run resume it after one counted miss", async () => {
         const db = freshDb();
         try {
             const projectIdentity = "git:map-omission-resume";
@@ -724,8 +856,7 @@ describe("mapMemories disposition", () => {
             if (!initialPrompt || !retryPrompt) throw new Error("missing prompt fixture");
             expect(initialPrompt).toHaveLength(2);
             expect([...initialPrompt].sort((a, b) => a - b)).toEqual([first.id, second.id]);
-            // Only the unreturned id is retried. After two omissions it waits
-            // for backoff rather than immediately blocking the next scheduled run.
+            // Only the unreturned id is retried. Two omissions in one run count as one miss.
             expect(retryPrompt).toEqual([second.id]);
             expect(firstResult).toEqual({
                 mapped: 0,
@@ -736,10 +867,14 @@ describe("mapMemories disposition", () => {
             });
             expect(
                 selectMapMemoryInputs(db, projectIdentity, dir).map((memory) => memory.id),
-            ).toEqual([]);
+            ).toEqual([second.id]);
             expect(
                 selectMapMemoryInputs(db, projectIdentity, dir, true).map((memory) => memory.id),
             ).toEqual([second.id]);
+            const key = `map-memories:retry:${projectIdentity}`;
+            expect(JSON.parse(getDreamState(db, key) ?? "null")).toMatchObject({
+                [second.id]: { failures: 1, deferUntil: 0 },
+            });
 
             const resumed = mapArgs(db, dir, projectIdentity);
             const complete = scriptedMapClient(
@@ -748,15 +883,7 @@ describe("mapMemories disposition", () => {
             );
             resumed.client = complete.client as never;
 
-            const realNow = Date.now;
-            Date.now = () => realNow() + 3_600_001;
-            resumed.deadline = Date.now() + 300_000;
-            let resumedResult: Awaited<ReturnType<typeof mapMemories>>;
-            try {
-                resumedResult = await mapMemories(resumed);
-            } finally {
-                Date.now = realNow;
-            }
+            const resumedResult = await mapMemories(resumed);
 
             expect(complete.promptIds()).toEqual([[second.id]]);
             expect(resumedResult).toEqual({
@@ -766,6 +893,7 @@ describe("mapMemories disposition", () => {
                 remaining: 0,
                 complete: true,
             });
+            expect(JSON.parse(getDreamState(db, key) ?? "null")).toEqual({});
         } finally {
             closeQuietly(db);
         }
@@ -779,8 +907,16 @@ describe("mapMemories disposition", () => {
             // The host rejects both in-repo untracked paths and paths outside the
             // repository. The mixed manifest proves the fallback is all-rejected,
             // not a special case for only one rejection reason.
-            execFileSync("git", ["init", "-q"], { windowsHide: true, cwd: dir });
-            execFileSync("git", ["add", "src/fact.ts"], { windowsHide: true, cwd: dir });
+            execFileSync("git", ["init", "-q"], {
+                windowsHide: true,
+                cwd: dir,
+                env: isolatedTestGitEnv(),
+            });
+            execFileSync("git", ["add", "src/fact.ts"], {
+                windowsHide: true,
+                cwd: dir,
+                env: isolatedTestGitEnv(),
+            });
             writeFileSync(
                 path.join(dir, "src", "untracked.ts"),
                 "export const draft = true;",
@@ -948,6 +1084,8 @@ describe("mapMemories retry-time validation", () => {
                 getSubagentInvocations(db, "ses-parent").map((invocation) => invocation.status),
             ).toEqual(["completed", "completed"]);
             expect(getMemoryVerifications(db, memoryIds).size).toBe(0);
+            expect(selectMapMemoryInputs(db, projectIdentity, dir)).toHaveLength(5);
+            await mapMemories(args);
             expect(selectMapMemoryInputs(db, projectIdentity, dir)).toEqual([]);
             expect(
                 selectMapMemoryInputs(db, projectIdentity, dir, true)
@@ -1467,8 +1605,16 @@ describe("map-memories module applier", () => {
         try {
             const projectIdentity = "git:module-map-fallback";
             const dir = tempProject();
-            execFileSync("git", ["init", "-q"], { windowsHide: true, cwd: dir });
-            execFileSync("git", ["add", "src/fact.ts"], { windowsHide: true, cwd: dir });
+            execFileSync("git", ["init", "-q"], {
+                windowsHide: true,
+                cwd: dir,
+                env: isolatedTestGitEnv(),
+            });
+            execFileSync("git", ["add", "src/fact.ts"], {
+                windowsHide: true,
+                cwd: dir,
+                env: isolatedTestGitEnv(),
+            });
             writeFileSync(
                 path.join(dir, "src", "untracked.ts"),
                 "export const draft = true;",

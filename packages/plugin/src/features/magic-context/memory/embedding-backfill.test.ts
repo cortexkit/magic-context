@@ -13,9 +13,10 @@ import {
     getProjectEmbeddingSnapshot,
     registerProjectEmbedding,
 } from "../project-embedding-registry";
-import { unifiedSearch } from "../search";
+import { type UnifiedSearchStepTimings, unifiedSearch } from "../search";
 import { closeDatabase, openDatabase } from "../storage";
 import { ensureMemoryEmbeddings } from "./embedding-backfill";
+import { getProjectEmbeddings } from "./embedding-cache";
 import type { EmbeddingProvider, EmbeddingPurpose } from "./embedding-provider";
 import { insertMemory } from "./storage-memory";
 import { loadAllEmbeddings } from "./storage-memory-embeddings";
@@ -158,6 +159,55 @@ describe("ensureMemoryEmbeddings (read-path backfill)", () => {
         ).toBe(true);
     });
 
+    it("does not backfill into the query model's cache after a switch during history search", async () => {
+        const db = useTempDb();
+        const projectIdentity = "git:backfill-model-switch";
+        const requests = recordSearchBackfillRequests();
+        const [memory] = seedVectorlessMemories(db, projectIdentity, 1);
+        const register = (model: string) =>
+            registerProjectEmbedding(
+                db,
+                projectIdentity,
+                localConfig(model),
+                { memoryEnabled: true, gitCommitEnabled: false },
+                "/tmp/backfill-model-switch",
+            );
+        const modelA = register("model-a");
+        const stepTimings: UnifiedSearchStepTimings = {};
+        let modelB: ReturnType<typeof register> | undefined;
+
+        const results = await unifiedSearch(db, "ses-backfill", projectIdentity, "quasizymology", {
+            sources: ["memory", "message"],
+            explicitSearch: true,
+            countRetrievals: false,
+            measurementDisabled: true,
+            embedQuery: (text, signal) =>
+                embedTextForProject(projectIdentity, text, signal, "query"),
+            isEmbeddingRuntimeEnabled: () => true,
+            stepTimings,
+            onAutoSearchDiagnostics: () => {
+                // History vectors only load once the search has accepted the query vector.
+                if (stepTimings.chunkPool === "loaded" && !modelB) modelB = register("model-b");
+            },
+        });
+
+        expect(modelB).toBeDefined();
+        expect(modelB?.modelId).not.toBe(modelA.modelId);
+        expect({
+            requests,
+            scoredMemories: results.filter((result) => result.source === "memory").length,
+            cachedModel: getProjectEmbeddings(db, projectIdentity, modelA.modelId).get(memory.id)
+                ?.modelId,
+        }).toEqual({ requests: [], scoredMemories: 0, cachedModel: undefined });
+
+        const currentResults = await searchMemory(db, projectIdentity, "quasizymology");
+        expect(currentResults[0]).toMatchObject({
+            source: "memory",
+            memoryId: memory.id,
+            matchType: "semantic",
+        });
+    });
+
     it.each([
         "project",
         "workspace",
@@ -228,6 +278,55 @@ describe("ensureMemoryEmbeddings (read-path backfill)", () => {
             memoryId: target.id,
             matchType: "fts",
         });
+    });
+
+    it("semantic search reaches newer memories after a full batch of missing vectors", async () => {
+        const db = useTempDb();
+        const projectIdentity = "git:backfill-progress";
+        const older = seedVectorlessMemories(db, projectIdentity, 50);
+        const target = insertMemory(db, {
+            projectPath: projectIdentity,
+            category: "CONSTRAINTS",
+            content: "Packaging requires an explicit runtime version",
+        });
+        const requests: string[][] = [];
+        _setTestProviderFactoryForProject(
+            () =>
+                new (class extends FakeEmbeddingProvider {
+                    override async embedBatch(texts: string[]): Promise<(Float32Array | null)[]> {
+                        requests.push(texts);
+                        return texts.map((text) =>
+                            text === target.content ? new Float32Array([1, 0]) : null,
+                        );
+                    }
+                })("model-a"),
+        );
+        const { modelId } = registerProjectEmbedding(
+            db,
+            projectIdentity,
+            localConfig("model-a"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/own",
+        );
+
+        await searchMemory(db, projectIdentity, "quasizymology");
+        expect(requests.flat()).toEqual(older.map((memory) => memory.content));
+        requests.length = 0;
+
+        const results = await searchMemory(db, projectIdentity, "quasizymology");
+        expect(requests.flat()).toContain(target.content);
+        expect(requests.flat().length).toBeLessThanOrEqual(50);
+        expect(requests.every((batch) => batch.length <= 10)).toBe(true);
+        expect(loadAllEmbeddings(db, projectIdentity, modelId).has(target.id)).toBe(true);
+        expect(results[0]).toMatchObject({
+            source: "memory",
+            memoryId: target.id,
+            matchType: "semantic",
+        });
+
+        requests.length = 0;
+        await searchMemory(db, projectIdentity, "quasizymology");
+        expect(requests.flat()).toEqual(older.map((memory) => memory.content));
     });
 
     it("discards the stale vector, skips the cache, and leaves the row for the guarded drain when the memory is edited mid-flight", async () => {

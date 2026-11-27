@@ -1,6 +1,6 @@
 {
-  "generation": "eb6c3e5035703837e44727d59a04bb2f3f746b4d0585bd9eaed5f0378f9531ef",
-  "catalog_digest": "eb6c3e5035703837e44727d59a04bb2f3f746b4d0585bd9eaed5f0378f9531ef",
+  "generation": "357cb9447f94347ea3490578ad68071990ab242b85c129275a0d896a4e7591e3",
+  "catalog_digest": "357cb9447f94347ea3490578ad68071990ab242b85c129275a0d896a4e7591e3",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -88,7 +88,7 @@
       "capabilities": [
         "magic-context:memory.write/v1"
       ],
-      "description": "Durable facts about this project, shared with every agent on it and kept for the months this work lasts; active ones are already in <project-memory> as `#id: fact`. Write one standalone fact when it must not have to be found again — a rule, an architecture fact, a constraint, a config value, a naming convention — especially what cost you turns. A pending intention with evidence is ctx_note, not memory. write (content + category); update one id (content; category optional); archive one or more ids (reason optional); merge two or more ids (content); get 1–20 ids in any status.",
+      "description": "Durable facts about this project, shared with every agent and kept for the months this work lasts; active ones are already in <project-memory> as `#id: fact`. Write one standalone fact you must not have to find again — a rule, an architecture fact, a constraint, a config value, a naming convention — especially what cost you turns. A pending intention with evidence is ctx_note, not memory. write (content + category); update one id (content + category); archive one or more ids (reason optional); merge 2+ distinct same-category ids (content); get 1–20 ids in any status.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -106,7 +106,7 @@
           "content": {
             "type": "string",
             "maxLength": 65536,
-            "description": "One standalone fact (write, update, merge). Archive and get: empty string."
+            "description": "Send on every call: the fact (write, update, merge); empty string for archive/get."
           },
           "category": {
             "type": "string",
@@ -117,7 +117,7 @@
               "CONFIG_VALUES",
               "NAMING"
             ],
-            "description": "Kind of fact (write; on update/merge pass the current category to keep it). Archive and get ignore it."
+            "description": "Send on every call: kind for write; current category for update/merge; any category for archive/get (ignored)."
           },
           "ids": {
             "type": "array",
@@ -126,7 +126,7 @@
               "type": "integer",
               "minimum": 1
             },
-            "description": "Ids from <project-memory>: one for update, 1+ for archive, 2+ for merge, 1–20 for get. Write: empty list."
+            "description": "Send on every call: one id for update, 1+ for archive, 2+ distinct same-category ids for merge, 1–20 for get; write: empty list."
           },
           "reason": {
             "type": "string",
@@ -197,7 +197,7 @@
   "system_text": {
     "text": "## Magic Context\n\n`ctx_search` searches this project's archive — what earlier sessions said and decided, commits and notes; ask it before asking the user anything that may already be recorded, phrased as a question with the exact names in it. `ctx_memory` pins facts that stay true for the months this work lasts, for you and every agent on the project: what must not have to be found again, especially what cost you turns. They are not shown to you automatically; recall them with `ctx_search`. `ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note; \"take a note\" from the user always goes there.",
     "item_digest": "7ab356879bd31a5af7b0899ff5c41c2d85ea663f35ec05f032a94db23e934726",
-    "preflight_digest": "f427e20309a562a48858b9129cbe833006c315018957cd84cfab2d7ca57ab8d0",
+    "preflight_digest": "091cce754fd3bf4acee6d789b0bf866b745c6d6eb258d6ad3501c720c038a903",
     "tool_names": [
       "ctx_memory",
       "ctx_note",

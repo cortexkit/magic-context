@@ -215,6 +215,10 @@ fn write_config_atomic(
     // to the file it points at. Project configs never get here as symlinks:
     // they are untrusted repository content and the project validation
     // refuses a symlinked target.
+    // The backup copies get the name of the config path, not of the link
+    // target, so that a link that changes to a different file keeps one set
+    // of copies, which pruning keeps at its limit.
+    let logical_path = path;
     let path = if project_root.is_none() {
         resolve_symlinked_config(path)?
     } else {
@@ -224,8 +228,28 @@ fn write_config_atomic(
     let parent = path
         .parent()
         .ok_or_else(|| "Config path has no parent directory".to_string())?;
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
     ensure_private_config_directory(parent)
         .map_err(|e| format!("Failed to create directory: {e}"))?;
+    #[cfg(not(unix))]
+    let target_scope = config_target_lock_scope(path, parent)?;
+    #[cfg(not(unix))]
+    let target_mutex = in_process_target_lock(&target_scope);
+    #[cfg(not(unix))]
+    let _target_in_process = target_mutex
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let lock_start = std::time::Instant::now();
+    #[cfg(unix)]
+    let target_lock = lock_config_parent(parent, CONFIG_LOCK_WAIT);
+    #[cfg(not(unix))]
+    let target_lock = lock_named_config_mutex(&target_scope, CONFIG_LOCK_WAIT);
+    let _target_lock = target_lock
+        .map_err(|e| format!("Refusing to save config: cannot lock the config target: {e}"))?;
     // A user config always ends owner-only, including when replacing a formerly
     // permissive file. Project config retains its prior mode when one exists.
     #[cfg(unix)]
@@ -251,11 +275,29 @@ fn write_config_atomic(
             return Err(e);
         }
     }
+    let backup = match back_up_current_config(
+        path,
+        logical_path,
+        project_root,
+        CONFIG_LOCK_WAIT.saturating_sub(lock_start.elapsed()),
+    ) {
+        Ok(backup) => backup,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e);
+        }
+    };
 
     replace_with_temp(&temp_path, path).map_err(|e| {
         let _ = std::fs::remove_file(&temp_path);
         format!("Failed to replace config atomically: {e}")
-    })
+    })?;
+    if let Some(backup) = backup {
+        for copy in backup.obsolete {
+            let _ = std::fs::remove_file(copy);
+        }
+    }
+    Ok(())
 }
 
 /// The file a config path finally names, following any chain of symlinks.
@@ -279,6 +321,515 @@ fn resolve_symlinked_config(path: &Path) -> Result<PathBuf, String> {
         }
     }
     Err("Config path has too many levels of symlinks".to_string())
+}
+
+#[cfg(not(unix))]
+fn config_target_lock_scope(path: &Path, parent: &Path) -> Result<String, String> {
+    let target = path
+        .canonicalize()
+        .or_else(|error| {
+            if error.kind() != ErrorKind::NotFound {
+                return Err(error);
+            }
+            // The key must stay the same after the first save.
+            let name = path.file_name().ok_or(error)?;
+            parent.canonicalize().map(|parent| parent.join(name))
+        })
+        .map_err(|e| format!("Invalid config target for locking: {e}"))?;
+    Ok(config_lock_key(&target))
+}
+
+#[cfg(not(unix))]
+fn config_lock_key(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(path.to_string_lossy().to_lowercase().as_bytes());
+    format!("{digest:x}")
+}
+
+/// The longest time that a save waits for a different dashboard process to end
+/// its save of the same config.
+const CONFIG_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[cfg(unix)]
+fn backup_scope_lock_path(backup_dir: &Path, scope: &str) -> PathBuf {
+    backup_dir.join(format!(".{scope}.lock"))
+}
+
+#[cfg(not(unix))]
+fn in_process_target_lock(scope: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    Arc::clone(locks.entry(scope.to_string()).or_default())
+}
+
+#[cfg(unix)]
+type ConfigSaveLock = std::fs::File;
+
+fn lock_backup_scope(
+    backup_dir: &Path,
+    scope: &str,
+    wait: std::time::Duration,
+) -> Result<ConfigSaveLock, String> {
+    ensure_private_backup_directory(backup_dir).map_err(|e| {
+        format!(
+            "Refusing to save config: cannot use the backup folder {}: {e}",
+            backup_dir.display()
+        )
+    })?;
+    #[cfg(unix)]
+    let result = lock_backup_file(&backup_scope_lock_path(backup_dir, scope), wait);
+    #[cfg(not(unix))]
+    let result = backup_dir.canonicalize().and_then(|dir| {
+        let key = config_lock_key(&dir.join(scope));
+        lock_named_config_mutex(&format!("backup-{key}"), wait)
+    });
+    result.map_err(|e| {
+        format!(
+            "Refusing to save config: cannot lock the backup folder {}: {e}",
+            backup_dir.display()
+        )
+    })
+}
+
+#[cfg(unix)]
+fn lock_config_parent(parent: &Path, wait: std::time::Duration) -> std::io::Result<ConfigSaveLock> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Aliases open the same directory. Its lock survives config replacement
+    // and does not require a lock file in the project.
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .open(parent)?;
+    flock_config(directory, wait)
+}
+
+#[cfg(unix)]
+fn lock_backup_file(path: &Path, wait: std::time::Duration) -> std::io::Result<ConfigSaveLock> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    // O_NOFOLLOW: a symlink at the lock path must not open a different file.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o600)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::other("the lock path is not a regular file"));
+    }
+    if metadata.permissions().mode() & 0o777 != 0o600 {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    flock_config(file, wait)
+}
+
+#[cfg(unix)]
+fn flock_config(file: std::fs::File, wait: std::time::Duration) -> std::io::Result<ConfigSaveLock> {
+    use std::os::unix::io::AsRawFd;
+
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(file);
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(code) if code == libc::EWOULDBLOCK => {}
+            _ => return Err(error),
+        }
+        #[cfg(test)]
+        tests::report_config_lock_contention();
+        if std::time::Instant::now() >= deadline {
+            return Err(config_lock_timeout());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn config_lock_timeout() -> std::io::Error {
+    std::io::Error::new(
+        ErrorKind::TimedOut,
+        "a different save of this config did not end in time",
+    )
+}
+
+#[cfg(windows)]
+struct ConfigSaveLock(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for ConfigSaveLock {
+    fn drop(&mut self) {
+        use windows_sys::Win32::{Foundation::CloseHandle, System::Threading::ReleaseMutex};
+
+        // SAFETY: This guard owns the acquired handle and cannot move to another thread.
+        unsafe {
+            ReleaseMutex(self.0);
+            CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn lock_named_config_mutex(
+    scope: &str,
+    wait: std::time::Duration,
+) -> std::io::Result<ConfigSaveLock> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::{CreateMutexW, WaitForSingleObject},
+    };
+
+    let name: Vec<u16> = format!("Local\\magic-context-config-{scope}\0")
+        .encode_utf16()
+        .collect();
+    // SAFETY: The name is null-terminated and the security attributes are optional.
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    if handle.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let wait_ms = wait.as_millis().min(u128::from(u32::MAX - 1)) as u32;
+    // SAFETY: The handle stays valid until this function or the guard closes it.
+    let error = match unsafe { WaitForSingleObject(handle, wait_ms) } {
+        WAIT_OBJECT_0 | WAIT_ABANDONED => return Ok(ConfigSaveLock(handle)),
+        WAIT_TIMEOUT => config_lock_timeout(),
+        _ => std::io::Error::last_os_error(),
+    };
+    unsafe { CloseHandle(handle) };
+    Err(error)
+}
+
+#[cfg(not(any(unix, windows)))]
+type ConfigSaveLock = ();
+
+#[cfg(not(any(unix, windows)))]
+fn lock_named_config_mutex(
+    _scope: &str,
+    _wait: std::time::Duration,
+) -> std::io::Result<ConfigSaveLock> {
+    Ok(())
+}
+
+/// Number of copies kept for each config in the backup folder.
+const CONFIG_BACKUP_LIMIT: usize = 5;
+
+/// The folder for config copies: `config-backups` in the Magic Context store.
+/// This function uses the same rule as the plugin to find the store
+/// (`getMagicContextStorageResolution` in `packages/plugin/src/shared/data-path.ts`):
+/// `MAGIC_CONTEXT_STORAGE_DIR`, then `XDG_DATA_HOME`, then `~/.local/share`,
+/// on all platforms. Thus the copies stay out of the config folder, which must
+/// not get more files, and out of project repositories.
+fn config_backup_dir() -> Result<PathBuf, String> {
+    let non_empty = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let store = if let Some(explicit) = non_empty("MAGIC_CONTEXT_STORAGE_DIR") {
+        let explicit = PathBuf::from(explicit);
+        if !explicit.is_absolute() {
+            return Err(
+                "Refusing to save config: MAGIC_CONTEXT_STORAGE_DIR is not an absolute path, \
+                 so there is no folder for the backup copy"
+                    .to_string(),
+            );
+        }
+        explicit
+    } else {
+        let data_home = match non_empty("XDG_DATA_HOME") {
+            Some(value) => PathBuf::from(value),
+            None => dirs::home_dir()
+                .ok_or_else(|| {
+                    "Refusing to save config: no home folder, \
+                     so there is no folder for the backup copy"
+                        .to_string()
+                })?
+                .join(".local")
+                .join("share"),
+        };
+        data_home.join("cortexkit").join("magic-context")
+    };
+    Ok(store.join("config-backups"))
+}
+
+/// A short, stable name part for a project. It keeps the copies of different
+/// project configs apart, and it keeps the project path out of file names.
+fn project_hash(canonical_project: &Path) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(canonical_project.to_string_lossy().as_bytes());
+    digest.iter().take(6).map(|b| format!("{b:02x}")).collect()
+}
+
+struct BackupBatch {
+    obsolete: Vec<PathBuf>,
+    _lock: ConfigSaveLock,
+}
+
+/// The caller holds the target lock, including when the config does not exist.
+fn back_up_current_config(
+    path: &Path,
+    logical_path: &Path,
+    project_root: Option<&Path>,
+    wait: std::time::Duration,
+) -> Result<Option<BackupBatch>, String> {
+    let read_error = |e| {
+        format!("Refusing to save config: cannot read the current config for a backup copy: {e}")
+    };
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            #[cfg(test)]
+            run_after_backup_read_hook(path);
+            return Ok(None);
+        }
+        Err(e) => return Err(read_error(e)),
+    }
+    let backup_dir = config_backup_dir()?;
+    let scope = match project_root {
+        Some(root) => format!("project-{}", project_hash(root)),
+        None => "user".to_string(),
+    };
+    // Different targets can share a backup set when a symlink changes.
+    let lock = lock_backup_scope(&backup_dir, &scope, wait)?;
+    let current = read_current_config_no_follow(path).map_err(read_error)?;
+    #[cfg(test)]
+    run_after_backup_read_hook(path);
+    let Some(current) = current else {
+        return Ok(None);
+    };
+
+    let stem = logical_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("magic-context");
+    let suffix = logical_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| format!(".{ext}"))
+        .unwrap_or_default();
+    let prefix = format!("{stem}.{scope}.");
+    let refuse = |e| {
+        format!(
+            "Refusing to save config: cannot write the backup copy in {}: {e}",
+            backup_dir.display()
+        )
+    };
+    // Take the list before writing so pruning cannot select the new copy.
+    let copies = ordered_config_backups(&backup_dir, &prefix, &suffix).map_err(refuse)?;
+    // Use a sequence number because the clock can move back. Use the UTC
+    // timestamp only for display.
+    let sequence = copies
+        .last()
+        .map_or(0, |(sequence, _)| *sequence)
+        .checked_add(1)
+        .ok_or_else(|| refuse(std::io::Error::other("backup sequence exhausted")))?;
+    write_backup_copy(&backup_dir, &prefix, &suffix, sequence, &current).map_err(refuse)?;
+
+    let excess = copies.len().saturating_sub(CONFIG_BACKUP_LIMIT - 1);
+    Ok(Some(BackupBatch {
+        obsolete: copies
+            .into_iter()
+            .take(excess)
+            .map(|(_, name)| backup_dir.join(name))
+            .collect(),
+        _lock: lock,
+    }))
+}
+
+/// A test can stop a save after it reads the current config, to make two saves
+/// overlap at the point where a lost backup can occur.
+#[cfg(test)]
+type BackupReadHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
+
+#[cfg(test)]
+static AFTER_BACKUP_READ_HOOK: std::sync::Mutex<Option<BackupReadHook>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn run_after_backup_read_hook(path: &Path) {
+    let hook = AFTER_BACKUP_READ_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    if let Some(hook) = hook {
+        hook(path);
+    }
+}
+
+fn read_current_config_no_follow(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other(
+            "the config path is not a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+/// Make the backup folder owner-only. Refuse a symlink at the folder path, so
+/// that a copy does not go to a folder that a different path selects.
+fn ensure_private_backup_directory(dir: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(_) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => ensure_private_config_directory(dir)?,
+        Err(e) => return Err(e),
+    }
+    let metadata = std::fs::symlink_metadata(dir)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other("the folder is a symlink"));
+    }
+    if !metadata.is_dir() {
+        return Err(std::io::Error::other("the path is not a directory"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        // Open the folder with O_NOFOLLOW and change the mode through that
+        // file descriptor, so that the chmod cannot touch a different folder.
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+            .open(dir)?;
+        if handle.metadata()?.permissions().mode() & 0o777 != 0o700 {
+            handle.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    // On Windows this code sets no permissions: the folder inherits the
+    // permissions of the Magic Context data folder, as the store adjacent to
+    // it does. This is intentional. Owner-only permissions on the copies alone
+    // cannot prevent more access, because the store has the same permissions.
+    Ok(())
+}
+
+fn write_backup_copy(
+    backup_dir: &Path,
+    prefix: &str,
+    suffix: &str,
+    sequence: u64,
+    content: &[u8],
+) -> std::io::Result<()> {
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.9fZ").to_string();
+    for attempt in 0..100u8 {
+        let copy_path = backup_dir.join(format!(
+            "{prefix}s{sequence:020}.{stamp}-{attempt:02}{suffix}"
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+        }
+        // On Windows the copy inherits the permissions of the backup folder,
+        // and thus of the Magic Context data folder. This is intentional: the
+        // store adjacent to it has the same permissions.
+        let mut file = match options.open(&copy_path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        let written = (|| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            file.write_all(content)?;
+            file.sync_all()
+        })();
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&copy_path);
+            return Err(e);
+        }
+        return Ok(());
+    }
+    Err(std::io::Error::other("no unique backup copy name"))
+}
+
+fn ordered_config_backups(
+    backup_dir: &Path,
+    prefix: &str,
+    suffix: &str,
+) -> std::io::Result<Vec<(u64, String)>> {
+    let mut copies = Vec::new();
+    for entry in std::fs::read_dir(backup_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some((name, sequence)) = name.to_str().and_then(|name| {
+            let id = name.strip_prefix(prefix)?.strip_suffix(suffix)?;
+            Some((name, backup_sequence(id)?))
+        }) else {
+            continue;
+        };
+        if entry.file_type()?.is_file() {
+            copies.push((sequence, name.to_string()));
+        }
+    }
+    copies.sort_unstable();
+    Ok(copies)
+}
+
+fn backup_sequence(id: &str) -> Option<u64> {
+    // Legacy copies have sequence 0 and sort by name before sequenced copies.
+    if is_backup_stamp(id) {
+        return Some(0);
+    }
+    let (sequence, stamp) = id.strip_prefix('s')?.split_once('.')?;
+    if sequence.len() != 20 || !sequence.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if !is_backup_stamp(stamp) {
+        return None;
+    }
+    sequence
+        .parse::<u64>()
+        .ok()
+        .filter(|sequence| *sequence != 0)
+}
+
+/// Agrees with `YYYYMMDDTHHMMSS.NNNNNNNNNZ-NN`, the shape that `write_backup_copy` writes.
+fn is_backup_stamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 29
+        && bytes.iter().enumerate().all(|(i, b)| match i {
+            8 => *b == b'T',
+            15 => *b == b'.',
+            25 => *b == b'Z',
+            26 => *b == b'-',
+            _ => b.is_ascii_digit(),
+        })
+        && chrono::NaiveDateTime::parse_from_str(&value[..26], "%Y%m%dT%H%M%S%.9fZ")
+            .is_ok_and(|stamp| stamp.and_utc().timestamp_subsec_nanos() < 1_000_000_000)
 }
 
 pub(crate) fn ensure_private_config_directory(path: &Path) -> std::io::Result<()> {
@@ -506,6 +1057,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut env = crate::test_env::EnvGuard::new();
         env.set("XDG_CONFIG_HOME", dir.path());
+        env.set("XDG_DATA_HOME", dir.path().join("data"));
+        env.remove("MAGIC_CONTEXT_STORAGE_DIR");
 
         let expected = dir.path().join("cortexkit/magic-context.jsonc");
         assert_eq!(resolve_pi_config_path(&config_home()), expected);
@@ -564,6 +1117,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
+        let (_env, _) = isolated_data_home(dir.path());
         let dotfiles = dir.path().join("dotfiles/cortexkit");
         std::fs::create_dir_all(&dotfiles).unwrap();
         let real = dotfiles.join("magic-context.jsonc");
@@ -608,6 +1162,7 @@ mod tests {
         ));
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true).mode(0o700).create(&root).unwrap();
+        let (_env, _) = isolated_data_home(&root);
         let path = root.join("config/cortexkit/magic-context.jsonc");
 
         write_config(&path, "{ \"api_key\": \"secret\" }\n").expect("write");
@@ -633,6 +1188,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
+        let (_env, _) = isolated_data_home(dir.path());
         let path = dir.path().join("magic-context.jsonc");
         std::fs::write(&path, "{}\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -660,6 +1216,7 @@ mod tests {
     #[test]
     fn write_project_config_writes_regular_file_atomically() {
         let dir = tempfile::tempdir().unwrap();
+        let (_env, _) = isolated_data_home(dir.path());
         let project = dir.path().join("project");
         std::fs::create_dir(&project).unwrap();
         let canonical_project = project.canonicalize().unwrap();
@@ -692,6 +1249,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
+        let (_env, _) = isolated_data_home(dir.path());
         let project = dir.path().join("project");
         let workspace_member = dir.path().join("workspace/member");
         std::fs::create_dir(&project).unwrap();
@@ -748,6 +1306,718 @@ mod tests {
         let err = write_project_config(canonical_project.to_str().unwrap(), "{}\n")
             .expect_err("directory target must be refused");
         assert!(err.contains("regular file"), "unexpected error: {err}");
+    }
+
+    // ── config backup tests ─────────────────────────────────────────
+
+    /// Point the backup store at a temporary data home. The guard also holds
+    /// the environment lock, so parallel tests cannot see a different value.
+    fn isolated_data_home(root: &Path) -> (crate::test_env::EnvGuard, PathBuf) {
+        let mut env = crate::test_env::EnvGuard::new();
+        let data_home = root.join("data");
+        env.set("XDG_DATA_HOME", &data_home);
+        env.remove("MAGIC_CONTEXT_STORAGE_DIR");
+        (
+            env,
+            data_home.join("cortexkit/magic-context/config-backups"),
+        )
+    }
+
+    fn sorted_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = match std::fs::read_dir(dir) {
+            Ok(entries) => entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        names.sort();
+        names
+    }
+
+    /// The config copies in a backup folder, without the lock files.
+    fn backup_copies(dir: &Path) -> Vec<String> {
+        sorted_names(dir)
+            .into_iter()
+            .filter(|name| !name.ends_with(".lock"))
+            .collect()
+    }
+
+    /// Remove the read hook also when the test fails.
+    struct BackupReadHookGuard;
+
+    impl BackupReadHookGuard {
+        fn set(hook: BackupReadHook) -> Self {
+            *AFTER_BACKUP_READ_HOOK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = Some(hook);
+            Self
+        }
+    }
+
+    impl Drop for BackupReadHookGuard {
+        fn drop(&mut self) {
+            *AFTER_BACKUP_READ_HOOK
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = None;
+        }
+    }
+
+    fn user_config_in(root: &Path, content: &str) -> PathBuf {
+        let path = root.join("config/cortexkit/magic-context.jsonc");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn save_keeps_the_previous_bytes_in_the_data_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let path = user_config_in(dir.path(), "{ \"version\": 0 }\n");
+
+        write_config(&path, "{ \"version\": 1 }\n").expect("save");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{ \"version\": 1 }\n"
+        );
+        let names = backup_copies(&backups);
+        assert_eq!(names.len(), 1, "copies: {names:?}");
+        assert!(
+            names[0].starts_with("magic-context.user.") && names[0].ends_with(".jsonc"),
+            "unexpected copy name: {}",
+            names[0]
+        );
+        assert_eq!(
+            std::fs::read_to_string(backups.join(&names[0])).unwrap(),
+            "{ \"version\": 0 }\n"
+        );
+        // The config folder gets no more files.
+        assert_eq!(
+            sorted_names(path.parent().unwrap()),
+            vec!["magic-context.jsonc".to_string()]
+        );
+    }
+
+    #[test]
+    fn first_save_of_a_new_config_makes_no_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let path = dir.path().join("config/cortexkit/magic-context.jsonc");
+
+        write_config(&path, "{}\n").expect("save");
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}\n");
+        assert!(backup_copies(&backups).is_empty());
+    }
+
+    #[test]
+    fn config_backup_review_first_save_needs_no_backup_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let path = dir.path().join("config/cortexkit/magic-context.jsonc");
+        std::fs::create_dir_all(backups.parent().unwrap()).unwrap();
+        std::fs::write(&backups, "not a directory").unwrap();
+
+        write_config(&path, "first").expect("first save needs no backup");
+        let error = write_config(&path, "second").expect_err("overwrite requires a backup");
+        assert!(error.contains("backup"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        assert_eq!(
+            std::fs::read_to_string(&backups).unwrap(),
+            "not a directory"
+        );
+    }
+
+    #[test]
+    fn sixth_save_drops_the_oldest_copy_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let path = user_config_in(dir.path(), "v0");
+        // A copy of a different config must stay after the pruning, also when
+        // it is older than all copies of this config.
+        std::fs::create_dir_all(&backups).unwrap();
+        let other = "magic-context.project-0123456789ab.20000101T000000.000000000Z-00.jsonc";
+        std::fs::write(backups.join(other), "other").unwrap();
+
+        // The saves run in a fast loop, so some occur in one second: a copy
+        // must not replace an earlier copy.
+        for version in 1..=6 {
+            write_config(&path, &format!("v{version}")).expect("save");
+        }
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v6");
+        let names = sorted_names(&backups);
+        assert!(names.contains(&other.to_string()), "copies: {names:?}");
+        let contents: Vec<String> = names
+            .iter()
+            .filter(|name| name.starts_with("magic-context.user."))
+            .map(|name| std::fs::read_to_string(backups.join(name)).unwrap())
+            .collect();
+        assert_eq!(contents, vec!["v1", "v2", "v3", "v4", "v5"]);
+    }
+
+    #[test]
+    fn save_keeps_recent_backups_when_the_clock_moves_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let path = user_config_in(dir.path(), "v0");
+        std::fs::create_dir_all(&backups).unwrap();
+        for day in 1..=5 {
+            let name = format!("magic-context.user.299901{day:02}T000000.000000000Z-00.jsonc");
+            std::fs::write(backups.join(name), format!("old{day}")).unwrap();
+        }
+        let contents = || -> Vec<String> {
+            backup_copies(&backups)
+                .iter()
+                .map(|name| std::fs::read_to_string(backups.join(name)).unwrap())
+                .collect()
+        };
+
+        write_config(&path, "v1").expect("save after clock rollback");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v1");
+        assert_eq!(contents(), vec!["old2", "old3", "old4", "old5", "v0"]);
+
+        for version in 2..=6 {
+            write_config(&path, &format!("v{version}")).expect("save after clock rollback");
+        }
+        assert_eq!(contents(), vec!["v1", "v2", "v3", "v4", "v5"]);
+    }
+
+    #[test]
+    fn config_backup_review_pruning_keeps_new_copy_and_ignores_invalid_dates() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let path = user_config_in(dir.path(), "previous");
+        std::fs::create_dir_all(&backups).unwrap();
+        for day in 1..=5 {
+            let seq = day + 1;
+            let name =
+                format!("magic-context.user.s{seq:020}.299901{day:02}T000000.000000000Z-00.jsonc");
+            std::fs::write(backups.join(name), format!("future{day}")).unwrap();
+        }
+        let invalid = [
+            "magic-context.user.20230229T010203.000000000Z-00.jsonc",
+            "magic-context.user.s00000000000000000001.20240101T240000.000000000Z-00.jsonc",
+        ];
+        for name in invalid {
+            std::fs::write(backups.join(name), "not a backup").unwrap();
+        }
+
+        write_config(&path, "updated").expect("save and prune");
+
+        let names = backup_copies(&backups);
+        for name in invalid {
+            assert_eq!(
+                std::fs::read_to_string(backups.join(name)).unwrap(),
+                "not a backup",
+                "pruning touched {name}"
+            );
+        }
+        let contents: Vec<_> = names
+            .iter()
+            .filter(|name| !invalid.contains(&name.as_str()))
+            .map(|name| std::fs::read_to_string(backups.join(name)).unwrap())
+            .collect();
+        assert_eq!(
+            contents,
+            ["future2", "future3", "future4", "future5", "previous"]
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "updated");
+    }
+
+    #[test]
+    fn copy_failure_refuses_the_save_and_leaves_the_config_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let path = user_config_in(dir.path(), "{ \"keep\": true }\n");
+        // A regular file where the backup folder must be: no copy can be made.
+        std::fs::create_dir_all(backups.parent().unwrap()).unwrap();
+        std::fs::write(&backups, "not a directory").unwrap();
+
+        let err = write_config(&path, "{ \"keep\": false }\n")
+            .expect_err("save without a copy must be refused");
+
+        assert!(err.contains("backup"), "unexpected error: {err}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{ \"keep\": true }\n"
+        );
+        assert_eq!(
+            sorted_names(path.parent().unwrap()),
+            vec!["magic-context.jsonc".to_string()]
+        );
+    }
+
+    #[test]
+    fn copies_go_to_the_storage_override_when_it_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut env, xdg_backups) = isolated_data_home(dir.path());
+        let storage = dir.path().join("store");
+        env.set("MAGIC_CONTEXT_STORAGE_DIR", &storage);
+        let path = user_config_in(dir.path(), "v0");
+
+        write_config(&path, "v1").expect("save");
+
+        assert_eq!(backup_copies(&storage.join("config-backups")).len(), 1);
+        assert!(sorted_names(&xdg_backups).is_empty());
+    }
+
+    #[test]
+    fn project_copy_lands_in_the_data_folder_with_a_project_hash() {
+        use sha2::{Digest, Sha256};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(project.join(".cortexkit")).unwrap();
+        let canonical_project = project.canonicalize().unwrap();
+        let config = canonical_project.join(".cortexkit/magic-context.jsonc");
+        std::fs::write(&config, "p0").unwrap();
+
+        write_project_config(canonical_project.to_str().unwrap(), "p1").expect("save");
+
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "p1");
+        assert_eq!(
+            sorted_names(&canonical_project.join(".cortexkit")),
+            vec!["magic-context.jsonc".to_string()]
+        );
+        let digest = Sha256::digest(canonical_project.to_string_lossy().as_bytes());
+        let hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        let prefix = format!("magic-context.project-{}.", &hash[..12]);
+        let names = backup_copies(&backups);
+        assert_eq!(names.len(), 1, "copies: {names:?}");
+        assert!(
+            names[0].starts_with(&prefix),
+            "unexpected name: {}",
+            names[0]
+        );
+        assert_eq!(
+            std::fs::read_to_string(backups.join(&names[0])).unwrap(),
+            "p0"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_folder_and_copies_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        // The save narrows the mode of a folder that has a wide mode.
+        std::fs::create_dir_all(&backups).unwrap();
+        std::fs::set_permissions(&backups, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = user_config_in(dir.path(), "{ \"api_key\": \"secret\" }\n");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_config(&path, "{}\n").expect("save");
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&backups), 0o700);
+        let names = backup_copies(&backups);
+        assert_eq!(names.len(), 1, "copies: {names:?}");
+        assert_eq!(mode(&backups.join(&names[0])), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_backup_folder_refuses_the_save() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::create_dir_all(backups.parent().unwrap()).unwrap();
+        symlink(&elsewhere, &backups).unwrap();
+        let path = user_config_in(dir.path(), "v0");
+
+        let err = write_config(&path, "v1").expect_err("symlinked folder must be refused");
+
+        assert!(err.contains("backup"), "unexpected error: {err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v0");
+        assert!(sorted_names(&elsewhere).is_empty());
+    }
+
+    /// Two saves that overlap must not both copy the same old bytes: the
+    /// save that runs second must copy what the first save wrote.
+    #[test]
+    fn overlapping_saves_back_up_each_replaced_version() {
+        use std::sync::{Arc, Condvar, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let path = user_config_in(dir.path(), "A");
+        // After it reads the current config, each save waits until the other
+        // save also read it, or until the timeout. Without serialization, both
+        // saves read "A". With serialization, the second save cannot read
+        // before the first save replaced the file, so the first wait ends at
+        // the timeout and the result does not depend on thread timing.
+        let arrivals = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let hook_arrivals = Arc::clone(&arrivals);
+        let hook_path = path.clone();
+        let _hook = BackupReadHookGuard::set(Arc::new(move |read_path: &Path| {
+            if read_path != hook_path {
+                return;
+            }
+            let (count, ready) = &*hook_arrivals;
+            let mut count = count.lock().unwrap();
+            *count += 1;
+            ready.notify_all();
+            let _ = ready
+                .wait_timeout_while(count, std::time::Duration::from_secs(2), |count| *count < 2)
+                .unwrap();
+        }));
+
+        let savers: Vec<_> = ["B", "C"]
+            .into_iter()
+            .map(|content| {
+                let path = path.clone();
+                std::thread::spawn(move || write_config(&path, content))
+            })
+            .collect();
+        for saver in savers {
+            saver.join().unwrap().expect("save");
+        }
+
+        let last = std::fs::read_to_string(&path).unwrap();
+        let first = if last == "B" { "C" } else { "B" };
+        let contents: Vec<String> = backup_copies(&backups)
+            .iter()
+            .map(|name| std::fs::read_to_string(backups.join(name)).unwrap())
+            .collect();
+        assert_eq!(contents, vec!["A".to_string(), first.to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlapping_user_and_project_saves_back_up_each_replaced_version() {
+        use std::os::unix::fs::symlink;
+        use std::sync::{Arc, Barrier, Condvar, Mutex};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let project = dir.path().join("project");
+        let target = project.join(".cortexkit/magic-context.jsonc");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "A").unwrap();
+        let target = target.canonicalize().unwrap();
+        let project_alias = dir.path().join("project-alias");
+        symlink(&project, &project_alias).unwrap();
+        let user = dir.path().join("user-config.jsonc");
+        symlink(project_alias.join(".cortexkit/magic-context.jsonc"), &user).unwrap();
+
+        let arrivals = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let hook_arrivals = Arc::clone(&arrivals);
+        let hook_path = target.clone();
+        let _hook = BackupReadHookGuard::set(Arc::new(move |read_path: &Path| {
+            if read_path.canonicalize().ok().as_deref() != Some(hook_path.as_path()) {
+                return;
+            }
+            let (count, ready) = &*hook_arrivals;
+            let mut count = count.lock().unwrap();
+            *count += 1;
+            ready.notify_all();
+            let _ = ready
+                .wait_timeout_while(count, Duration::from_secs(2), |count| *count < 2)
+                .unwrap();
+        }));
+
+        let start = Arc::new(Barrier::new(2));
+        let user_start = Arc::clone(&start);
+        let user_save = std::thread::spawn(move || {
+            user_start.wait();
+            write_config(&user, "B")
+        });
+        let project_save = std::thread::spawn(move || {
+            start.wait();
+            write_project_config(project.to_str().unwrap(), "C")
+        });
+        let user_saved = user_save.join();
+        let project_saved = project_save.join();
+        user_saved.unwrap().expect("user save");
+        project_saved.unwrap().expect("project save");
+
+        let last = std::fs::read_to_string(&target).unwrap();
+        let first = match last.as_str() {
+            "B" => "C",
+            "C" => "B",
+            _ => panic!("unexpected final config: {last}"),
+        };
+        let mut contents: Vec<String> = backup_copies(&backups)
+            .iter()
+            .map(|name| std::fs::read_to_string(backups.join(name)).unwrap())
+            .collect();
+        contents.sort();
+        assert_eq!(contents, vec!["A", first]);
+    }
+
+    #[cfg(unix)]
+    pub(super) fn report_config_lock_contention() {
+        if let Some(path) = std::env::var_os("MC_TEST_CONFIG_SAVE_WAITING") {
+            std::fs::write(path, "").unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_config_save_phase(paths: &[&Path], child: Option<&mut std::process::Child>) {
+        let mut child = child;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !paths.iter().any(|path| path.exists()) {
+            if let Some(child) = child.as_deref_mut() {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(
+                        paths.iter().any(|path| path.exists()),
+                        "save exited ({status}) before {paths:?}"
+                    );
+                    return;
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "missing {paths:?}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess for the parallel config save tests"]
+    fn config_save_child() {
+        let path = |key| PathBuf::from(std::env::var_os(key).unwrap());
+        let read_marker = path("MC_TEST_CONFIG_SAVE_READ");
+        let release = std::env::var_os("MC_TEST_CONFIG_SAVE_RELEASE").map(PathBuf::from);
+        let project_save = release.is_none();
+        let _hook = BackupReadHookGuard::set(std::sync::Arc::new(move |_| {
+            std::fs::write(&read_marker, "").unwrap();
+            if let Some(release) = &release {
+                wait_for_config_save_phase(&[release], None);
+            }
+        }));
+        let target = path("MC_TEST_CONFIG_SAVE_TARGET");
+        if project_save {
+            write_project_config(target.to_str().unwrap(), "second").expect("project save");
+        } else {
+            write_config(&target, "first").expect("user save");
+        }
+    }
+
+    #[cfg(unix)]
+    fn run_config_save_processes(initial: Option<&str>) {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let project = root.join("project");
+        let target = project.join(".cortexkit/magic-context.jsonc");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        if let Some(initial) = initial {
+            std::fs::write(&target, initial).unwrap();
+        }
+        let alias = root.join("project-alias");
+        symlink(&project, &alias).unwrap();
+        let user = root.join("magic-context.jsonc");
+        symlink(alias.join(".cortexkit/magic-context.jsonc"), &user).unwrap();
+
+        let spawn = |id: &str, target: &Path, release: Option<&Path>| {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", "config::tests::config_save_child", "--ignored"])
+                .env(
+                    "MAGIC_CONTEXT_STORAGE_DIR",
+                    root.join(format!("{id}-store")),
+                )
+                .env("MC_TEST_CONFIG_SAVE_TARGET", target)
+                .env("MC_TEST_CONFIG_SAVE_READ", root.join(format!("{id}-read")))
+                .env(
+                    "MC_TEST_CONFIG_SAVE_WAITING",
+                    root.join(format!("{id}-waiting")),
+                )
+                .env_remove("MC_TEST_CONFIG_SAVE_RELEASE");
+            if let Some(release) = release {
+                command.env("MC_TEST_CONFIG_SAVE_RELEASE", release);
+            }
+            command.spawn().unwrap()
+        };
+
+        let release = root.join("release");
+        let mut first = spawn("first", &user, Some(&release));
+        wait_for_config_save_phase(&[&root.join("first-read")], Some(&mut first));
+        let first_backups = root.join("first-store/config-backups");
+        let first_created_backup_dir = first_backups.exists();
+        let mut second = spawn("second", &project, None);
+        let waiting = root.join("second-waiting");
+        wait_for_config_save_phase(&[&waiting, &root.join("second-read")], Some(&mut second));
+        std::fs::write(release, "").unwrap();
+        assert!(first.wait().unwrap().success(), "user save failed");
+        assert!(second.wait().unwrap().success(), "project save failed");
+
+        let copies = |folder: &Path| -> Vec<String> {
+            backup_copies(folder)
+                .into_iter()
+                .map(|name| std::fs::read_to_string(folder.join(name)).unwrap())
+                .collect()
+        };
+        assert!(
+            waiting.exists(),
+            "project save read before the user save replaced the config"
+        );
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "second");
+        assert_eq!(
+            copies(&first_backups),
+            initial.into_iter().collect::<Vec<_>>()
+        );
+        assert_eq!(copies(&root.join("second-store/config-backups")), ["first"]);
+        if initial.is_none() {
+            assert!(
+                !first_created_backup_dir,
+                "first save created the backup folder"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_backup_review_alias_saves_share_a_lock_across_stores() {
+        run_config_save_processes(Some("original"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_backup_review_concurrent_first_saves_back_up_the_first_writer() {
+        run_config_save_processes(None);
+    }
+
+    /// Open the lock file of a backup scope and lock it, as a save in a
+    /// different dashboard process does.
+    #[cfg(unix)]
+    fn hold_scope_lock(backups: &Path, scope: &str) -> std::fs::File {
+        use std::os::unix::io::AsRawFd;
+
+        ensure_private_backup_directory(backups).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(backups.join(format!(".{scope}.lock")))
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        file
+    }
+
+    /// A save waits while a different process holds the lock, and then copies
+    /// what that process wrote.
+    #[cfg(unix)]
+    #[test]
+    fn save_waits_for_a_scope_lock_held_by_another_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let path = user_config_in(dir.path(), "A");
+        let holder = hold_scope_lock(&backups, "user");
+
+        let saver = {
+            let path = path.clone();
+            std::thread::spawn(move || write_config(&path, "B"))
+        };
+        // A save that does not wait finishes in this time and copies "A".
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::fs::write(&path, "X").unwrap();
+        drop(holder);
+        saver.join().unwrap().expect("save");
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "B");
+        let contents: Vec<String> = backup_copies(&backups)
+            .iter()
+            .map(|name| std::fs::read_to_string(backups.join(name)).unwrap())
+            .collect();
+        assert_eq!(contents, vec!["X".to_string()]);
+    }
+
+    /// Copies of a symlinked user config get the name of the config, not of
+    /// the file that the link points at, so that one set of copies is pruned
+    /// also after the link changes to a different file.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_user_config_copies_use_the_config_name() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        let dotfiles = dir.path().join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::write(dotfiles.join("other-name.jsonc"), "v0").unwrap();
+        std::fs::write(dotfiles.join("third-name.jsonc"), "w0").unwrap();
+        let config_dir = dir.path().join("config/cortexkit");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let link = config_dir.join("magic-context.jsonc");
+        symlink(dotfiles.join("other-name.jsonc"), &link).unwrap();
+
+        for version in 1..=3 {
+            write_config(&link, &format!("v{version}")).expect("save");
+        }
+        std::fs::remove_file(&link).unwrap();
+        symlink(dotfiles.join("third-name.jsonc"), &link).unwrap();
+        for version in 1..=3 {
+            write_config(&link, &format!("w{version}")).expect("save");
+        }
+
+        let names = backup_copies(&backups);
+        assert!(
+            names
+                .iter()
+                .all(|name| name.starts_with("magic-context.user.") && name.ends_with(".jsonc")),
+            "copies: {names:?}"
+        );
+        let contents: Vec<String> = names
+            .iter()
+            .map(|name| std::fs::read_to_string(backups.join(name)).unwrap())
+            .collect();
+        assert_eq!(contents, vec!["v1", "v2", "w0", "w1", "w2"]);
+    }
+
+    /// If a different process holds the lock for longer than the wait, the
+    /// save is refused.
+    #[cfg(unix)]
+    #[test]
+    fn scope_lock_held_past_the_wait_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let backups = dir.path().join("config-backups");
+        let _holder = hold_scope_lock(&backups, "user");
+
+        let err = lock_backup_scope(&backups, "user", std::time::Duration::ZERO)
+            .expect_err("a held lock must refuse");
+
+        assert!(err.contains("cannot lock the backup folder"), "{err}");
+        // A different backup set does not wait for this lock.
+        assert!(
+            lock_backup_scope(&backups, "project-0123456789ab", std::time::Duration::ZERO).is_ok()
+        );
+    }
+
+    /// A symlink at the lock path refuses the save and does not touch the file
+    /// that the link points at.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_lock_file_refuses_the_save() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_env, backups) = isolated_data_home(dir.path());
+        ensure_private_backup_directory(&backups).unwrap();
+        let elsewhere = dir.path().join("elsewhere.txt");
+        std::fs::write(&elsewhere, "keep").unwrap();
+        symlink(&elsewhere, backups.join(".user.lock")).unwrap();
+        let path = user_config_in(dir.path(), "v0");
+
+        let err = write_config(&path, "v1").expect_err("symlinked lock must be refused");
+
+        assert!(err.contains("cannot lock the backup folder"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v0");
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "keep");
     }
 
     // ── discover_project_configs_with_db tests ─────────────────────

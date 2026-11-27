@@ -21,6 +21,7 @@ import {
     spawnOpencode1,
 } from "../../src/opencode2-runner/conversion-lane";
 import { spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
+import { providerSystemText } from "../../src/provider-system-text";
 
 /**
  * Issue 492 finding 1, conversion in the loop.
@@ -56,13 +57,10 @@ function allStrings(value: unknown, sink: string[] = []): string[] {
 /**
  * Historian requests are told apart by their own system prompt, not by model:
  * both generations route the historian at the same mock model the main agent
- * uses, and the two hosts carry the system prompt in different fields
- * (`system` on the 1.x Anthropic body, `instructions` on the 2.x OpenAI body).
+ * uses. The provider wire may carry instructions separately or as developer input.
  */
 function isHistorianRequest(body: Record<string, unknown>): boolean {
-    return allStrings(body.system).concat(allStrings(body.instructions)).some((text) =>
-        text.includes(HISTORIAN_SYSTEM_MARKER),
-    );
+    return providerSystemText(body).includes(HISTORIAN_SYSTEM_MARKER);
 }
 
 function historianOrdinalRange(
@@ -79,13 +77,12 @@ function historianOrdinalRange(
 
 /**
  * The injected head, m[0], as each host puts it on the wire: the first user
- * message's text on the 1.x Anthropic body, the first input item's text on the
- * 2.x OpenAI body.
+ * message's text, after any developer header in the OpenAI Responses input.
  */
 function headText(body: Record<string, unknown>): string {
     const container = Array.isArray(body.messages) ? body.messages : body.input;
     if (!Array.isArray(container) || container.length === 0) return "";
-    const content = (container[0] as { content?: unknown }).content;
+    const content = container.find((item) => item?.role === "user")?.content;
     if (typeof content === "string") return content;
     if (!Array.isArray(content)) return "";
     return content

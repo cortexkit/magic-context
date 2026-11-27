@@ -4,8 +4,14 @@ import type {
 	ExtensionCommandContext,
 	Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Box, type Component, matchesKey, Text } from "@earendil-works/pi-tui";
+import type { Component } from "@earendil-works/pi-tui";
 import { sessionLog } from "@magic-context/core/shared/logger";
+import {
+	canRenderPiRows,
+	legacyTui,
+	matchesKey,
+	piOverlayOptions,
+} from "../pi-tui-compat";
 
 export const CTX_STATUS_CUSTOM_TYPE = "ctx-status";
 
@@ -80,14 +86,12 @@ export async function showCtxStatusDialog(
 	ctx: Pick<ExtensionCommandContext, "ui">,
 	content: CtxStatusMessageContent,
 ): Promise<boolean> {
+	if (!canRenderPiRows) return false;
 	let factoryInvoked = false;
-	await ctx.ui.custom<undefined>(
-		(_tui, theme, _keybindings, done) => {
-			factoryInvoked = true;
-			return new CtxStatusDialog(content, theme, done);
-		},
-		{ overlay: true, overlayOptions: { anchor: "center", width: 92 } },
-	);
+	await ctx.ui.custom<undefined>((_tui, theme, _keybindings, done) => {
+		factoryInvoked = true;
+		return new CtxStatusDialog(content, theme, done);
+	}, piOverlayOptions(92));
 	return factoryInvoked;
 }
 
@@ -146,6 +150,7 @@ export const renderCtxStatusEntry: CtxStatusEntryRenderer = (
 ) => {
 	const data = entry?.data;
 	if (
+		!legacyTui ||
 		!data ||
 		typeof data !== "object" ||
 		typeof data.title !== "string" ||
@@ -158,8 +163,10 @@ export const renderCtxStatusEntry: CtxStatusEntryRenderer = (
 		theme.fg(statusTitleColor(data.level), `[${data.title}]`),
 	);
 	const body = theme.fg("customMessageText", data.text);
-	const box = new Box(1, 0, (text) => theme.bg("customMessageBg", text));
-	box.addChild(new Text(`${title}\n${body}`));
+	const box = new legacyTui.Box(1, 0, (text) =>
+		theme.bg("customMessageBg", text),
+	);
+	box.addChild(new legacyTui.Text(`${title}\n${body}`));
 	return box;
 };
 

@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isolatedTestGitEnv } from "../../shared/test-git-env";
 import {
     assembleOpencode1Excerpt,
     OPENCODE1_COMMIT,
@@ -33,6 +34,7 @@ function opencodeCheckout(): string | undefined {
                 ["-C", candidate, "rev-parse", `${OPENCODE1_TAG}^{commit}`],
                 {
                     encoding: "utf8",
+                    env: isolatedTestGitEnv(),
                     stdio: ["ignore", "pipe", "ignore"],
                     windowsHide: true,
                 },
@@ -61,6 +63,7 @@ describe("vendored OpenCode 1 conversion", () => {
         const git = (args: string[]) =>
             execFileSync("git", ["-C", dir, ...args], {
                 encoding: "utf8",
+                env: isolatedTestGitEnv(),
                 maxBuffer: 64 * 1024 * 1024,
                 windowsHide: true,
             });

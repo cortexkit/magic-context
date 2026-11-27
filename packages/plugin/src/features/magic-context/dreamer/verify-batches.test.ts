@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Database } from "../../../shared/sqlite";
+import { isolatedTestGitEnv } from "../../../shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { insertMemory } from "../memory";
 import {
@@ -123,8 +124,16 @@ test("verify candidate lookup leaves backing mappings intact outside git", async
 test("verify prefilters identifier candidates asynchronously without replacing backing mappings", async () => {
     const f = fixture(1);
     try {
-        execFileSync("git", ["init", "--quiet"], { cwd: f.directory, windowsHide: true });
-        execFileSync("git", ["add", "src/fact.ts"], { cwd: f.directory, windowsHide: true });
+        execFileSync("git", ["init", "--quiet"], {
+            cwd: f.directory,
+            env: isolatedTestGitEnv(),
+            windowsHide: true,
+        });
+        execFileSync("git", ["add", "src/fact.ts"], {
+            cwd: f.directory,
+            env: isolatedTestGitEnv(),
+            windowsHide: true,
+        });
         const [memory] = await seedVerifyCandidates(
             [
                 {

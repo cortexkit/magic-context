@@ -46,7 +46,7 @@ const compartments = [
     end_time: Date.UTC(2026, 4, 1, 16, 48),
     importance: 72,
     episode_type: "research,decision",
-    p1: "Reviewed the project fixture and recorded the outcome.",
+    p1: "U: Review the project fixture.\nReviewed the project fixture and recorded the outcome.",
     p2: "Reviewed fixture.",
     p3: "Fixture review.",
     p4: "review",
@@ -186,13 +186,23 @@ const responses = {
   get_smart_notes: [],
   get_subagent_totals_by_subagent: [],
 };
-const preload = (theme: string) => `(() => {
+const preload = (theme: string, delayedPage = false) => `(() => {
   try { localStorage.setItem('magic-context-dashboard.theme', ${JSON.stringify(theme)}); } catch {}
   window.__TAURI_INTERNALS__ = {
     transformCallback: () => 1, unregisterCallback: () => {},
     invoke: async (cmd, args) => {
       if (cmd === 'plugin:updater|check') return null;
       if (cmd.startsWith('plugin:')) return null;
+      if (${delayedPage} && cmd === 'list_sessions_paged') {
+        const offset = args.filter.offset;
+        (window.__listPageOffsets ??= []).push(offset);
+        const rows = ${JSON.stringify(sessionRows)};
+        if (offset === 0) return { rows, total: 4, has_more: true, conditions: [] };
+        if (offset === 2) {
+          await new Promise(resolve => { window.__releaseNextPage = resolve; });
+        }
+        return { rows: [{ ...rows[0], session_id: 'extra-' + offset }], total: 4, has_more: offset < 3, conditions: [] };
+      }
       if (cmd === 'get_subagent_invocations') return ${JSON.stringify(historianRows)}[args.sessionId] || [];
       if (cmd === 'get_session_detail') return ${JSON.stringify(sessionDetail(false))}.session_id === args.sessionId
         ? ${JSON.stringify(sessionDetail(false))}
@@ -208,7 +218,8 @@ const vite = Bun.spawn(["timeout", "240s", join(dashboard, "node_modules/.bin/vi
   stdout: "pipe",
   stderr: "inherit",
 });
-const chrome = Bun.spawn(["timeout", "240s", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-extensions", "--hide-scrollbars", "--remote-debugging-port=0", `--user-data-dir=${join(output, "chrome-profile")}`, "about:blank"], {
+const chromeBinary = process.env.SESSION_PAGE_CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const chrome = Bun.spawn(["timeout", "240s", chromeBinary, "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-extensions", "--hide-scrollbars", "--remote-debugging-port=0", `--user-data-dir=${join(output, "chrome-profile")}`, "about:blank"], {
   stdout: "ignore",
   stderr: "pipe",
 });
@@ -287,8 +298,39 @@ try {
       })()`);
       await waitFor(".tab-pill");
       await waitFor(".section-header");
-      if (kind === "pi") await waitFor(".card-meta");
+      await waitFor("#compartment-1");
       await settle();
+      await evalPage(`(() => {
+        const first = document.querySelector('#compartment-1');
+        const second = document.querySelector('#compartment-2');
+        const body = (card) => card.querySelector('.expandable-content');
+        if (body(first)?.childElementCount || body(second)?.childElementCount) {
+          throw new Error('collapsed compartment mounted body elements');
+        }
+        first.click();
+        const lines = [...body(first).lastElementChild.children].map((line) => line.textContent);
+        const expected = ${JSON.stringify(compartments[0].p1.split("\n"))};
+        if (lines.length !== expected.length || lines.some((line, i) => line !== expected[i])) {
+          throw new Error('open compartment did not render its separate P1 lines');
+        }
+        [...body(first).querySelectorAll('button')].find((button) => button.textContent === 'P2').click();
+        if (body(first).lastElementChild.textContent !== ${JSON.stringify(compartments[0].p2)}) {
+          throw new Error('tier change did not render the selected body');
+        }
+        first.click();
+        if (body(first)?.childElementCount) throw new Error('closing a compartment retained its body');
+        first.click();
+        if (body(first).lastElementChild.textContent !== ${JSON.stringify(compartments[0].p2)}) {
+          throw new Error('reopening a compartment did not restore the selected tier');
+        }
+        [...body(first).querySelectorAll('button')].find((button) => button.textContent === 'P1').click();
+        second.click();
+        if (body(first)?.childElementCount || body(second).lastElementChild.textContent !== ${JSON.stringify(compartments[1].p1)}) {
+          throw new Error('switching cards did not replace the mounted body');
+        }
+        second.click();
+      })()`);
+      console.log(`${theme}/${kind}: collapsed compartment bodies are not mounted; open bodies and tier selection are preserved`);
       if (kind === "pi" && process.env.SESSION_PAGE_EXPECT_PI_DATES) {
         const visibleDate = await evalPage("[...document.querySelectorAll('.list-gap button.card')].some((card) => card.innerText.includes(' → '))");
         if (!visibleDate) throw new Error("Pi compartment date fixture was not rendered");
@@ -387,6 +429,48 @@ try {
     }
     await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: preloadId.identifier }, browserSession);
   }
+  const pagingPreload = await send<{ identifier: string }>("Page.addScriptToEvaluateOnNewDocument", {
+    source: preload("light", true),
+  }, browserSession);
+  await send("Page.navigate", { url: `http://127.0.0.1:${port}/` }, browserSession);
+  await waitFor(".project-card");
+  await evalPage("document.querySelector('.project-card').click()");
+  await waitFor(".project-detail-body .scroll-area button.card");
+  await evalPage(`new Promise((resolve, reject) => {
+    const interval = setInterval(() => {
+      if (!window.__releaseNextPage) return;
+      clearInterval(interval);
+      clearTimeout(timeout);
+      resolve();
+    }, 20);
+    const timeout = setTimeout(() => { clearInterval(interval); reject(new Error('next page was not requested')); }, 5000);
+  })`);
+  await evalPage(`(() => {
+    document.querySelector('.project-detail-body .scroll-area button.card').click();
+    if (!document.querySelector('.tab-pill')) throw new Error('session did not open');
+    document.querySelector('.nav-item[title="Workspaces"]').click();
+    if (document.querySelector('.project-detail-body')) throw new Error('session view did not unmount');
+    window.__pagingLongTasks = [];
+    new PerformanceObserver(list => window.__pagingLongTasks.push(...list.getEntries())).observe({ type: 'longtask' });
+  })()`);
+  await settle();
+  await send("Performance.enable", {}, browserSession);
+  const before = await send<{ metrics: { name: string; value: number }[] }>("Performance.getMetrics", {}, browserSession);
+  await evalPage("window.__releaseNextPage()");
+  const idleMs = Number(process.env.SESSION_PAGE_PAGING_IDLE_MS ?? 250);
+  await Bun.sleep(idleMs);
+  const after = await send<typeof before>("Performance.getMetrics", {}, browserSession);
+  const delta = (name: string) => {
+    const value = (sample: typeof before) => sample.metrics.find(metric => metric.name === name)!.value;
+    return value(after) - value(before);
+  };
+  const result = await evalPage<{ offsets: number[]; longTasks: number; longTaskMs: number }>(`({
+    offsets: window.__listPageOffsets, longTasks: window.__pagingLongTasks.length,
+    longTaskMs: window.__pagingLongTasks.reduce((sum, entry) => sum + entry.duration, 0),
+  })`);
+  console.log(`session pagination after navigation (${idleMs} ms): ${JSON.stringify({ ...result, layouts: delta("LayoutCount"), layoutMs: delta("LayoutDuration") * 1000 })}`);
+  if (result.offsets.join(",") !== "0,2") throw new Error("session pagination continued after unmount");
+  await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: pagingPreload.identifier }, browserSession);
 } finally {
   socket?.close();
   chrome.kill();

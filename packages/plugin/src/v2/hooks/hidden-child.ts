@@ -25,6 +25,7 @@ import {
 import { withoutHistorianTailCache } from "../../shared/historian-cache";
 import { log } from "../../shared/logger";
 import type { PromptArgs } from "../../shared/model-suggestion-retry";
+import { isHiddenRunHolder } from "../hidden-run-holder";
 import {
     claudeAgentInstructionsText,
     deliversInstructionsInUserMessage,
@@ -34,6 +35,9 @@ import type { SessionContext, V2AgentDomain } from "./types";
 export const HIDDEN_HISTORIAN_AGENT = "historian";
 export const HIDDEN_DREAMER_AGENT = "dreamer-classifier";
 export const HIDDEN_CURATE_AGENT = DREAMER_AGENT;
+
+const HOLDER_CHAT_REFUSAL =
+    "This session holds Magic Context's background runs and can't be used for chat.";
 
 const AGENT_TOOLS: Record<string, readonly string[]> = {
     [HIDDEN_HISTORIAN_AGENT]: [],
@@ -502,7 +506,9 @@ export class HiddenChildHook {
     }
 
     owns(sessionID: string): boolean {
-        return this.childIDs.has(sessionID);
+        // The reserved ID still identifies a holder after a restart. Marking it as
+        // owned lets apply() refuse chat turns instead of managing them as user turns.
+        return this.childIDs.has(sessionID) || isHiddenRunHolder(sessionID);
     }
 
     /** Runs on the final outbound HTTP request, after the SDK inserts automatic cache markers. */
@@ -708,6 +714,16 @@ export class HiddenChildHook {
                 );
             }
             return false;
+        }
+        if (isHiddenRunHolder(draft.sessionID)) {
+            this.note(
+                `[magic-context] hidden child refused: ${HOLDER_CHAT_REFUSAL} session=${draft.sessionID}`,
+            );
+            throw new HiddenCompletionRefusal(
+                "hidden_prompt_unrecognized",
+                HOLDER_CHAT_REFUSAL,
+                true,
+            );
         }
 
         // The run is recognized by its marker in any text of the newest user

@@ -52,6 +52,7 @@ import {
     DreamerProviderOutputFailureError,
     providerOutputFailureFromInvalidManifest,
 } from "./provider-output-failure";
+import { MIN_POOL_TO_CLASSIFY } from "./task-registry";
 
 /**
  * classify-memories: a NON-agentic single-shot transform. Scores each project
@@ -70,7 +71,6 @@ import {
  * change) is the per-memory run-gate: a classified memory is not re-scored.
  */
 
-const MIN_POOL_TO_CLASSIFY = 10; // Stage 1 floor
 const FULL_POOL_CEILING = 100; // Stage 2 ceiling (<= → classify all)
 const STAGE3_ANCHOR_COUNT = 30; // calibration anchors shown in Stage 3
 // Even Stage 2/3 chunk so peak context stays bounded on a 128K window. 100

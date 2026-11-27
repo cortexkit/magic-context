@@ -3,6 +3,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isolatedTestGitEnv } from "@magic-context/core/shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 
 const dirs: string[] = [];
@@ -18,6 +19,7 @@ test.each([
     const dir = createTestTempDirFromPath(join(tmpdir(), "mc-setup-ignore-"));
     dirs.push(dir);
     const init = Bun.spawn(["git", "init", "-q"], {
+        env: isolatedTestGitEnv(),
         cwd: dir,
         windowsHide: true,
         stdout: "pipe",

@@ -90,8 +90,8 @@ function planOpenCodeConfigUpdate(
     removeDcp = false,
     /**
      * The resolved MC compaction mode. When `false` (compaction-off mode), the
-     * writer MUST NOT write `compaction.auto=false` / `compaction.prune=false`
-     * into opencode.jsonc — native compaction (or nothing) is the user's chosen
+     * writer must not change the host's compaction settings in opencode.jsonc:
+     * native compaction (or nothing) is the user's chosen
      * window manager, so pre-existing native compaction fields are left
      * byte-for-byte as found. Default `true` (mode-on) preserves today's write
      * behavior for call sites that cannot supply the resolved mode.
@@ -105,6 +105,11 @@ function planOpenCodeConfigUpdate(
     hostGeneration: OpenCodeHostGeneration = "v1",
 ): string | null {
     const registrationKey = pluginConfigKeyFor(hostGeneration);
+    const compactionDefaults = {
+        auto: false,
+        prune: false,
+        ...(hostGeneration === "v2" ? { background: false } : {}),
+    };
     // The detection result predates interactive prompts. Re-read at commit time so
     // a config created while the wizard was open is merged instead of overwritten.
     const existsAtCommit = existsSync(configPath);
@@ -112,7 +117,7 @@ function planOpenCodeConfigUpdate(
     if (!existsAtCommit) {
         const created: Record<string, unknown> = { [registrationKey]: [PLUGIN_ENTRY] };
         if (compactionEnabled) {
-            created.compaction = { auto: false, prune: false };
+            created.compaction = compactionDefaults;
         }
         return `${stringifyJsonc(created, null, 2)}\n`;
     }
@@ -171,16 +176,13 @@ function planOpenCodeConfigUpdate(
         const hasCompactionObject =
             typeof compaction === "object" && compaction !== null && !Array.isArray(compaction);
         if (!hasCompactionObject) {
-            text = setJsoncValue(text, ["compaction"], { auto: false, prune: false });
+            text = setJsoncValue(text, ["compaction"], compactionDefaults);
             changed = true;
         } else {
             const fields = compaction as Record<string, unknown>;
-            if (fields.auto !== false) {
-                text = setJsoncValue(text, ["compaction", "auto"], false);
-                changed = true;
-            }
-            if (fields.prune !== false) {
-                text = setJsoncValue(text, ["compaction", "prune"], false);
+            for (const key of Object.keys(compactionDefaults)) {
+                if (fields[key] === false) continue;
+                text = setJsoncValue(text, ["compaction", key], false);
                 changed = true;
             }
         }

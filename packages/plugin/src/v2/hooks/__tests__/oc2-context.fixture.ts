@@ -80,6 +80,8 @@ export async function oc2ContextFixture(
         limit = { context: 1000000 } as { context: number; input?: number; output?: number },
         /** Further plugin settings, merged over the fixture's own. */
         configOverrides = {} as Record<string, unknown>,
+        listModels = undefined as V2Context["model"]["list"] | undefined,
+        mockStorageBoot = true,
         eventStream = (_options: { signal: AbortSignal }): AsyncIterable<unknown> =>
             (async function* () {})(),
     } = {},
@@ -138,7 +140,9 @@ export async function oc2ContextFixture(
     const load = spyOn(configLoader, "loadPluginConfigDetailed").mockReturnValue({
         config,
     } as ReturnType<typeof configLoader.loadPluginConfigDetailed>);
-    const probe = spyOn(storageGate, "probeV2StorageAtBoot").mockResolvedValue(db);
+    const probe = mockStorageBoot
+        ? spyOn(storageGate, "probeV2StorageAtBoot").mockResolvedValue(db)
+        : undefined;
     const logs = spyOn(logger, "sessionLog");
     const storage = new Map<string, unknown>();
     let hooks = new Map<string, (draft: SessionContext) => Promise<void>>();
@@ -147,7 +151,7 @@ export async function oc2ContextFixture(
         location: { directory: root },
         agent: { transform: async () => {}, reload: async () => {} },
         model: {
-            list: () => [{ id: model, providerID: provider, limit }],
+            list: listModels ?? (() => [{ id: model, providerID: provider, limit }]),
         },
         storage: {
             get: async (key: string) => storage.get(key),
@@ -376,6 +380,12 @@ export async function oc2ContextFixture(
                 logs: logs.mock.calls.slice(before).map((args) => args.map(String).join(" ")),
             };
         },
+        async generate(question: string) {
+            const draft = inputDraft();
+            draft.messages.push({ role: "user", content: [{ type: "text", text: question }] });
+            await hooks.get("generate")!(draft);
+            return draft;
+        },
         /** A pass whose refusal is returned rather than thrown. */
         async attempt() {
             const draft = inputDraft();
@@ -397,8 +407,13 @@ export async function oc2ContextFixture(
                 logs: logs.mock.calls.slice(before).map((args) => args.map(String).join(" ")),
             };
         },
-        /** Publish the next compartment, covering rows through `endIndex` (a served row). */
-        compartment(endIndex: number) {
+        /**
+         * Publish the next compartment, covering rows through `endIndex` (a served
+         * row). With `endBlockIndex` it covers that row only through that block,
+         * as a summary written by the Rust module can, and the row's later
+         * blocks stay unsummarized.
+         */
+        compartment(endIndex: number, endBlockIndex?: number) {
             if (rows[endIndex]!.type === "system") throw new Error("boundary must be served");
             const sequence = compartments++;
             const startIndex = coveredThrough + 1;
@@ -410,6 +425,7 @@ export async function oc2ContextFixture(
                     endMessage: endIndex + 1,
                     startMessageId: rows[startIndex]!.id,
                     endMessageId: rows[endIndex]!.id,
+                    ...(endBlockIndex === undefined ? {} : { endBlockIndex }),
                     title: `Review history ${sequence}`,
                     content: prose.repeat(3),
                     p1: prose.repeat(3),
@@ -426,6 +442,17 @@ export async function oc2ContextFixture(
             await hooks.get("compaction")!(draft);
             if (!draft.result) throw new Error("compaction hook supplied no summary");
             storeCheckpoint(draft.result.summary, windowRows);
+        },
+        /**
+         * The host asks for a checkpoint summary while no checkpoint row is
+         * running, as OpenCode 2.3.1+ does when it prepares a compaction in the
+         * background after a high-usage reply. Nothing is stored and nothing
+         * is cut; the hook's answer is returned.
+         */
+        async prepareCompaction() {
+            const draft = structuredClone(lastDraft ?? inputDraft());
+            await hooks.get("compaction")!(draft);
+            return draft.result;
         },
         /**
          * The host folds with a summary its own model wrote, as it does when the
@@ -649,7 +676,7 @@ export async function oc2ContextFixture(
         async cleanup() {
             await duties?.dispose();
             logs.mockRestore();
-            probe.mockRestore();
+            probe?.mockRestore();
             load.mockRestore();
             clock.mockRestore();
             _resetDreamTimerForTests();

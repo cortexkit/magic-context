@@ -58,18 +58,37 @@ function notificationMatchesSink(notification: RpcNotification, sink: Notificati
     return sink.protocol !== 2;
 }
 
+/** Display-only notices go to the terminal showing the session, never to the replay queue. */
+export function pushLiveNotification(
+    type: string,
+    payload: Record<string, unknown>,
+    sessionId: string,
+): void {
+    const notification: RpcNotification = { id: nextNotificationId++, type, payload, sessionId };
+    for (const sink of sinks) {
+        if (sink.sessionId !== sessionId) continue;
+        try {
+            sink.send(notification);
+        } catch {
+            // A socket that closed during the send has no live terminal to notify.
+        }
+    }
+}
+
 /** Push a notification to the TUI. Fans out to any live WS sink immediately and
- *  also enqueues it so a TUI that is momentarily disconnected (reconnecting, or
+ *  normally enqueues it so a TUI that is momentarily disconnected (reconnecting, or
  *  not yet connected) still receives it on its next hello via the backlog drain.
  *  At-least-once: a live push that the socket drops is re-delivered from the
- *  queue on reconnect (pruned only when the client acknowledges it). */
+ *  queue on reconnect (pruned only when the client acknowledges it). Live-only
+ *  notifications are not kept for replay. */
 export function pushNotification(
     type: string,
     payload: Record<string, unknown>,
     sessionId?: string,
+    options?: { liveOnly?: boolean },
 ): void {
     const notification: RpcNotification = { id: nextNotificationId++, type, payload, sessionId };
-    queue.push(notification);
+    if (!options?.liveOnly) queue.push(notification);
     // Fan out to every live sink this notification is scoped to. A delivery throw
     // (dead socket mid-send) must not block other sinks or the caller.
     for (const sink of sinks) {
@@ -78,14 +97,14 @@ export function pushNotification(
             sink.send(notification);
         } catch {
             // Socket died between liveness check and send; the close handler will
-            // unregister it, and the queue backlog re-delivers on reconnect.
+            // unregister it. Only queued notifications replay on reconnect.
         }
     }
     // Keep a strict global bound. Reserve the newest item for at most 25 recently
     // active scopes, then evict the oldest unreserved item. This protects a quiet
     // session from one noisy peer without allowing one item per session to grow
     // the queue without limit.
-    if (queue.length > 100) {
+    if (!options?.liveOnly && queue.length > 100) {
         const reservedIds = new Set<number>();
         const reservedScopes = new Set<string>();
         for (let i = queue.length - 1; i >= 0 && reservedScopes.size < 25; i -= 1) {

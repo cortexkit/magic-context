@@ -356,13 +356,32 @@ export function getLastCompartmentEndMessageId(db: Database, sessionId: string):
     return id && id.length > 0 ? id : null;
 }
 
+/** Check whether the markers saved with the cached pair include the newest compartment. */
+export function cachedHistoryCoversLatestCompartment(
+    compartments: readonly Pick<Compartment, "sequence" | "endMessageId">[],
+    m0MaxSequence: number,
+    historyEndMessageId: string | null,
+): boolean {
+    const latest = compartments.at(-1);
+    if (!latest || latest.sequence <= m0MaxSequence) return true;
+    // A partial cut can leave multiple compartments ending in the same message.
+    // The m[1] boundary only stores the message ID, so it is not proof in that case.
+    return (
+        !!historyEndMessageId &&
+        latest.endMessageId === historyEndMessageId &&
+        !compartments.some(
+            (other) => other !== latest && other.endMessageId === historyEndMessageId,
+        )
+    );
+}
+
 /**
  * Look up compartments whose stored `end_message_id` matches the given
  * OpenCode message id. Returns an ARRAY — schema only enforces
  * `UNIQUE(session_id, sequence)`, NOT `(session_id, end_message_id)`, so
  * a future bug could in principle leave two rows sharing a boundary. The
  * marker drain's `validatePendingTarget` treats `length > 1` as a schema
- * invariant violation and bails to stale-skip (plan v6 section 5).
+ * invariant violation and skips the pending marker as stale.
  *
  * Normal path: exactly one match → caller treats it as the target row.
  */

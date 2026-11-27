@@ -12,6 +12,7 @@ import {
     resetNoteNudgeCooldownOnly,
 } from "../../../hooks/magic-context/note-nudger";
 import { Database } from "../../../shared/sqlite";
+import { isolatedTestGitEnv } from "../../../shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
@@ -190,14 +191,12 @@ const original =
 function tagRepository() {
     const dir = tempDirectory();
     const git = (...args: string[]) =>
-        // Fixture commits must not invoke inherited hooks, signing agents or
-        // user configuration: these can contact services or wait for input.
-        execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-C", dir, ...args], {
+        execFileSync("git", ["-C", dir, ...args], {
             encoding: "utf8",
             stdio: ["ignore", "pipe", "pipe"],
             windowsHide: true,
             timeout: 5_000,
-            env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+            env: isolatedTestGitEnv(),
         }).trim();
     git("init", "-b", "master");
     git("config", "user.name", "Fixture");

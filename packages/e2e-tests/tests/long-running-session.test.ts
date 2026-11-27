@@ -7,6 +7,7 @@ import { join, resolve as pathResolve } from "node:path";
 import { computeNormalizedHash } from "../../plugin/src/features/magic-context/memory/normalize-hash";
 import { resolveProjectIdentity } from "../../plugin/src/features/magic-context/memory/project-identity";
 import { computeSyntheticCallId } from "../../plugin/src/hooks/magic-context/todo-view";
+import { gaDatabasePath, V2StoreReader } from "../../plugin/src/v2/store-reader";
 import { TestHarness } from "../src/harness";
 import { OpenCode2TestHarness } from "../src/opencode2-harness";
 import { PiTestHarness } from "../src/pi-harness";
@@ -534,7 +535,9 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
         // (routine need-blind age-drops are gone; these are need-driven).
 
         // Phase 3: ctx_note write plus terminal todo trigger. The nudge is delayed to a fresh user turn and then replayed.
-        emitToolOnce(/^ctx_note$/, { action: "write", content: "Revisit the long-running OpenCode assertions after verification." });
+        // OpenCode 2 validates the write against its advertised required
+        // note_ids field; the empty selector denotes a new note.
+        emitToolOnce(/^ctx_note$/, { action: "write", content: "Revisit the long-running OpenCode assertions after verification.", ...(h instanceof OpenCode2TestHarness ? { note_ids: [] } : {}) });
         await send(sessionId, "turn 7: write a deferred session note with ctx_note", "phase 3 after note write");
         expect(
             h.contextDb().prepare("SELECT COUNT(*) AS n FROM notes WHERE session_id = ?").get(sessionId) as { n: number },
@@ -659,9 +662,16 @@ forEachHost(import.meta.url, "long-running OpenCode Magic Context session", (hos
             const beforeFold = h.mock.requests().length;
             await h.compactSession(sessionId);
             expect(h.mock.requests().length).toBe(beforeFold);
+            const reader = new V2StoreReader(gaDatabasePath(h.dataDir, "latest", h.opencode.env));
+            try {
+                expect(reader.latestCompaction(sessionId)?.data.status).toBe("completed");
+            } finally { reader.close(); }
             const foldedMarker = await send(sessionId, "surface the native checkpoint", "phase 6 native fold");
             const body = JSON.stringify((await mainRequestForMarker(foldedMarker)).body);
-            expect(body).toContain("<conversation-checkpoint>");
+            // The checkpoint exists in the host store. The next request must
+            // serve the restored history itself, not the host checkpoint wrapper.
+            expect(body).toContain("<session-history>");
+            expect(body).not.toContain("<conversation-checkpoint>");
             expect(body).toContain("Long OpenCode e2e chunk");
         } else {
         emitToolOnce(/todo.*write|write.*todo|todowrite/i, { todos: ACTIVE_TODOS });

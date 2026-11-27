@@ -1080,7 +1080,6 @@ pub struct SessionMessageRow {
     pub timestamp_ms: i64,
     pub role: String,
     pub text_preview: String,
-    pub raw_json: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -5159,11 +5158,19 @@ pub fn enumerate_memory_projects(conn: &Connection) -> Result<Vec<ProjectRow>, r
 /// in the session identity map. Missing rows are normal for sessions from before
 /// identity tracking was added; those sessions cannot safely contribute a
 /// project identity here.
-fn mapped_session_directories(identities: &SessionIdentityMap) -> Vec<(String, String)> {
+fn mapped_session_directories(
+    identities: &SessionIdentityMap,
+    include_archived: bool,
+) -> Vec<(String, String)> {
     let mut dirs = Vec::new();
 
     if let Some(oc) = resolve_opencode_db_path() {
         if let Ok((conn, resolved)) = open_opencode_sessions(&oc) {
+            let archive_filter = if include_archived {
+                ""
+            } else {
+                " AND time_archived IS NULL"
+            };
             for &generation in &resolved.generations {
                 let harness = match generation {
                     OpenCodeStoreGeneration::V1 => Harness::Opencode,
@@ -5172,7 +5179,7 @@ fn mapped_session_directories(identities: &SessionIdentityMap) -> Vec<(String, S
                 if let Ok(mut stmt) = conn.prepare(&format!(
                     "SELECT id, COALESCE(directory, '')
                  FROM {}
-                 WHERE directory IS NOT NULL AND directory != ''",
+                  WHERE directory IS NOT NULL AND directory != ''{archive_filter}",
                     opencode_session_table(generation)
                 )) {
                     if let Ok(rows) = stmt.query_map([], |row| {
@@ -5215,7 +5222,7 @@ fn mapped_session_directories(identities: &SessionIdentityMap) -> Vec<(String, S
 
 fn session_identity_by_directory(identities: &SessionIdentityMap) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    for (identity, dir) in mapped_session_directories(identities) {
+    for (identity, dir) in mapped_session_directories(identities, true) {
         map.entry(dir).or_insert(identity);
     }
     map
@@ -5225,10 +5232,10 @@ fn session_identity_by_directory(identities: &SessionIdentityMap) -> HashMap<Str
 /// identities recorded in the session identity map. Sessions without a recorded
 /// identity are omitted because there is no authoritative project identity to
 /// group them under.
-fn session_directories_by_identity() -> HashMap<String, String> {
+fn session_directories_by_identity(include_archived: bool) -> HashMap<String, String> {
     let identities = load_session_identity_map();
     let mut map: HashMap<String, String> = HashMap::new();
-    for (identity, dir) in mapped_session_directories(&identities) {
+    for (identity, dir) in mapped_session_directories(&identities, include_archived) {
         map.entry(identity)
             .and_modify(|existing| {
                 if dir_is_better_representative(&dir, existing) {
@@ -5443,8 +5450,9 @@ pub fn get_project_cards(conn: &Connection) -> Vec<ProjectCard> {
 
     // Workspace membership: project identity → workspace name (members ≤ 1 ws).
     let workspace_by_identity = workspace_name_by_identity(conn);
-    // identity → representative real directory (resolves dir:<hash> to its cwd).
-    let dir_by_identity = session_directories_by_identity();
+    // Archived sessions can't name a live project's card or hide it by making
+    // the directory-existence check use a checkout that no longer exists.
+    let dir_by_identity = session_directories_by_identity(false);
     // Resolved once: the home probe canonicalizes the home directory, and asking
     // it per card would repeat that filesystem call for every project.
     let home_project = crate::workspaces::HomeProject::resolve();
@@ -7823,7 +7831,6 @@ pub fn get_session_messages(
                     timestamp_ms: message.timestamp_ms,
                     role: message.role.clone(),
                     text_preview: message.text_preview.clone(),
-                    raw_json: message.raw_json.clone(),
                 })
                 .collect())
         }
@@ -8001,13 +8008,13 @@ fn load_opencode_messages(
     };
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([session_id], |row| {
-        let raw_string: String = row.get(3)?;
-        let raw_json: serde_json::Value = serde_json::from_str(&raw_string).unwrap_or_default();
         let aggregated_text: String = row.get(4)?;
         // Use aggregated parts text when present; fall back to legacy in-message content
         // (covers any future schema variants where text might live on the message row).
         let text_preview = if aggregated_text.is_empty() {
-            preview_from_json(&raw_json)
+            let raw_string: String = row.get(3)?;
+            let data = serde_json::from_str(&raw_string).unwrap_or_default();
+            preview_from_json(&data)
         } else {
             normalize_preview(&aggregated_text)
         };
@@ -8016,7 +8023,6 @@ fn load_opencode_messages(
             timestamp_ms: row.get(1)?,
             role: row.get(2)?,
             text_preview,
-            raw_json,
         })
     })?;
     rows.collect()
@@ -8295,37 +8301,64 @@ pub fn get_compartments(
     if let Some(opencode_db_path) = resolve_opencode_db_path() {
         if let Ok((oc_conn, resolved)) = open_opencode_sessions(&opencode_db_path) {
             if let Some(generation) = resolved.owner(session_id) {
-                let message_table = match generation {
-                    OpenCodeStoreGeneration::V1 => "message",
-                    OpenCodeStoreGeneration::V2 => "session_message",
-                };
-                let timestamp_sql =
-                    format!("SELECT time_created FROM {message_table} WHERE id = ?1");
-                for comp in compartments.iter_mut() {
-                    if let Some(ref start_id) = comp.start_message_id {
-                        if let Ok(ts) =
-                            oc_conn.query_row(&timestamp_sql, rusqlite::params![start_id], |row| {
-                                row.get::<_, Option<i64>>(0)
-                            })
-                        {
-                            comp.start_time = ts;
-                        }
-                    }
-                    if let Some(ref end_id) = comp.end_message_id {
-                        if let Ok(ts) =
-                            oc_conn.query_row(&timestamp_sql, rusqlite::params![end_id], |row| {
-                                row.get::<_, Option<i64>>(0)
-                            })
-                        {
-                            comp.end_time = ts;
-                        }
-                    }
-                }
+                fill_opencode_compartment_times(&oc_conn, generation, &mut compartments);
             }
         }
     }
 
     Ok(compartments)
+}
+
+fn fill_opencode_compartment_times(
+    conn: &Connection,
+    generation: OpenCodeStoreGeneration,
+    compartments: &mut [Compartment],
+) {
+    let boundary_ids: HashSet<&str> = compartments
+        .iter()
+        .flat_map(|comp| {
+            [
+                comp.start_message_id.as_deref(),
+                comp.end_message_id.as_deref(),
+            ]
+        })
+        .flatten()
+        .collect();
+    if boundary_ids.is_empty() {
+        return;
+    }
+    let message_table = match generation {
+        OpenCodeStoreGeneration::V1 => "message",
+        OpenCodeStoreGeneration::V2 => "session_message",
+    };
+    // Pass the entire boundary set in one parameter so long sessions do not hit
+    // SQLite's bind-variable limit. The message ID index handles the lookups.
+    let sql = format!(
+        "SELECT id, time_created FROM {message_table}
+         WHERE id IN (SELECT value FROM json_each(?1))"
+    );
+    let Ok(ids_json) = serde_json::to_string(&boundary_ids) else {
+        return;
+    };
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return;
+    };
+    let Ok(rows) = stmt.query_map([ids_json], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    }) else {
+        return;
+    };
+    let times: HashMap<_, _> = rows.flatten().collect();
+    for comp in compartments {
+        comp.start_time = comp
+            .start_message_id
+            .as_ref()
+            .and_then(|id| times.get(id).copied());
+        comp.end_time = comp
+            .end_message_id
+            .as_ref()
+            .and_then(|id| times.get(id).copied());
+    }
 }
 
 pub fn get_session_facts(
@@ -8668,7 +8701,7 @@ pub fn get_dreamer_projects(conn: &Connection) -> Result<Vec<DreamerProject>, ru
     // 2b. Reverse map identity → real directory from session.directory, so
     // `dir:<hash>` identities (non-git dirs OpenCode buckets under `global`,
     // invisible to the worktree-based enumeration) resolve to their real path.
-    let dir_by_identity = session_directories_by_identity();
+    let dir_by_identity = session_directories_by_identity(true);
 
     // 3. Global (user) dreamer schedules — the baseline every project inherits.
     let global_schedules = crate::jsonc::read_dreamer_task_schedules(
@@ -10485,6 +10518,94 @@ mod session_identity_map_tests {
         });
     }
 
+    fn assert_project_cards_ignore_archives(generation: OpenCodeStoreGeneration) {
+        with_temp_data_home(|data_home| {
+            let archived_only = data_home.join("archived-only");
+            let archived_checkout = data_home.join("main");
+            let live_worktree = data_home.join("live-worktree");
+            std::fs::create_dir(&archived_only).expect("archived-only project directory");
+            std::fs::create_dir_all(archived_checkout.join(".git")).expect("main checkout");
+            std::fs::create_dir(&live_worktree).expect("live worktree");
+            std::fs::write(
+                live_worktree.join(".git"),
+                "gitdir: ../main/.git/worktrees/live\n",
+            )
+            .expect("worktree git file");
+
+            let context = create_context_db(data_home, true);
+            let (oc, harness) = match generation {
+                OpenCodeStoreGeneration::V1 => (create_opencode_db(data_home), "opencode"),
+                OpenCodeStoreGeneration::V2 => (create_opencode2_db(data_home), "opencode2"),
+            };
+            let sql = format!(
+                "INSERT INTO {} (id, directory, time_updated, time_archived)
+                 VALUES (?1, ?2, ?3, ?4)",
+                opencode_session_table(generation)
+            );
+            for (id, dir, identity, updated, archived) in [
+                (
+                    "archived-only",
+                    &archived_only,
+                    "dir:archived-only",
+                    300,
+                    Some(400),
+                ),
+                (
+                    "archived-main",
+                    &archived_checkout,
+                    "git:mixed",
+                    200,
+                    Some(400),
+                ),
+                ("live-worktree", &live_worktree, "git:mixed", 100, None),
+            ] {
+                insert_session_project(&context, id, harness, identity);
+                oc.execute(
+                    &sql,
+                    (id, dir.to_str().expect("UTF-8 path"), updated, archived),
+                )
+                .expect("insert session");
+            }
+            context
+                .execute(
+                    "INSERT INTO memories (project_path) VALUES ('dir:archived-only')",
+                    [],
+                )
+                .expect("insert archived project's memory");
+            drop(oc);
+
+            let cards = get_project_cards(&context);
+            assert_eq!(cards.len(), 1, "only the mixed project should have a card");
+            assert_eq!(cards[0].identity, "git:mixed");
+            assert_eq!(cards[0].session_count, 1);
+            assert_eq!(cards[0].last_activity_ms, 100);
+            assert_eq!(cards[0].memory_count, 0);
+
+            // A missing representative directory can hide a card with no memories.
+            std::fs::remove_dir_all(&archived_checkout).expect("remove archived checkout");
+            let cards_after_removal = get_project_cards(&context);
+            let expected = Some(("live-worktree", live_worktree.to_str().unwrap()));
+            assert_eq!(
+                (
+                    cards.first().map(|card| (card.display_name.as_str(), card.primary_path.as_str())),
+                    cards_after_removal.first().map(|card| (card.display_name.as_str(), card.primary_path.as_str())),
+                ),
+                (expected, expected),
+                "the live worktree should represent the card before and after the archived checkout disappears"
+            );
+        });
+    }
+
+    #[test]
+    fn get_project_cards_ignore_archived_opencode1_sessions() {
+        assert_project_cards_ignore_archives(OpenCodeStoreGeneration::V1);
+    }
+
+    #[test]
+    fn get_project_cards_ignore_archived_opencode2_sessions() {
+        assert_project_cards_ignore_archives(OpenCodeStoreGeneration::V2);
+    }
+
     #[test]
     fn get_project_cards_flags_the_home_directory_identity_without_a_matching_path() {
         with_temp_data_home(|data_home| {
@@ -10765,6 +10886,94 @@ mod clean_pi_title_tests {
 }
 
 #[cfg(test)]
+mod compartment_time_tests {
+    use super::*;
+    use rusqlite::ffi;
+    use std::cell::Cell;
+    use std::ffi::{c_int, c_uint, c_void};
+
+    fn compartment(start: Option<&str>, end: Option<&str>) -> Compartment {
+        Compartment {
+            id: 1,
+            session_id: "s".into(),
+            sequence: 1,
+            start_message: 1,
+            end_message: 2,
+            start_message_id: start.map(str::to_owned),
+            end_message_id: end.map(str::to_owned),
+            title: String::new(),
+            content: String::new(),
+            created_at: 0,
+            start_time: None,
+            end_time: None,
+            importance: 50,
+            episode_type: None,
+            p1: None,
+            p2: None,
+            p3: None,
+            p4: None,
+            legacy: 0,
+        }
+    }
+
+    unsafe extern "C" fn count_statement(
+        _: c_uint,
+        state: *mut c_void,
+        _: *mut c_void,
+        _: *mut c_void,
+    ) -> c_int {
+        // The test keeps the counter alive for the lifetime of the connection.
+        let count = unsafe { &*state.cast::<Cell<usize>>() };
+        count.set(count.get() + 1);
+        0
+    }
+
+    #[test]
+    fn compartment_times_use_one_statement_for_both_boundaries() {
+        for (generation, table) in [
+            (OpenCodeStoreGeneration::V1, "message"),
+            (OpenCodeStoreGeneration::V2, "session_message"),
+        ] {
+            let count = Cell::new(0_usize);
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch(&format!(
+                "CREATE TABLE {table} (id TEXT PRIMARY KEY, time_created INTEGER);
+                 INSERT INTO {table} VALUES ('first', 100), ('last', 200), ('null-time', NULL);"
+            ))
+            .unwrap();
+            let mut compartments = [
+                compartment(Some("first"), Some("last")),
+                compartment(Some("last"), Some("missing")),
+                compartment(None, Some("null-time")),
+            ];
+
+            // SAFETY: SQLite calls the counter synchronously on this test's thread.
+            // The counter outlives the connection even if the helper panics.
+            unsafe {
+                let db = conn.handle();
+                assert_eq!(
+                    ffi::sqlite3_trace_v2(
+                        db,
+                        ffi::SQLITE_TRACE_STMT as c_uint,
+                        Some(count_statement),
+                        (&count as *const Cell<usize>).cast_mut().cast(),
+                    ),
+                    ffi::SQLITE_OK
+                );
+                fill_opencode_compartment_times(&conn, generation, &mut compartments);
+                ffi::sqlite3_trace_v2(db, 0, None, std::ptr::null_mut());
+            }
+
+            assert_eq!(
+                compartments.map(|comp| (comp.start_time, comp.end_time)),
+                [(Some(100), Some(200)), (Some(200), None), (None, None)]
+            );
+            assert_eq!(count.get(), 1, "{table} boundary timestamp statements");
+        }
+    }
+}
+
+#[cfg(test)]
 mod load_messages_tests {
     use super::*;
     use rusqlite::Connection;
@@ -10808,6 +11017,37 @@ mod load_messages_tests {
             (id, message_id, time, data),
         )
         .expect("insert part");
+    }
+
+    #[test]
+    fn session_message_payload_contains_only_view_fields() {
+        let conn = make_test_db();
+        conn.execute(
+            "INSERT INTO message VALUES ('m1', 'ses_test', 100, ?1)",
+            [serde_json::json!({
+                "role": "user",
+                "content": "legacy preview",
+                "metadata": "unused".repeat(1024),
+            })
+            .to_string()],
+        )
+        .unwrap();
+        let messages = load_opencode_messages(&conn, OpenCodeStoreGeneration::V1, "ses_test")
+            .expect("load messages");
+        let payload = serde_json::to_value(messages).unwrap();
+        assert!(
+            payload[0].get("raw_json").is_none(),
+            "raw_json crossed the dashboard IPC boundary"
+        );
+        assert_eq!(
+            payload,
+            serde_json::json!([{
+                "message_id": "m1",
+                "timestamp_ms": 100,
+                "role": "user",
+                "text_preview": "legacy preview",
+            }])
+        );
     }
 
     #[test]

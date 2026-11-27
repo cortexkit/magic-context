@@ -17,6 +17,7 @@ import {
 } from "../../features/magic-context/dreamer/docs-proposals";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { getHarness } from "../../shared/harness";
+import { isolatedTestGitEnv } from "../../shared/test-git-env";
 import { createTestTempDirFromPath, getOriginalTempDirForTests } from "../../shared/test-temp-dir";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
 import type { HiddenCompletionExecutor } from "./compartment-runner-types";
@@ -79,7 +80,12 @@ test.each([
     const dir = createTestTempDirFromPath(join(tmpdir(), "mc-artifact-git-"));
     dirs.push(dir);
     const git = (...args: string[]) =>
-        execFileSync("git", args, { cwd: dir, encoding: "utf8", windowsHide: true });
+        execFileSync("git", args, {
+            cwd: dir,
+            encoding: "utf8",
+            env: isolatedTestGitEnv(),
+            windowsHide: true,
+        });
     git("init", "-q");
     mkdirSync(join(dir, ".cortexkit"));
     writeFileSync(join(dir, ".cortexkit/magic-context.jsonc"), "{}\n");

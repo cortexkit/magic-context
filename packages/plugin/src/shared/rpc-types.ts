@@ -62,8 +62,12 @@ export interface SidebarSnapshot {
     cacheTtl: string;
     /** Persistent runtime failure shown directly in the sidebar when non-null. */
     lastTransformError: string | null;
+    /** Display-only warning remembered by the running plugin after a project change. */
+    projectBindingWarning?: string;
     /** Durable history-compression failure count used to select the stable summary warning. */
     historianFailureCount?: number;
+    /** The current saved history of this OpenCode 2 fork needs a rebuild. */
+    forkHistoryGap?: boolean;
     lastDreamerRunAt: number | null;
     projectIdentity: string | null;
     compartmentTokens: number;

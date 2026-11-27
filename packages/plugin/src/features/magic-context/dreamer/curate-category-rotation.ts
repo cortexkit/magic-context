@@ -119,7 +119,7 @@ export function beginCurateCategoryRun<T extends { category: string }>(
     return scope;
 }
 
-export function curateTaskStateAfterSuccess(
+export function curateTaskStateAfterCategoryTurn(
     db: Database,
     projectIdentity: string,
     category: CurateMemoryCategory,

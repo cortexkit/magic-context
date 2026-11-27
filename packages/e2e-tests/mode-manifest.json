@@ -99,6 +99,22 @@
             "hosts": ["opencode2"]
         },
         {
+            "path": "tests/opencode2/partial-boundary-manual-compaction.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real host manual /compact when the newest compartment ends inside a tool step (end_block_index on the call, its result unsummarized): the result is served once before and after the compaction, on the next turn and after a restart, and each request keeps the previous one as its exact prefix; a whole-row arm pins the unchanged request. Background compaction (OpenCode 2.3.1+) is turned off so the hook sees the running row. PID lsof proves isolated stores.",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
+            "path": "tests/opencode2/rowless-compaction-hook.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real host compaction requests with no running checkpoint row, held by barrier plugins before and after Magic Context: 2.3.1+ background preparation after a high-usage reply, 2.0.22/2.1.0 provider compaction mode, and the ordinary automatic checkpoint on every version (on 2.3.1+ the host may record the row while the hooks run). The stored session row is byte-identical across the call, both history head messages stay as served across the call and the completed checkpoint, a queued drop waits for a real rebuild or lands on the force ride, a restart replays, and a restart that changes the system prompt folds the summary from m[1] into m[0] exactly once with every later message sent once. PID lsof proves throwaway-store containment.",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/opencode2/native-fold-provenance.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
@@ -1003,6 +1019,14 @@
             ]
         },
         {
+            "path": "tests/opencode2/background-compaction-known-limitation.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "On hosts with background compaction, a manual compaction answered from a prepared result preserves history without shrinking the next Magic Context request",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/opencode2/empty-text-sentinels.test.ts",
             "tier": "excluded",
             "invocation": {
@@ -1093,6 +1117,21 @@
             ]
         },
         {
+            "path": "tests/opencode2/fork-stale-summary.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "Real OpenCode 2 sibling requests pin healthy fork bytes. Straddling and damaged-parent forks keep unproven history raw. A status line and terminal toast name the rebuild without changing a damaged fork's request or transcript, and disappear from status after /ctx-recomp. PID lsof proves throwaway-store containment.",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/missing-history-boundary.test.ts",
             "tier": "excluded",
             "invocation": {
@@ -1124,12 +1163,27 @@
         },
         {
             "path": "tests/opencode2/image-attachment.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: a user image attached inline or by file URI, and the turns after it, must reach the provider with Magic Context loaded; OpenCode 2.0.15 rebuilds the context draft with a schema that accepts only its own Media.Asset instance, so a plain-object copy of the attachment fails the turn with 'Schema validation failed'. It also covers an image restored from before a host compaction checkpoint, in the same process and after a host restart, which must reach the provider byte-identical to the host's own rendering. The v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "rationale": "OpenCode 2 requires its own Media.Asset instances for inline and file-URI attachments. Images must survive subsequent turns and, when restored from before a host compaction checkpoint, reach the provider byte-identical to the host's own rendering, both in the same process and after a host restart.",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/restored-image-system-first-draft.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "An image restored from before an OpenCode 2 compaction checkpoint must remain a host Media.Asset even after a restart whose first draft starts with a reasoning-effort system message. From OpenCode 2.3 the system message class has no media member, so that first message cannot determine the host's media representation.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1447,7 +1501,7 @@
                 "ts": false,
                 "rust": false
             },
-            "rationale": "OpenCode 2.0.22 native hidden children are parented, removed at completion, and leave no root sessions; dedicated v2 lane",
+            "rationale": "Native hidden runs are removed at completion without touching the user's session or the permanent background holder; dedicated v2 lane",
             "contract_refs": [
                 "R44",
                 "OC2-S1"
@@ -1455,6 +1509,14 @@
             "hosts": [
                 "opencode2"
             ]
+        },
+        {
+            "path": "tests/opencode2/hidden-run-notifications.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "Real OpenCode 2 host: historian and maintenance runs do not wake their holder or the user; the user's own completion remains notifiable; dedicated v2 lane",
+            "contract_refs": ["R44", "OC2-S1"],
+            "hosts": ["opencode2"]
         },
         {
             "path": "tests/opencode2/hidden-child-terminal-failure.test.ts",

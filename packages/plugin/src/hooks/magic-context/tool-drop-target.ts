@@ -637,7 +637,12 @@ export function createToolDropTarget(
                     parts,
                 } as MessageLike);
             const before = count(served);
-            const retained = skeleton ? parts.map((part) => skeletonRealToolPart(part, tagId)) : [];
+            // A new drop removes the call's attachments, so price it without them.
+            // A placeholder recorded before that rule replays with its attachments.
+            const stripAttachments = skeleton && hasAttachments();
+            const retained = skeleton
+                ? parts.map((part) => skeletonRealToolPart(part, tagId, stripAttachments))
+                : [];
             const after = count(retained);
             // Several calls can share one thinking block; credit only tool I/O here to avoid reclaiming it twice.
             return {

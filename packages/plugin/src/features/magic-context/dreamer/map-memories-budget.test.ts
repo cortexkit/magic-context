@@ -6,6 +6,7 @@ import path from "node:path";
 import type { HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-types";
 import * as logger from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
+import { isolatedTestGitEnv } from "../../../shared/test-git-env";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { insertMemory } from "../memory";
 import { getMemoryVerifications } from "../memory/storage-memory-verifications";
@@ -40,8 +41,8 @@ function fixture(count: number) {
             sourceSessionId: "fixture",
         });
     });
-    execFileSync("git", ["init", "-q"], { cwd: dir, windowsHide: true });
-    execFileSync("git", ["add", "src"], { cwd: dir, windowsHide: true });
+    execFileSync("git", ["init", "-q"], { cwd: dir, env: isolatedTestGitEnv(), windowsHide: true });
+    execFileSync("git", ["add", "src"], { cwd: dir, env: isolatedTestGitEnv(), windowsHide: true });
     expect(acquireLease(db, "holder", "lease")).toBe(true);
     const args: MapMemoriesArgs = {
         db,
@@ -188,8 +189,8 @@ test("progressing timeouts do not trip the no-progress breaker", async () => {
     expect(result.stopReason).not.toBe("timeout-circuit-breaker");
 });
 
-test("two failed attempts defer unmapped memories across runs", async () => {
-    const { args } = fixture(5);
+test("repeated prompt aborts keep unmapped memories eligible across runs", async () => {
+    const { args, memories } = fixture(5);
     args.client = {
         session: {
             create: async () => ({ data: { id: "failed-child" } }),
@@ -204,11 +205,11 @@ test("two failed attempts defer unmapped memories across runs", async () => {
     expect(failed.failure).toBeInstanceOf(Error);
     expect((failed.failure as Error).message).toContain("MessageAbortedError");
     expect(failed.failureStage).toBe("prompt");
-    await mapMemories(args);
-    expect((await mapMemories(args)).deferred).toBe(true);
+    expect((await mapMemories(args)).failureStage).toBe("prompt");
+    expect((await mapMemories(args)).failureStage).toBe("prompt");
     expect(
         selectMapMemoryInputs(args.db, args.projectIdentity, args.sessionDirectory),
-    ).toHaveLength(0);
+    ).toHaveLength(5);
     const newer = insertMemory(args.db, {
         projectPath: args.projectIdentity,
         category: "ARCHITECTURE",
@@ -216,19 +217,10 @@ test("two failed attempts defer unmapped memories across runs", async () => {
         sourceSessionId: "fixture",
     });
     expect(
-        selectMapMemoryInputs(args.db, args.projectIdentity, args.sessionDirectory).map(
-            (m) => m.id,
-        ),
-    ).toEqual([newer.id]);
-    const originalNow = Date.now;
-    Date.now = () => originalNow() + 3_600_001;
-    try {
-        expect(
-            selectMapMemoryInputs(args.db, args.projectIdentity, args.sessionDirectory),
-        ).toHaveLength(6);
-    } finally {
-        Date.now = originalNow;
-    }
+        selectMapMemoryInputs(args.db, args.projectIdentity, args.sessionDirectory)
+            .map((m) => m.id)
+            .sort((a, b) => a - b),
+    ).toEqual([...memories.map((m) => m.id), newer.id]);
 });
 
 test("hidden carrier salvages emitted mappings before closing on abort", async () => {

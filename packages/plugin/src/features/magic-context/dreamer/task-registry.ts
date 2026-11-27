@@ -29,6 +29,14 @@ export const CANONICAL_DREAM_TASKS = [
 
 export type DreamTaskName = (typeof CANONICAL_DREAM_TASKS)[number];
 
+/**
+ * Importance scoring ranks a project's memories against one another, so it
+ * needs at least this many memories that are active (not archived) to say
+ * anything. Below it the task does nothing, and its schedule check and backlog
+ * count treat the project as having no work.
+ */
+export const MIN_POOL_TO_CLASSIFY = 10;
+
 export function availableDreamTasks(smartNotesEnabled = true): DreamTaskName[] {
     return CANONICAL_DREAM_TASKS.filter(
         (task) => smartNotesEnabled || task !== "evaluate-smart-notes",

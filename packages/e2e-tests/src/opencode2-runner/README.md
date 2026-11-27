@@ -25,24 +25,34 @@ The lane is pinned to OpenCode 2.0.22 (`@opencode/cli`, `@opencode/plugin` and `
 ## Additional compatibility versions
 
 `packages/e2e-tests/opencode2-versions.json` lists the primary package pin and
-compatibility targets. CI runs the same manifest-derived suite on both 2.0.22
-and 2.1.0; the Docker wrapper also runs both exact versions. To test either
-version locally, install its CLI separately and set both
+compatibility targets. CI runs the same manifest-derived suite on 2.0.22, 2.1.0,
+2.3.2, and 2.4.2. The separate Docker smoke still runs 2.0.22 and 2.1.0. To test a
+compatibility version locally, install its CLI separately and set both
 `MC_E2E_OPENCODE2_CLI=/absolute/path/to/opencode.exe` and
 `MC_E2E_OPENCODE2_VERSION=2.1.0`. The version assertions still require an exact
 match; changing only the binary override will not bypass them.
 
-For an unpinned 2.2.x compatibility proof, install its CLI and the same exact
-`@opencode/ai` version under a private throwaway root. Set
+For a 2.2.x, 2.3.x, or 2.4.x compatibility proof, install the CLI and pin
+`@opencode/ai` to the identical CLI version under a private throwaway root. Set
 `MC_E2E_OPENCODE2_AI_ROOT` to that install root alongside the CLI/version
 overrides. The runner refuses a mismatched or missing schema version and bundles
 the matching schema validator; it never disables validation or substitutes 2.1's
-schema. This does not change the repository's dependency or CI version pins.
+schema. In CI, the step that installs the OpenCode version a matrix leg names
+also installs `@opencode/ai` at that same version and sets this path, for every
+version other than the
+2.0.x and 2.1.0 releases covered by the workspace's pinned schema packages.
+Testing another CLI does not change the primary dependency pin.
 
 Each fixture bundles an independent validator for OpenCode's LLM message schema, with the dependency tree
 matching its CLI generation: `@opencode/ai` for 2.0.x, `@opencode/ai-2-1` for
 2.1.0. Bundling prevents foreign Effect imports into the host runtime. The
 fixture is not ready until that guard is active; a failed guard fails startup.
+
+The mode manifest can record an exact test name (including its `describe` path)
+and exact current host versions under `knownFailures`, with the cause and reason.
+Those tests still run. The shard reads Bun's JUnit results and reports listed
+failures; a listed pass asks for the entry to be removed. Skips, missing results,
+and unrelated failures cannot satisfy an entry.
 
 Select the same files as the CI host lane with
 `bun scripts/validate-mode-manifest.ts --mode ts --harness opencode2` from

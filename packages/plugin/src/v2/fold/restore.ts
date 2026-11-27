@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { isStorageNoticeText } from "../hooks/storage-notice";
 import type { V2Message } from "../hooks/types";
 import type { StoreRow } from "../store-reader";
+import { hostMediaAsset } from "./host-media";
 
 type Part = Record<string, unknown>;
 interface Attachment {
@@ -13,11 +14,11 @@ interface Attachment {
     mention?: { text?: string };
 }
 /**
- * How restored attachments are rendered. Hosts before OpenCode 2.0.15 take a plain
- * `{ mediaType, data }` media part; later hosts need their own `Media.Asset` instance
- * (see host-media.ts). When no instance can be produced the attachment is replaced by a
- * short note, so the row's text still reaches the model and the host does not reject
- * the whole request.
+ * How restored attachments are rendered. Every supported OpenCode 2 host needs its own
+ * `Media.Asset` instance in a media part (see host-media.ts). When no instance can be
+ * produced the attachment is replaced by a short note, so the row's text still reaches
+ * the model and the host does not reject the whole request: a lost image is
+ * recoverable, a request the host cannot even prepare is not.
  */
 export interface RestoreMedia {
     /** The host's asset for a base64 payload, or why none could be built. */
@@ -26,13 +27,16 @@ export interface RestoreMedia {
     unavailable(detail: { rowID: string; name?: string; mediaType: string; reason: string }): void;
 }
 
+/** The host's own assets, with no report when one cannot be built. */
+export const HOST_RESTORE_MEDIA: RestoreMedia = { asset: hostMediaAsset, unavailable: () => {} };
+
 /** Depends only on the stored row, so a replay of the same row produces the same bytes. */
 export function unavailableAttachmentNote(name: string | undefined, mediaType: string): string {
     return `[Attachment ${name ? `"${name}" ` : ""}(${mediaType}) is not available in this restored history]`;
 }
 
 const imageMimes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-function attachmentParts(files: Attachment[], rowID: string, media?: RestoreMedia): Part[] {
+function attachmentParts(files: Attachment[], rowID: string, media: RestoreMedia): Part[] {
     const seen = new Map<string, Set<string>>();
     return files.flatMap((file): Part[] => {
         if (imageMimes.has(file.mime) && file.source.type === "inline" && file.mention?.text) {
@@ -82,17 +86,6 @@ function attachmentParts(files: Attachment[], rowID: string, media?: RestoreMedi
         const metadata =
             file.description === undefined ? undefined : { description: file.description };
         const located = location ? [{ type: "text", text: `Attached file: ${location}` }] : [];
-        if (!media)
-            return [
-                ...located,
-                {
-                    type: "media",
-                    mediaType: file.mime,
-                    data: file.data,
-                    filename: file.name,
-                    metadata,
-                },
-            ];
         const asset = media.asset(file.data, file.mime);
         if (typeof asset === "string") {
             media.unavailable({ rowID, name: file.name, mediaType: file.mime, reason: asset });
@@ -113,7 +106,7 @@ function attachmentParts(files: Attachment[], rowID: string, media?: RestoreMedi
 export function restoreRow(
     row: StoreRow,
     model: { providerID: string; id: string },
-    media?: RestoreMedia,
+    media: RestoreMedia = HOST_RESTORE_MEDIA,
 ): V2Message[] {
     const data = row.data;
     const make = (role: string, content: Part[], metadata: unknown = data.metadata): V2Message => ({

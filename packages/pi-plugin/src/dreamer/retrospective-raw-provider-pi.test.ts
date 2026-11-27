@@ -172,6 +172,10 @@ describe("PiRetrospectiveRawProvider", () => {
 		});
 
 		await provider.listProjectSessions("identity");
+		const capped = await provider.readUserMessagesSince("s1", 0, 1);
+		expect(capped.truncated).toBe(true);
+		expect(capped.firstOmittedTs).toBe(300);
+		expect(capped.messages.map(({ ts }) => ts)).toEqual([100]);
 		expect(await provider.readUserMessagesSince("s1", 150, 10)).toEqual({
 			messages: [
 				{

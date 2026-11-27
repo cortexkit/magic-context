@@ -185,6 +185,7 @@ export interface StatusViewSource {
         readonly toVersion: number;
     };
     readonly hiddenVariantWarnings?: readonly string[];
+    readonly projectBindingWarning?: string;
 }
 
 declare const checkedStatusViewSource: unique symbol;
@@ -706,6 +707,9 @@ function warningBlock(source: StatusViewSource): StatusWarning[] {
               ]
             : []),
         ...(source.hiddenVariantWarnings ?? []).map((text) => ({ text, tone: "warning" as const })),
+        ...(source.projectBindingWarning
+            ? [{ text: source.projectBindingWarning, tone: "warning" as const }]
+            : []),
         ...(source.configReloadFailure
             ? [
                   {

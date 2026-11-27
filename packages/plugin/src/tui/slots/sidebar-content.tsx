@@ -784,11 +784,17 @@ const SidebarContent = (props: {
                 </box>
             )}
 
-            {/* Named limitations of the host itself (for example an experimental
-                mode this OpenCode version cannot run). They stay for as long as
-                the process runs, so they are drawn like the transform error
-                rather than as a one-shot toast. */}
-            <For each={s()?.hostLimitations ?? []}>
+            {s()?.projectBindingWarning && (
+                <box marginTop={1} width="100%">
+                    <text fg={props.theme.warning}>⚠ {s()?.projectBindingWarning}</text>
+                </box>
+            )}
+
+            {/* Long-lived host limitations and the current fork diagnosis are
+                visible independently of the one-shot toast. */}
+            <For each={s()?.forkHistoryGap === true
+                ? [...(s()?.hostLimitations ?? []), "fork_history_gap" as const]
+                : s()?.hostLimitations ?? []}>
                 {(limitation) => (
                     <box marginTop={1} width="100%">
                         <text fg={props.theme.warning}>⚠ {renderUserFacingFailure(limitation, "plain")}</text>

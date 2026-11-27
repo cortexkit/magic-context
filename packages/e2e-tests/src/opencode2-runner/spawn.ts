@@ -294,6 +294,13 @@ export interface OpenCode2SpawnOptions {
 	defaultModelID?: string;
     visionModel?: boolean;
 	additionalModelIDs?: string[];
+	/** The host's `variants` list for every configured model (`[{ id: "high" }]`), so a
+	 * session can switch its reasoning variant; OpenCode 2.3 renders that switch as a system
+	 * message whose only content is the new effort level. */
+	modelVariants?: Array<{ id: string; settings?: Record<string, unknown> }>;
+	/** The `compaction` setting of every configured model, for example
+	 * `{ mode: "provider" }` to have the host compact that model the provider's way. */
+	modelCompaction?: Record<string, unknown>;
 	mockResponse?: MockResponse;
 	extraConfig?: Record<string, unknown>;
 	magicContextConfig?: Record<string, unknown>;
@@ -305,7 +312,9 @@ export interface OpenCode2SpawnOptions {
 	modelInputLimit?: number;
 	/** Use the supplied Magic Context config without the e2e mock defaults/pins. */
 	preserveMagicContextDefaults?: boolean;
-	/** Service registration can precede API readiness on newer hosts. Default off. */
+	/** A host can announce its address before its API answers; the first call
+	 * then gets a 503. Spawn retries that for up to 30 seconds before it checks
+	 * plugins. Pass false only to observe that startup window itself. */
 	waitForTransport?: boolean;
 	/**
 	 * Register a second mock model and pin the historian to it, so a scenario can
@@ -324,8 +333,8 @@ export interface OpenCode2SpawnOptions {
 	compactionAuto?: boolean;
 	/**
 	 * The host's own compaction settings (`compaction` in opencode.json), in place of
-	 * the default `{ auto, buffer: 1024, keep: { tokens: 1024 } }`, for a scenario that
-	 * needs its own buffer or keep budget.
+	 * the default `{ auto, background: false, buffer: 1024, keep: { tokens: 1024 } }`,
+	 * for a scenario that needs different compaction behavior or budgets.
 	 */
 	compactionConfig?: Record<string, unknown>;
 	existingIsolation?: OpenCode2Isolation;
@@ -444,7 +453,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 					schemaGuard,
 				],
 				model: `${providerID}/${defaultModelID}`,
-				compaction: options.compactionConfig ?? { auto: options.compactionAuto ?? true, buffer: 1024, keep: { tokens: 1024 } },
+				compaction: options.compactionConfig ?? { auto: options.compactionAuto ?? true, background: false, buffer: 1024, keep: { tokens: 1024 } },
 				providers: {
 					[providerID]: {
 						settings: openCode2ProviderSettings(options, provider.baseURL),
@@ -453,6 +462,8 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 								id,
 								{
 									name: id,
+									...(options.modelVariants ? { variants: options.modelVariants } : {}),
+									...(options.modelCompaction ? { compaction: options.modelCompaction } : {}),
 	                                ...(options.visionModel ? { modalities: { input: ["text", "image"], output: ["text"] } } : {}),
 									limit: {
 										// 2.0.5 required() is unchanged, but 16k minus a 32k output
@@ -608,7 +619,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
                 baseUrl: ready.url,
                 headers: { authorization: `Basic ${btoa(`opencode:${ready.password}`)}` },
             });
-            await awaitOpenCode2Transport(options.waitForTransport ?? false,
+            await awaitOpenCode2Transport(options.waitForTransport ?? true,
                 (signal) => readinessClient.plugin.list({ location: { directory: fixture.cwd } }, { signal }), {
                     log: (line) => { stderr += `${line}\n`; console.error(line); },
                 });

@@ -93,12 +93,12 @@ export const SINGLE_STORE_HELP = [
 
 export const MERGE_IDENTITY_HELP = [
     "",
-    "  Usage: magic-context doctor merge-identities [--from <identity> --to <identity>] [--apply] [--force] [--verbose] [--db <path>] [--backup-root <dir>]",
+    "  Usage: magic-context doctor merge-identities [--from <identity-or-folder> --to <identity>] [--apply] [--force] [--verbose] [--db <path>] [--backup-root <dir>]",
     "",
     "  Merge every project-scoped row from one project identity into another.",
     "",
     "  Options:",
-    "    --from <identity>   Identity whose rows are moved",
+    "    --from <identity-or-folder>  Source key, or a folder path naming its old dir: key",
     "    --to <identity>     Identity that receives them",
     "    (no flags)          List splits; --from/--to previews without writing",
     "    --apply             Confirm the reviewed preview; hosts must be closed",

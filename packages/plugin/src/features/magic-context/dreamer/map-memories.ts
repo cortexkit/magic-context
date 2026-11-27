@@ -44,13 +44,19 @@ import {
     seedIdentifierCandidates,
     validateMapMemoriesManifest,
 } from "./map-memories-prompt";
+import {
+    isMapMemoryDeferred,
+    mapMemoryRetryKey,
+    nextMapMemoryRetry,
+    readMapMemoryRetries,
+} from "./map-memories-retry";
 import { isDirectiveShapedProjectRule } from "./memory-claim-safety";
 import {
     DreamerModuleFailureError,
     type DreamerModuleRoute,
     getModuleMemoryIdentities,
 } from "./module-apply";
-import { getDreamState, setDreamState } from "./storage-dream-state";
+import { setDreamState } from "./storage-dream-state";
 import { DreamTokenBudgetExceeded } from "./token-budget";
 
 /**
@@ -58,7 +64,7 @@ import { DreamTokenBudgetExceeded } from "./token-budget";
  * every UNMAPPED project memory (or marks it file-independent), so verify can
  * select memories whose backing files changed since their last verification.
  *
- * Self-maintaining: the gate is "unmapped memories exist", so the expensive
+ * Self-maintaining: the gate is "eligible unmapped memories exist", so the expensive
  * initial pool backfill happens once (across batches), then only the cheap
  * trickle of newly-added memories is mapped on later runs.
  *
@@ -140,6 +146,8 @@ interface MapBatchOutcome {
      * ids get one targeted in-run retry; if it omits them again, they stay unmapped
      * for the next resumable run. */
     requeue?: MapMemoryInput[];
+    /** Unanswered IDs from a complete manifest, not IDs rejected by the writer. */
+    missedIds?: number[];
     /** Interrupted batches may still bank closed per-memory decisions. */
     failure?: {
         error?: unknown;
@@ -147,50 +155,6 @@ interface MapBatchOutcome {
         class: MapBatchFailureClass;
         elapsedMs: number;
     };
-}
-
-interface MappingRetry {
-    content: string;
-    failures: number;
-    deferUntil: number;
-}
-
-function retryKey(project: string): string {
-    return `map-memories:retry:${project}`;
-}
-
-function readRetries(db: Database, project: string): Record<string, MappingRetry> {
-    try {
-        const parsed: unknown = JSON.parse(getDreamState(db, retryKey(project)) ?? "{}");
-        if (!isRecord(parsed)) return {};
-        const retries: Record<string, MappingRetry> = {};
-        for (const [id, value] of Object.entries(parsed)) {
-            if (
-                isRecord(value) &&
-                typeof value.content === "string" &&
-                typeof value.failures === "number" &&
-                typeof value.deferUntil === "number"
-            ) {
-                retries[id] = {
-                    content: value.content,
-                    failures: value.failures,
-                    deferUntil: value.deferUntil,
-                };
-            }
-        }
-        return retries;
-    } catch {
-        return {};
-    }
-}
-
-function contentKey(memory: MapMemoryInput): string {
-    return createHash("sha256").update(`${memory.category}\n${memory.content}`).digest("hex");
-}
-
-function isDeferred(memory: MapMemoryInput, retries: Record<string, MappingRetry>): boolean {
-    const retry = retries[memory.id];
-    return !!retry && retry.content === contentKey(memory) && retry.deferUntil > Date.now();
 }
 
 function assistantText(messages: unknown[]): string | null {
@@ -340,9 +304,9 @@ export function selectMapMemoryInputs(
         if (requeue.length >= MAX_INDEPENDENT_REQUEUE_PER_RUN) break;
     }
 
-    const retries = readRetries(db, projectIdentity);
+    const retries = readMapMemoryRetries(db, projectIdentity);
     return [...unmappedInputs, ...requeue].filter(
-        (memory) => includeDeferred || !isDeferred(memory, retries),
+        (memory) => includeDeferred || !isMapMemoryDeferred(memory, retries),
     );
 }
 
@@ -360,10 +324,10 @@ export async function mapMemories(args: MapMemoriesArgs): Promise<MapMemoriesRes
         args.sessionDirectory,
         true,
     );
-    const retries = readRetries(args.db, args.projectIdentity);
+    const retries = readMapMemoryRetries(args.db, args.projectIdentity);
     const activeIds = new Set(allInputs.map((memory) => String(memory.id)));
     for (const id of Object.keys(retries)) if (!activeIds.has(id)) delete retries[id];
-    const inputs = allInputs.filter((memory) => !isDeferred(memory, retries));
+    const inputs = allInputs.filter((memory) => !isMapMemoryDeferred(memory, retries));
     result.remaining = allInputs.length;
     result.complete = result.remaining === 0;
     if (inputs.length === 0) {
@@ -388,6 +352,7 @@ export async function mapMemories(args: MapMemoriesArgs): Promise<MapMemoriesRes
     try {
         let consecutiveTimeouts = 0;
         let timeoutStreakElapsedMs: number[] = [];
+        const countedMisses = new Set<number>();
         for (let i = 0; i < batches.length; i += 1) {
             const remainingMs = Math.max(0, args.deadline - Date.now());
             if (remainingMs <= 0) {
@@ -414,25 +379,23 @@ export async function mapMemories(args: MapMemoriesArgs): Promise<MapMemoriesRes
             }
             const committed = outcome.mapped + outcome.independent;
             const committedIds = new Set(outcome.committedIds);
+            const missedIds = new Set(outcome.missedIds);
             runLeaseGuardedWrite(args.db, args.holderId, args.leaseKey, () => {
                 for (const memory of batch.inputs) {
                     if (committedIds.has(memory.id)) {
                         delete retries[memory.id];
                         continue;
                     }
-                    const content = contentKey(memory);
-                    const prior = retries[memory.id];
-                    const failures = (prior?.content === content ? prior.failures : 0) + 1;
-                    retries[memory.id] = {
-                        content,
-                        failures,
-                        deferUntil:
-                            failures < 2
-                                ? 0
-                                : Date.now() + Math.min(24, 2 ** (failures - 2)) * 3_600_000,
-                    };
+                    if (missedIds.has(memory.id) && !countedMisses.has(memory.id)) {
+                        countedMisses.add(memory.id);
+                        retries[memory.id] = nextMapMemoryRetry(memory, retries[memory.id]);
+                    }
                 }
-                setDreamState(args.db, retryKey(args.projectIdentity), JSON.stringify(retries));
+                setDreamState(
+                    args.db,
+                    mapMemoryRetryKey(args.projectIdentity),
+                    JSON.stringify(retries),
+                );
             });
             result.mapped += outcome.mapped;
             result.independent += outcome.independent;
@@ -447,7 +410,9 @@ export async function mapMemories(args: MapMemoriesArgs): Promise<MapMemoriesRes
                     // prefix. Retry only the omitted tail once; repeat omissions stay
                     // unmapped so a later run can resume without an unbounded loop.
                     batches.push({
-                        inputs: outcome.requeue.filter((memory) => !isDeferred(memory, retries)),
+                        inputs: outcome.requeue.filter(
+                            (memory) => !isMapMemoryDeferred(memory, retries),
+                        ),
                         isOmissionRetry: true,
                     });
                     log(
@@ -587,13 +552,7 @@ async function mapOneBatch(
                 outcome.mapped + outcome.independent,
                 startedAt,
             );
-            const returnedIds = new Set(outcome.committedIds);
-            return {
-                ...outcome,
-                requeue: budgetFinalized
-                    ? []
-                    : batch.filter((memory) => !returnedIds.has(memory.id)),
-            };
+            return completedMapBatch(outcome, batch, run.validated, budgetFinalized);
         }
         const client = args.client;
         if (!client)
@@ -665,11 +624,7 @@ async function mapOneBatch(
             true,
         );
         logBatchUsage(run.output, outcome.mapped + outcome.independent, startedAt);
-        const returnedIds = new Set(outcome.committedIds);
-        return {
-            ...outcome,
-            requeue: budgetFinalized ? [] : batch.filter((memory) => !returnedIds.has(memory.id)),
-        };
+        return completedMapBatch(outcome, batch, run.validated, budgetFinalized);
     } catch (error) {
         const desc = describeError(error);
         log(
@@ -726,6 +681,24 @@ async function mapOneBatch(
                 log,
             });
     }
+}
+
+function completedMapBatch(
+    outcome: MapBatchOutcome,
+    batch: MapMemoryInput[],
+    parsed: ParsedMemoryMapping[],
+    budgetFinalized: boolean,
+): MapBatchOutcome {
+    // A partial reply requested by the token guard is not evidence that a memory
+    // could not be mapped. Neither is a valid decision the writer did not accept.
+    if (budgetFinalized) return outcome;
+    const decided = new Set(parsed.map(({ id }) => id));
+    const committed = new Set(outcome.committedIds);
+    return {
+        ...outcome,
+        missedIds: batch.filter(({ id }) => !decided.has(id)).map(({ id }) => id),
+        requeue: batch.filter(({ id }) => !committed.has(id)),
+    };
 }
 
 /** Parse a complete manifest and commit the entries that belong to this batch.

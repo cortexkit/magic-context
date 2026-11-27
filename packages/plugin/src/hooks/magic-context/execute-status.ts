@@ -341,12 +341,16 @@ export function executeStatus(
         const rebaseNotice = readCoordinateRebaseNotice(db, sessionId);
         const rebaseNoticeLine = rebaseNotice ? formatCoordinateRebaseNotice(rebaseNotice) : null;
         if (rebaseNotice && rebaseNoticeLine) {
-            lines.push(
-                "",
-                "### Store Conversion",
-                `- The host changed how it stores this conversation (${rebaseNotice.previousGeneration ?? "unrecorded"} → ${rebaseNotice.generation}); saved positions were re-derived from message ids.`,
-                `- ${rebaseNoticeLine}.`,
-            );
+            if (rebaseNotice.inheritedGaps !== undefined) {
+                lines.push("", "### Saved History Recovery", `- ${rebaseNoticeLine}.`);
+            } else {
+                lines.push(
+                    "",
+                    "### Store Conversion",
+                    `- The host changed how it stores this conversation (${rebaseNotice.previousGeneration ?? "unrecorded"} → ${rebaseNotice.generation}); saved positions were re-derived from message ids.`,
+                    `- ${rebaseNoticeLine}.`,
+                );
+            }
         }
 
         lines.push(

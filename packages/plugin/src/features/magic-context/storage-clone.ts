@@ -40,12 +40,29 @@ export interface CloneTagRow {
     toolOwnerMessageId: string | null;
 }
 
+export interface CloneCompartmentBoundary extends CloneCompartmentRow {
+    rebaseStatus: string | null;
+}
+
 export interface CloneSessionStateFilter {
     /** Require no destination metadata, even if the child has no compartments or tags yet. */
     requireEmptyDestinationMeta?: boolean;
     resolveBoundaryOrdinal(messageId: string): number | undefined;
+    /** Override compartment inheritance without changing other message identity lookups. */
+    selectCompartments?: (
+        source: readonly CloneCompartmentBoundary[],
+    ) => ReadonlyMap<number, CloneCompartmentRow>;
+    /**
+     * Gaps between the copied summaries that the parent may have only because
+     * it was converted from OpenCode 1 (see `inheritedGaps` on
+     * `CoordinateRebaseNotice`). The fork records them, so its own summarizer
+     * accepts exactly these gaps and no others.
+     */
+    inheritedCoordinateGaps?: () => readonly { start: number; end: number }[];
     includeTag(tag: CloneTagRow): boolean;
     includeMessageId(messageId: string): boolean;
+    /** Filter saved content-removal decisions independently of copied message and note IDs. */
+    includeReplayMessageId?: (messageId: string) => boolean;
     /** Map a source message/content id into the destination session. */
     mapMessageId?: (messageId: string) => string;
     /** Opt into remapping globally keyed tag ids; leave undefined for Pi compatibility. */
@@ -78,6 +95,7 @@ type RawCompartmentRow = {
     end_message_id: string;
     start_block_index: number | null;
     end_block_index: number | null;
+    rebase_status: string | null;
     title: string;
     content: string;
     p1: string | null;
@@ -517,11 +535,14 @@ export function copySessionStateForClone(
         const blockProjection = hasBlockIndices
             ? "start_block_index, end_block_index"
             : "NULL AS start_block_index, NULL AS end_block_index";
+        const rebaseProjection = compartmentColumns.some(({ name }) => name === "rebase_status")
+            ? "rebase_status"
+            : "NULL AS rebase_status";
         const sourceCompartments = db
             .prepare(
                 `SELECT sequence, start_message, end_message, start_message_id, end_message_id,
                         title, content, p1, p2, p3, p4, importance, episode_type, legacy,
-                        created_at, harness, ${blockProjection}
+                        created_at, harness, ${blockProjection}, ${rebaseProjection}
                    FROM compartments WHERE session_id = ? ORDER BY sequence ASC`,
             )
             .all(sourceSessionId) as RawCompartmentRow[];
@@ -533,17 +554,34 @@ export function copySessionStateForClone(
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${hasBlockIndices ? ", ?, ?" : ""})`,
         );
         const copiedCompartments: CloneCompartmentRow[] = [];
+        const selected = filter.selectCompartments?.(
+            sourceCompartments.map((row) => ({
+                sequence: row.sequence,
+                startMessage: row.start_message,
+                endMessage: row.end_message,
+                startMessageId: row.start_message_id,
+                endMessageId: row.end_message_id,
+                rebaseStatus: row.rebase_status,
+            })),
+        );
         for (const row of sourceCompartments) {
-            const startMessage = filter.resolveBoundaryOrdinal(row.start_message_id);
-            const endMessage = filter.resolveBoundaryOrdinal(row.end_message_id);
+            const mapped = selected?.get(row.sequence);
+            if (selected && !mapped) continue;
+            const startMessage =
+                mapped?.startMessage ?? filter.resolveBoundaryOrdinal(row.start_message_id);
+            const endMessage =
+                mapped?.endMessage ?? filter.resolveBoundaryOrdinal(row.end_message_id);
             if (startMessage === undefined || endMessage === undefined) continue;
+            const startMessageId =
+                mapped?.startMessageId ?? mapMessageId(filter, row.start_message_id);
+            const endMessageId = mapped?.endMessageId ?? mapMessageId(filter, row.end_message_id);
             insertCompartment.run(
                 destinationSessionId,
                 row.sequence,
                 startMessage,
                 endMessage,
-                mapMessageId(filter, row.start_message_id),
-                mapMessageId(filter, row.end_message_id),
+                startMessageId,
+                endMessageId,
                 row.title,
                 row.content,
                 row.p1,
@@ -561,8 +599,8 @@ export function copySessionStateForClone(
                 sequence: row.sequence,
                 startMessage,
                 endMessage,
-                startMessageId: mapMessageId(filter, row.start_message_id) ?? row.start_message_id,
-                endMessageId: mapMessageId(filter, row.end_message_id) ?? row.end_message_id,
+                startMessageId: startMessageId ?? row.start_message_id,
+                endMessageId: endMessageId ?? row.end_message_id,
             });
         }
 
@@ -732,7 +770,10 @@ export function copySessionStateForClone(
         if (pendingMarker === null)
             clearedMarker = getPendingPiCompactionMarkerState(db, destinationSessionId);
         const todoAnchor = meta?.todo_synthetic_anchor_message_id ?? "";
-        const migrateTodo = todoAnchor.length > 0 && filter.includeMessageId(todoAnchor);
+        const replayFilter = filter.includeReplayMessageId
+            ? { ...filter, includeMessageId: filter.includeReplayMessageId }
+            : filter;
+        const migrateTodo = todoAnchor.length > 0 && replayFilter.includeMessageId(todoAnchor);
 
         db.prepare(
             `INSERT INTO session_meta
@@ -770,16 +811,22 @@ export function copySessionStateForClone(
                 Number.isFinite(meta.pi_stable_id_scheme)
                 ? meta.pi_stable_id_scheme
                 : null,
-            filterStrippedPlaceholderBlob(meta?.stripped_placeholder_ids ?? null, filter),
-            filterIdBlob(meta?.stale_reduce_stripped_ids ?? null, filter),
-            filterProcessedImageBlob(meta?.processed_image_stripped_ids ?? null, filter),
-            clonePiContentDecisions(meta?.merged_reasoning_stripped_ids ?? null, filter),
+            filterStrippedPlaceholderBlob(meta?.stripped_placeholder_ids ?? null, replayFilter),
+            filterIdBlob(meta?.stale_reduce_stripped_ids ?? null, replayFilter),
+            filterProcessedImageBlob(meta?.processed_image_stripped_ids ?? null, replayFilter),
+            clonePiContentDecisions(meta?.merged_reasoning_stripped_ids ?? null, replayFilter),
             pendingMarker,
             migrateTodo ? (meta?.last_todo_state ?? "") : "",
             migrateTodo ? (meta?.todo_synthetic_call_id ?? "") : "",
             migrateTodo ? (mapMessageId(filter, todoAnchor) ?? "") : "",
             migrateTodo ? (meta?.todo_synthetic_state_json ?? "") : "",
         );
+        const inheritedGaps = filter.inheritedCoordinateGaps?.() ?? [];
+        if (inheritedGaps.length > 0) {
+            db.prepare(
+                "UPDATE session_meta SET coordinate_rebase_notice = ? WHERE session_id = ?",
+            ).run(JSON.stringify({ generation: "v2", inheritedGaps }), destinationSessionId);
+        }
         // Clone owns the whole replay document so its filtered native state
         // cannot be overwritten by the CLI's later generic metadata copy.
         const metaColumnRows = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
@@ -791,7 +838,7 @@ export function copySessionStateForClone(
                 db,
                 sourceSessionId,
                 copiedToolCallIds,
-                filter,
+                replayFilter,
             );
             writeReplayDocument(db, destinationSessionId, replayDocument);
         }

@@ -72,7 +72,7 @@ const messages = [
   ["assistant", "Token survey done: 22 hard-coded rgba() tints, 6 shadows, 1 SVG chevron."],
   ["user", "Make sure charts read the active theme."],
   ["assistant", "Charts use --chart-* tokens now; screenshots follow."],
-].map(([role, text], i) => ({ message_id: `msg_${String(i + 230).padStart(6, "0")}`, timestamp_ms: NOW - (6 - i) * 3 * MIN, role, text_preview: text, raw_json: { role, text } }));
+].map(([role, text], i) => ({ message_id: `msg_${String(i + 230).padStart(6, "0")}`, timestamp_ms: NOW - (6 - i) * 3 * MIN, role, text_preview: text }));
 const historian = [
   { id: 41, session_id: SID, harness: "opencode", subagent: "historian", task: "compartmentalise", provider_id: "anthropic", model_id: "claude-sonnet-4-5", started_at: NOW - 2 * HOUR, ended_at: NOW - 2 * HOUR + 41_000, status: "completed", input_tokens: 48_210, output_tokens: 3_904, cache_read_tokens: 40_100, cache_write_tokens: 2_300, error: null, parent_invocation_id: null },
   { id: 42, session_id: SID, harness: "opencode", subagent: "historian-editor", task: "edit", provider_id: "anthropic", model_id: "claude-sonnet-4-5", started_at: NOW - 2 * HOUR + 42_000, ended_at: NOW - 2 * HOUR + 60_000, status: "completed", input_tokens: 12_004, output_tokens: 1_210, cache_read_tokens: 9_800, cache_write_tokens: 0, error: null, parent_invocation_id: 41 },

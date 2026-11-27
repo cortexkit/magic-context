@@ -6,7 +6,7 @@ import type {
     RawMessageOrdinalEntry,
     RawMessageParts,
 } from "../../hooks/magic-context/read-session-raw";
-import { restoreRow } from "../fold/restore";
+import { type RestoreMedia, restoreRow } from "../fold/restore";
 import {
     type MessageType,
     RAW_MESSAGE_TYPES,
@@ -22,6 +22,13 @@ const isRawRow = (row: StoreRow) => rawMessageTypes.has(row.type);
 // borderline assistant row counts as unserved. Erring that way only moves a boundary
 // one row earlier; the opposite error would put a boundary on a row the host drops.
 const NO_MODEL = { providerID: "", id: "" };
+// Only the rendered messages' ids are read, so attachments are not rebuilt as host assets
+// (that copies each payload); each one becomes the restore's note, which keeps the row
+// non-empty exactly as an asset would.
+const NO_MEDIA: RestoreMedia = {
+    asset: () => "rendered only to read message ids",
+    unavailable: () => {},
+};
 
 /**
  * Whether the host puts this row into the request draft under its own id. The
@@ -31,7 +38,10 @@ const NO_MODEL = { providerID: "", id: "" };
  * at all) and can never be found again by a boundary lookup.
  */
 export function hostServesRowById(row: StoreRow): boolean {
-    return isRawRow(row) && restoreRow(row, NO_MODEL).some((message) => message.id === row.id);
+    return (
+        isRawRow(row) &&
+        restoreRow(row, NO_MODEL, NO_MEDIA).some((message) => message.id === row.id)
+    );
 }
 
 function projectRawMessages(
@@ -97,6 +107,38 @@ export function rawMessages(
 /** Project a SQL-bounded page whose first row follows `afterOrdinal`. */
 export function rawMessagePage(rows: readonly StoreRow[], afterOrdinal: number): RawMessage[] {
     return projectRawMessages(rows, (_row, index) => afterOrdinal + index + 1);
+}
+
+/** Fork seeding reads whole accepted gaps in pages to avoid a query per row. */
+export function readV2MessageRange(
+    reader: Pick<V2StoreReader, "messagePage">,
+    sessionID: string,
+    from: number,
+    to: number,
+): RawMessage[] {
+    const messages: RawMessage[] = [];
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1) return messages;
+    for (let after = from - 1; after < to; ) {
+        const rows = reader.messagePage(sessionID, after, Math.min(to - after, 500), to);
+        messages.push(...rawMessagePage(rows, after));
+        if (rows.length === 0) break;
+        after += rows.length;
+    }
+    return messages;
+}
+
+/** Fork status reads one row at a time so a damaged gap can stop at its first rejection. */
+export function* iterateV2MessageRange(
+    reader: Pick<V2StoreReader, "iterateRawMessageRange">,
+    sessionID: string,
+    from: number,
+    to: number,
+): Iterable<RawMessage> {
+    let after = from - 1;
+    for (const row of reader.iterateRawMessageRange(sessionID, from, to)) {
+        yield* rawMessagePage([row], after);
+        after += 1;
+    }
 }
 
 export interface V2RawMessageReader {

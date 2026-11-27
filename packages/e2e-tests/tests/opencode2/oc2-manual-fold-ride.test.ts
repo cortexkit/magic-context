@@ -18,7 +18,7 @@ import { CLI, isolation, spawnOpencode2, waitForPluginActive } from "../../src/o
 // `rewrite permission: allowed=false ride=none` there, so the drop waited for a
 // second, avoidable rebuild.
 
-const hostVersion = spawnSync(CLI, ["--version"], { encoding: "utf8" }).stdout.trim().replace(/^opencode\s+v?/, "");
+const hostVersion = spawnSync(CLI, ["--version"], { env: isolation().env, encoding: "utf8" }).stdout.trim().replace(/^opencode\s+v?/, "");
 const [major = 0, minor = 0, patch = 0] = hostVersion.split(".").map(Number);
 // `experimental.part_rows` moves assistant content into `session_part` from 2.2.6.
 const partRowsHost = major > 2 || (major === 2 && (minor > 2 || (minor === 2 && patch >= 6)));
@@ -123,8 +123,12 @@ test("the request after a manual compaction that rebuilt the history head carrie
             expect((JSON.parse(compaction.data) as { summary?: string }).summary).toBe(CHECKPOINT_NOTE);
             expect(text).not.toContain(JSON.stringify(CHECKPOINT_NOTE).slice(1, -1));
             // The head changed, so the provider cache was lost on this pass...
-            expect(after[0]).not.toBe(held[0]);
-            expect(after[0]).toContain("HIST_SUMMARY");
+            // OpenCode 2.3+ sends its own developer header as the first input item, so
+            // Magic Context's history head is the first user item, not the first item.
+            const head = (input: string[]) => input.find((item) => JSON.parse(item).role === "user");
+            expect(head(held)).toBeDefined();
+            expect(head(after)).not.toBe(head(held));
+            expect(head(after)).toContain("HIST_SUMMARY");
             // ...and the held drop must land with it.
             expect(text).not.toContain("MID_0:");
             expect(pending()).toBe(0);

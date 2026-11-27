@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { sep } from "node:path";
 import type { HiddenRunIdentity } from "../hooks/magic-context/compartment-runner-types";
 import { Database } from "../shared/sqlite";
+import { createTestTempDir } from "../shared/test-temp-dir";
 import { cleanupLegacyHiddenChildren } from "./hidden-child-cleanup";
 import {
     createNativeHiddenChildren,
@@ -42,7 +44,14 @@ const request = () => ({
 });
 
 async function setup(
-    options: { removeError?: unknown; keepSubagents?: boolean; stuck?: boolean } = {},
+    options: {
+        removeError?: unknown;
+        keepSubagents?: boolean;
+        stuck?: boolean;
+        rewriteQuietChild?: (
+            child: Awaited<ReturnType<HiddenChildHost["create"]>>,
+        ) => Awaited<ReturnType<HiddenChildHost["create"]>>;
+    } = {},
 ) {
     const db = new Database(":memory:");
     db.exec("CREATE TABLE schema_migrations_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
@@ -57,10 +66,22 @@ async function setup(
     let seq = 0;
     let nextID = 0;
     let failNext = false;
+    let holderDirectory = "";
     const host: HiddenChildHost = {
         async create(input) {
             creates.push(structuredClone(input));
+            if (options.rewriteQuietChild && input.id) {
+                return options.rewriteQuietChild({
+                    id: input.id,
+                    parentID: input.parentID,
+                    location: { directory: holderDirectory },
+                });
+            }
             return { id: `child-${++nextID}` };
+        },
+        async createHolder(input) {
+            holderDirectory = input.location.directory;
+            return input;
         },
         async get(input) {
             reads.push(input.sessionID);
@@ -128,6 +149,7 @@ async function setup(
             latestIdle: () => undefined,
         }),
         generation: "native-generation",
+        hostVersion: options.rewriteQuietChild ? "2.4.2" : undefined,
         removalTimeoutMs: 20,
         ...(options.keepSubagents ? { keepSubagents: true } : {}),
         log: (message) => {
@@ -189,6 +211,56 @@ async function setup(
             ).count,
     };
 }
+
+describe("OpenCode 2 quiet-child admission", () => {
+    type Reply = Awaited<ReturnType<HiddenChildHost["create"]>>;
+    for (const [reason, rewriteQuietChild] of [
+        ["wrong parent", (child: Reply) => ({ ...child, parentID: "ses_wrong" })],
+        ["wrong location", (child: Reply) => ({ ...child, location: { directory: "/wrong" } })],
+        ["lost automation id", (child: Reply) => ({ ...child, id: "ses_wrong" })],
+    ] as const) {
+        test(`rejects and removes an unprompted child with ${reason}`, async () => {
+            const { dir, cleanup } = createTestTempDir("oc2-child-admission-");
+            const state = await setup({ rewriteQuietChild });
+            try {
+                await expect(state.executor.open({ ...historian, directory: dir })).rejects.toThrow(
+                    "OpenCode created a background run outside its holder",
+                );
+                expect(state.creates).toHaveLength(1);
+                const requested = state.creates[0]!;
+                expect(requested.parentID).toStartWith("ses_mc_bg_");
+                expect(requested.id).toStartWith("ses_aut_");
+                expect(state.removed).toEqual([
+                    reason === "lost automation id" ? "ses_wrong" : requested.id!,
+                ]);
+                expect(state.prompts()).toBe(0);
+                expect(state.metaRows()).toBe(0);
+            } finally {
+                state.db.close();
+                cleanup();
+            }
+        });
+    }
+
+    test("a host-normalized location does not reject the actual child", async () => {
+        const { dir, cleanup } = createTestTempDir("oc2-child-admission-");
+        const state = await setup({
+            rewriteQuietChild: (child) => ({
+                ...child,
+                location: { directory: `${dir}${sep}` },
+            }),
+        });
+        try {
+            expect(await state.runOnce({ ...historian, directory: dir })).toMatchObject({
+                settled: true,
+            });
+            expect(state.prompts()).toBe(1);
+        } finally {
+            state.db.close();
+            cleanup();
+        }
+    });
+});
 
 describe("OpenCode 2 hidden children on a host with session.remove", () => {
     for (const keepSubagents of [false, true]) {

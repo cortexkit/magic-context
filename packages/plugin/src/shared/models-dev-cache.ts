@@ -105,6 +105,10 @@ const reserveClampLogSeen = new Set<string>();
  */
 let apiCache: Map<string, CachedModelMetadata> | null = null;
 let apiLoadedAt = 0;
+// An OpenCode 2 draft is evidence for that exact model's window, not a new
+// catalog snapshot or evidence about another model's capabilities.
+const v2DraftModelLimits = new Map<string, CachedModelMetadata>();
+const v2DraftModelLimitLogged = new Set<string>();
 
 // Persisted last-known-good apiCache (OpenCode). Survives restart so a cold
 // start uses the real limit instantly instead of falling to the disk file or the
@@ -443,6 +447,7 @@ async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<boole
 
         const previousSize = apiCache?.size ?? null;
         apiCache = map;
+        v2DraftModelLimits.clear();
         apiLoadedAt = Date.now();
         // Persist the freshly-resolved (sane-filtered) limits so the next process
         // cold-starts with the real values instead of the 128k default.
@@ -468,6 +473,69 @@ async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<boole
         );
         return false;
     }
+}
+
+/** Supply window metadata for the selected OpenCode 2 model during a catalog failure. */
+export function useV2DraftModelLimits(
+    providerID: string,
+    modelID: string,
+    limit: ModelLimit | undefined,
+): boolean {
+    loadPersistedApiCacheOnce();
+    const key = `${providerID}/${modelID}`;
+    const cached = lookupMetadataWithTagFallback(apiCache, providerID, modelID);
+    const valid = (value: number | undefined) =>
+        isFinitePositive(value) && value <= MAX_SANE_LIMIT ? value : undefined;
+    const draft = {
+        context: valid(limit?.context),
+        input: valid(limit?.input),
+        output: valid(limit?.output),
+    };
+    const geometry = (raw: ModelLimit) =>
+        deriveWindowGeometry(providerID, modelID, raw, {
+            outputReserveOverride: resolveOutputReserve(providerID, modelID),
+            harness: "opencode",
+        })?.usableSoft;
+    const draftWindow = geometry(draft);
+    const merged: ModelLimit = {
+        context: cached?.contextLimit ?? draft.context ?? cached?.limit,
+        input: cached?.inputLimit ?? draft.input,
+        output: cached?.outputLimit ?? draft.output,
+    };
+    const window = geometry(merged);
+    // Keep authoritative values, but do not admit a turn on a stale window
+    // that is wider than the current draft can support.
+    if (window === undefined || window <= 0 || (draftWindow !== undefined && window > draftWindow))
+        return false;
+
+    if (
+        merged.context !== (cached?.contextLimit ?? cached?.limit) ||
+        merged.input !== cached?.inputLimit ||
+        merged.output !== cached?.outputLimit
+    ) {
+        v2DraftModelLimits.set(key, {
+            contextLimit: merged.context,
+            inputLimit: merged.input,
+            outputLimit: merged.output,
+        });
+    } else v2DraftModelLimits.delete(key);
+    if (!v2DraftModelLimitLogged.has(key)) {
+        v2DraftModelLimitLogged.add(key);
+        sessionLog(
+            "global",
+            `v2 model catalog lookup failed for ${key}; using selected model limits`,
+        );
+    }
+    return true;
+}
+
+function windowMetadata(providerID: string, modelID: string): CachedModelMetadata | undefined {
+    loadPersistedApiCacheOnce();
+    return (
+        (getHarness() === "opencode2"
+            ? v2DraftModelLimits.get(`${providerID}/${modelID}`)
+            : undefined) ?? lookupMetadataWithTagFallback(apiCache, providerID, modelID)
+    );
 }
 
 /**
@@ -499,8 +567,7 @@ export function getSdkWindowGeometry(
         harness?: "opencode" | "pi";
     },
 ): WindowGeometryResult | undefined {
-    loadPersistedApiCacheOnce();
-    const metadata = lookupMetadataWithTagFallback(apiCache, providerID, modelID);
+    const metadata = windowMetadata(providerID, modelID);
     if (!metadata) return undefined;
     const rawContext = metadata.contextLimit ?? metadata.limit;
     const promptOnlyDetected =
@@ -551,8 +618,7 @@ export function getSdkContextLimit(
             detectedLimitProvenance: options?.detectedLimitProvenance,
         })?.usableSoft;
     }
-    loadPersistedApiCacheOnce();
-    const metadata = lookupMetadataWithTagFallback(apiCache, providerID, modelID);
+    const metadata = windowMetadata(providerID, modelID);
     if (!metadata) return undefined;
     const rawContext = metadata.contextLimit ?? metadata.limit;
     const promptOnlyDetected =
@@ -643,6 +709,7 @@ function lookupMetadataWithTagFallback(
 /** Clear in-memory caches (for testing and the regression-recovery refetch). */
 export function clearModelsDevCache(): void {
     apiCache = null;
+    v2DraftModelLimits.clear();
     apiLoadedAt = 0;
     persistSeedLoaded = false;
 }
