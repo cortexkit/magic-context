@@ -386,10 +386,9 @@
         },
         {
             "path": "tests/fork-over-window-oc1.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
-            "invocation": { "ts": false, "rust": false },
-            "rationale": "manual regression probe on OpenCode 1.18.30 (issue 608): a 1.x /fork is an unlinked copy, so nothing is inherited; the fork's over-window first pass and every retry after it must be reduced or refused (MC-H06) before the mock provider's enforced window, never sent as is; throwaway root with host PID lsof containment",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "OpenCode 1 regression (issue 608): a 1.x /fork is an unlinked copy, so nothing is inherited; the fork's over-window first pass and every retry after it must be reduced or refused (MC-H06) before the mock provider's enforced window, never sent as is; throwaway root with host PID lsof containment",
             "contract_refs": ["FOLD-UNDER-PRESSURE"],
             "hosts": ["opencode"]
         },
@@ -404,22 +403,21 @@
         },
         {
             "path": "tests/issue-570-home-project.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
+            "runs_in": "scripts/ci/e2e-host-opencode-cache-analysis-oracle.sh",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
-            "rationale": "manual regression probe on OpenCode 1.18.30 with throwaway HOME and host PID lsof containment",
+            "rationale": "OpenCode 1 historian and sidebar RPC honor allow_home_project for a throwaway home project.",
             "contract_refs": ["FOLD-UNDER-PRESSURE"],
             "hosts": ["opencode"]
         },
         {
             "path": "tests/issue-538-engine-wall.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "issue 538 reproduction: an engine that rejects oversized prompts before any model call, on a real OpenCode 1 host; run by hand, outside the mode lanes",
+            "rationale": "issue 538 reproduction: an engine that rejects oversized prompts before any model call, on a real OpenCode 1 host.",
             "contract_refs": [
                 "FOLD-UNDER-PRESSURE"
             ],
@@ -1022,13 +1020,12 @@
         },
         {
             "path": "tests/opencode2/automatic-s3-paths.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "Automatic historian and dreamer paths run in the dedicated real GA lane",
+            "rationale": "Real OpenCode 2 runs the automatic historian and dreamer paths.",
             "contract_refs": [
                 "R22",
                 "R36"
@@ -1062,13 +1059,12 @@
         },
         {
             "path": "tests/opencode2/commands-s2-flush.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: /ctx-flush through the real TUI keymap command must make the NEXT request a priced pass that applies the queued work, read from the plugin's own per-pass decision log with the preceding turns as the control; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "rationale": "OpenCode v2 lane: /ctx-flush through the real TUI keymap command reaches the next request as an explicit flush, verified in the plugin's per-pass decision log against the preceding turns.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1078,13 +1074,12 @@
         },
         {
             "path": "tests/opencode2/commands-s2-host-registration.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: the GA command domain lists the /ctx-* definitions and executes one over HTTP with no terminal UI running at all, so the commands are reachable from `opencode run`, the API and Desktop; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "rationale": "OpenCode v2 lane: the GA command domain lists the /ctx-* definitions and executes one over HTTP with no terminal UI running at all, so the commands are reachable from `opencode run`, the API and Desktop.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1389,13 +1384,12 @@
         },
         {
             "path": "tests/opencode2/dream-loop.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode 2.0.15 pinned-host tool-loop proof: scoped read, memory and search tools, retained calibrated prompt and results, host-applied mapping, denied tools, and child cleanup; runs in the dedicated v2 lane",
+            "rationale": "Real OpenCode 2 tool loop proves scoped read, memory and search tools, retained calibrated prompt and results, host-applied mapping, denied tools, and child cleanup.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1453,10 +1447,9 @@
         },
         {
             "path": "tests/opencode2/restart-system-prompt-change.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
             "rationale": "Restarts a real OpenCode 2 host with a config change that alters the system prompt and proves the change is folded exactly once, on the first pass after the restart, with a queued drop riding that fold and the following passes served from cache",
@@ -1606,13 +1599,12 @@
         },
         {
             "path": "tests/opencode2/hidden-mapping-transcript.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "Issue 725: a real OpenCode 2 host mock drives the dreamer mapper's tool loop and verifies that complete, incremental and replacement mapping replies are committed and the offered reasoning variant is used; dedicated v2 lane",
+            "rationale": "A mock provider on a real OpenCode 2 host verifies that the dreamer commits complete, incremental and replacement mapping replies and uses the offered reasoning variant.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1679,9 +1671,8 @@
         },
         {
             "path": "tests/opencode2/hidden-step-limit.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
-            "invocation": { "ts": false, "rust": false },
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
             "rationale": "Real OpenCode 2 host mock drives the Dreamer tool loop to its step cap and verifies the persisted failure classification",
             "contract_refs": ["OC2-S1"],
             "hosts": ["opencode2"]
@@ -1734,13 +1725,12 @@
         },
         {
             "path": "tests/opencode2/prompt-surface-s6.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: per-model ctx_* description rewrite and draft-authoritative model tracking on the real GA host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "rationale": "OpenCode v2 lane: per-model ctx_* description rewrite and draft-authoritative model tracking on the real GA host.",
             "contract_refs": [
                 "R42",
                 "R43"
@@ -1898,10 +1888,9 @@
         },
         {
             "path": "tests/opencode2/over-limit-recovery.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
             "rationale": "Seeds a converted session whose stored usage is over its usable window on a real OpenCode 2 host and proves the next turn runs a reducing pass and reaches the provider; the dedicated OC2 host step runs this sequentially",
@@ -1979,13 +1968,12 @@
         },
         {
             "path": "tests/opencode2/tool-definition-telemetry.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: OpenCode 2 has no tool.definition hook, so the tool set is measured from the request draft, and the served m[0] bytes must not move while the tool-set hash is recorded; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "rationale": "OpenCode v2 lane: OpenCode 2 has no tool.definition hook, so the tool set is measured from the request draft, and the served m[0] bytes must not move while the tool-set hash is recorded.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -3330,10 +3318,10 @@
         },
         {
             "path": "tests/opencode2/mapper-step-finalize.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
+            "runs_in": "scripts/ci/e2e-host-opencode2-run-oc2-conversion-and-marker-regressions.sh",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
-            "rationale": "manual regression probe on a real OpenCode 2.0.22 host (MC_E2E_MAPPER_STEP_PROBE=1): before the native 60-step ceiling the mapper is asked for its manifest with tools removed, so a verify-broad batch keeps a partial result; throwaway root with host PID lsof containment",
+            "rationale": "Before the native 60-step ceiling the mapper is asked for its manifest with tools removed and banks a partial result; the host PID is checked for isolated stores.",
             "contract_refs": ["OC2-S1"],
             "hosts": ["opencode2"]
         },
@@ -3455,10 +3443,10 @@
         },
         {
             "path": "scripts/tool-sweep-marker-refusal-gate.test.ts",
+            "runs_in": "scripts/ci/e2e-host-opencode-cache-analysis-oracle.sh",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "rationale": "The marker-retention assertion expects retry to advance the marker before a pass with rewrite permission.",
+            "rationale": "The durable marker stays pending through an unproven trim and advances once when an explicit flush permits a rewrite.",
             "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
             "hosts": ["opencode"]
         },
@@ -3500,10 +3488,10 @@
         },
         {
             "path": "src/harness.test.ts",
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "rationale": "Fake SDK response tests lack the spawn options now required by sendPrompt.",
+            "rationale": "Host-free tests of the OpenCode prompt-completion envelope.",
             "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
             "hosts": []
         },

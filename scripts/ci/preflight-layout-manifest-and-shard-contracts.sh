@@ -22,6 +22,7 @@ check e2e-harness-tests bash -c 'cd packages/e2e-tests && bun test \
     scripts/check-rust-prerequisites.test.ts \
     scripts/tool-sweep-concurrency-gate.test.ts \
     src/contention-turn-outcome.test.ts \
+    src/harness.test.ts \
     src/host-open-files.test.ts \
     src/live-providers/calibrate.test.ts \
     src/live-providers/recorder.test.ts \

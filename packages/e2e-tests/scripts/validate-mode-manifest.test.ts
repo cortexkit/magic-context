@@ -19,7 +19,7 @@ function manifestWith(entries: ModeManifest["entries"]): ModeManifest {
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(267);
+        expect(validation.files.length).toBe(265);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -30,7 +30,7 @@ describe("mode manifest validator", () => {
     it("derives separate TS and Rust invocation lists", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
-        expect(ts).toHaveLength(128);
+        expect(ts).toHaveLength(138);
         expect(rust).toHaveLength(60);
         expect(rust).toContain("tests/rust-compaction-marker-catchup.test.ts");
         expect(rust).toContain("tests/rust-tool-attachments.test.ts");
@@ -38,7 +38,7 @@ describe("mode manifest validator", () => {
         expect(rust).toContain("tests/idle-ttl-restart.test.ts");
         expect(rust).toContain("tests/subagent-behavior.test.ts");
         expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(9);
-        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(49);
+        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(51);
         for (const host of ["opencode", "pi"] as const) {
             expect(filesForMode(validation, "ts", host)).toContain("tests/recomp-paused.test.ts");
         }
@@ -57,7 +57,7 @@ describe("mode manifest validator", () => {
         expect(ts).toContain("tests/reasoning-token-budget.test.ts");
         expect(rust).not.toContain("tests/reasoning-token-budget.test.ts");
         expect(filesForMode(validation, "ts", "pi")).toHaveLength(37);
-        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(88);
+        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(96);
         // These OpenCode 2 files are ts-only with hosts ["opencode2"], so only the
         // OpenCode 2 host lane runs them; the other host lanes never select them.
         for (const path of [
@@ -88,8 +88,6 @@ describe("mode manifest validator", () => {
             "tests/opencode2/native-fold-provenance.test.ts",
             "tests/opencode2/image-attachment.test.ts",
             "tests/opencode2/restored-image-system-first-draft.test.ts",
-            "tests/opencode2/stale-imported-floor.test.ts",
-            "tests/opencode2/stale-native-floor.test.ts",
         ]) {
             expect(filesForMode(validation, "ts", "opencode2")).toContain(path);
             expect(filesForMode(validation, "ts", "opencode")).not.toContain(path);
@@ -110,47 +108,35 @@ describe("mode manifest validator", () => {
             "tests/dreamer-token-budget-oc1.test.ts",
             "tests/dreamer-verify-budget.test.ts",
             "tests/dreamer-verify-token-budget-oc1.test.ts",
-            "tests/fork-over-window-oc1.test.ts",
             "tests/historian-host-timeout.test.ts",
             "tests/historian-no-tools.test.ts",
             "tests/historian-window-fit.test.ts",
-            "tests/issue-538-engine-wall.test.ts",
             "tests/issue-570-home-project.test.ts",
             "tests/issue-574-unborn-project.test.ts",
             "tests/issue-586-pi-responses-orphans.test.ts",
             "tests/issue-752-restart-first-pass.test.ts",
             "tests/issue-797-restart-tool-rows.test.ts",
             "tests/live-providers.test.ts",
-            "tests/opencode2/automatic-s3-paths.test.ts",
-            "tests/opencode2/commands-s2-flush.test.ts",
-            "tests/opencode2/commands-s2-host-registration.test.ts",
             "tests/opencode2/commands-s2-keymap.test.ts",
             "tests/opencode2/commands-s2-tui-feedback.test.ts",
             "tests/opencode2/compaction-off-host-compaction.test.ts",
             "tests/opencode2/context-s2-lanes.test.ts",
             "tests/opencode2/converted-store-overwindow.test.ts",
-            "tests/opencode2/dream-loop.test.ts",
             "tests/opencode2/dreamer-s2-carrier.test.ts",
             "tests/opencode2/emergency-refusal-visible.test.ts",
             "tests/opencode2/fold-s3-owner.test.ts",
             "tests/opencode2/fork-inheritance.test.ts",
-            "tests/opencode2/hidden-mapping-transcript.test.ts",
             "tests/opencode2/hidden-run-notifications.test.ts",
-            "tests/opencode2/hidden-step-limit.test.ts",
             "tests/opencode2/mapper-step-finalize.test.ts",
             "tests/opencode2/marker-s3-runtime.test.ts",
             "tests/opencode2/missing-history-boundary.test.ts",
             "tests/opencode2/output-cap.test.ts",
-            "tests/opencode2/over-limit-recovery.test.ts",
-            "tests/opencode2/prompt-surface-s6.test.ts",
-            "tests/opencode2/restart-system-prompt-change.test.ts",
             "tests/opencode2/rust-mode-boundary-restart-gate.test.ts",
             "tests/opencode2/session-api-cutover.test.ts",
             "tests/opencode2/sidebar-component.test.ts",
             "tests/opencode2/status-dialog.test.ts",
             "tests/opencode2/storage-refusal-reason.test.ts",
             "tests/opencode2/store-generation-conversion.test.ts",
-            "tests/opencode2/tool-definition-telemetry.test.ts",
             "tests/opencode2/ts-mode-on-migrated-real-store.test.ts",
             "tests/rust-classify-host-runner.test.ts",
             "tests/rust-full-sync-frame-cap.test.ts",
