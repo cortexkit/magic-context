@@ -146,6 +146,7 @@ async fn catalog_fixture(advertise_projects: bool) -> CatalogFixture {
             subc_capabilities: capabilities,
             storage: None,
             machine_id: None,
+            resume_token: None,
         },
     )
     .await;

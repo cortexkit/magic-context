@@ -613,9 +613,23 @@ fn classify(error: &CredentialResolverError) -> ReadError {
         | CredentialErrorClass::InvalidResponse => {
             ReadError::unavailable(error.code(), error.to_string())
         }
+        // The vault client doesn't identify terminal route refusals separately.
+        // unknown_module means there was no vault to answer. The daemon can
+        // also stop route-open retries with expected_back=false when the vault
+        // won't return. Neither refusal says the API key has stopped working.
+        CredentialErrorClass::Unclassified
+            if error.code() == subc_protocol::error_codes::UNKNOWN_MODULE
+                || subc_protocol::error_codes::is_retryable_route_open(error.code()) =>
+        {
+            ReadError::unavailable(error.code(), error.to_string())
+        }
         _ => ReadError::refused(error.code(), error.to_string()),
     }
 }
+
+#[cfg(test)]
+#[path = "vault_classification_tests.rs"]
+mod classification_tests;
 
 /// A served credential as an API key: its bytes as text, without the
 /// whitespace a pasted key often ends with.

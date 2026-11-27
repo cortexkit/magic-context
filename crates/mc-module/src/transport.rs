@@ -655,14 +655,14 @@ impl SubcRunnerClient {
                 },
             )
             .await
-            .map_err(|error| match error {
+            .map_err(|error| match error.established_refusal() {
                 // The provider's own refusal, by its code (`no_route`, ...).
-                subc_client_rs::CallError::Module(body) => RouteError {
-                    code: body.code,
-                    message: body.message,
-                    detail: body.detail,
+                Some(body) => RouteError {
+                    code: body.code.clone(),
+                    message: body.message.clone(),
+                    detail: body.detail.clone(),
                 },
-                other => unavailable(format!("{method}: {other:?}")),
+                None => unavailable(format!("{method}: {error:?}")),
             })?;
         let mut body: Value = serde_json::from_slice(&reply).map_err(|error| RouteError {
             code: "routing_unavailable".into(),
@@ -1055,22 +1055,21 @@ impl RunnerClient for SubcRunnerClient {
                 },
             )
             .await
-            .map_err(|error| match error {
+            .map_err(|error| {
                 // Route-open refusals are NotSent, not Module errors. Keep the
                 // daemon's code so searches can remember an absent Synapse.
-                error
-                    if matches!(
-                        error
-                            .route_open_refusal()
-                            .map(|refusal| refusal.code.as_str()),
-                        Some("unknown_module")
-                    ) =>
+                if error
+                    .route_open_refusal()
+                    .is_some_and(|body| body.code == "unknown_module")
                 {
                     "unknown_module".to_owned()
+                } else if let Some(body) = error.established_refusal() {
+                    body.code.clone()
+                } else if matches!(error, subc_client_rs::CallError::OutcomeUnknown(_)) {
+                    "deadline_exceeded".to_owned()
+                } else {
+                    "missing_synapse".to_owned()
                 }
-                subc_client_rs::CallError::Module(body) => body.code,
-                subc_client_rs::CallError::OutcomeUnknown(_) => "deadline_exceeded".to_owned(),
-                _ => "missing_synapse".to_owned(),
             })?;
         serde_json::from_slice(&reply).map_err(|_| "validation".to_owned())
     }
@@ -1104,22 +1103,19 @@ impl RunnerClient for SubcRunnerClient {
                 },
             )
             .await
-            .map_err(|error| match error {
-                error
-                    if matches!(
-                        error
-                            .route_open_refusal()
-                            .map(|refusal| refusal.code.as_str()),
-                        Some("unknown_module")
-                    ) =>
+            .map_err(|error| {
+                if error
+                    .route_open_refusal()
+                    .is_some_and(|body| body.code == "unknown_module")
                 {
                     Refusal::new("unknown_module")
+                } else if let Some(body) = error.established_refusal() {
+                    Refusal::from_detail(body.code.clone(), body.detail.as_ref())
+                } else if matches!(error, subc_client_rs::CallError::OutcomeUnknown(_)) {
+                    Refusal::new("deadline_exceeded")
+                } else {
+                    Refusal::new("missing_synapse")
                 }
-                subc_client_rs::CallError::Module(body) => {
-                    Refusal::from_detail(body.code, body.detail.as_ref())
-                }
-                subc_client_rs::CallError::OutcomeUnknown(_) => Refusal::new("deadline_exceeded"),
-                _ => Refusal::new("missing_synapse"),
             })?;
         serde_json::from_slice(&reply).map_err(|_| Refusal::new("validation"))
     }
@@ -1148,14 +1144,13 @@ impl RunnerClient for SubcRunnerClient {
             .await;
         match reply {
             Ok(bytes) => Some(Ok(bytes)),
-            Err(subc_client_rs::CallError::Module(body)) => {
-                Some(Err(crate::client::EntorhinalRefusal {
-                    code: body.code,
-                    message: body.message,
-                    detail: body.detail,
-                }))
-            }
-            Err(_) => None,
+            Err(error) => error.established_refusal().map(|body| {
+                Err(crate::client::EntorhinalRefusal {
+                    code: body.code.clone(),
+                    message: body.message.clone(),
+                    detail: body.detail.clone(),
+                })
+            }),
         }
     }
 
@@ -1206,13 +1201,13 @@ impl RunnerClient for SubcRunnerClient {
                 },
             )
             .await
-            .map_err(|error| match error {
-                subc_client_rs::CallError::Module(body) => DoorRefusal {
-                    code: body.code,
-                    message: body.message,
-                    detail: body.detail,
+            .map_err(|error| match error.established_refusal() {
+                Some(body) => DoorRefusal {
+                    code: body.code.clone(),
+                    message: body.message.clone(),
+                    detail: body.detail.clone(),
                 },
-                other => DoorRefusal::unavailable(format!("{method}: {other:?}")),
+                None => DoorRefusal::unavailable(format!("{method}: {error:?}")),
             })?;
         let value: Value = serde_json::from_slice(&reply).map_err(|error| {
             DoorRefusal::unavailable(format!("{method} answer is not JSON: {error}"))
@@ -1331,12 +1326,12 @@ impl crate::dreamer::lease::RoleLeases for EntorhinalLeases {
 /// A refusal or failure of a lease request, with Entorhinal's code when it
 /// refused.
 fn lease_error(error: &subc_client_rs::CallError) -> crate::dreamer::lease::LeaseError {
-    match error {
-        subc_client_rs::CallError::Module(body) => crate::dreamer::lease::LeaseError {
+    match error.established_refusal() {
+        Some(body) => crate::dreamer::lease::LeaseError {
             code: body.code.clone(),
             message: body.message.clone(),
         },
-        other => crate::dreamer::lease::LeaseError::unavailable(format!("{other:?}")),
+        None => crate::dreamer::lease::LeaseError::unavailable(format!("{error:?}")),
     }
 }
 
@@ -1360,14 +1355,17 @@ impl crate::dreamer::lease::Notices for EntorhinalNotices {
             return Some(crate::dreamer::lease::decode_notice(&bytes));
         }
         self.ended = true;
-        match self.subscription.ended().await {
+        let end = self.subscription.ended().await;
+        if let Some(body) = end.established_refusal() {
+            return Some(Err(LeaseError {
+                code: body.code.clone(),
+                message: body.message.clone(),
+            }));
+        }
+        match end {
             subc_client_rs::SubscriptionEnd::Response(_)
             | subc_client_rs::SubscriptionEnd::StreamEnd
             | subc_client_rs::SubscriptionEnd::Cancelled => None,
-            subc_client_rs::SubscriptionEnd::Error(body) => Some(Err(LeaseError {
-                code: body.code,
-                message: body.message,
-            })),
             other => Some(Err(LeaseError::unavailable(format!(
                 "the watch ended: {other:?}"
             )))),
@@ -1458,17 +1456,15 @@ fn core_attempt(
         {
             return Attempt::NotInstalled
         }
-        Err(subc_client_rs::CallError::Module(body)) => {
-            return Attempt::Settled(Err(CoreRefusal {
-                code: body.code,
-                message: body.message,
-                detail: body.detail,
+        Err(error) => {
+            return Attempt::Settled(Err(match error.established_refusal() {
+                Some(body) => CoreRefusal {
+                    code: body.code.clone(),
+                    message: body.message.clone(),
+                    detail: body.detail.clone(),
+                },
+                None => CoreRefusal::unavailable(format!("{method}: {error:?}")),
             }))
-        }
-        Err(other) => {
-            return Attempt::Settled(Err(CoreRefusal::unavailable(format!(
-                "{method}: {other:?}"
-            ))))
         }
     };
     Attempt::Settled(
@@ -1506,12 +1502,17 @@ mod core_attempt_tests {
     #[test]
     fn core_refusals_and_failures_keep_their_meaning() {
         let own = ErrorBody::new("unknown_module", "core's own refusal");
-        match core_attempt("persona.workspace_document", Err(CallError::Module(own))) {
-            Attempt::Settled(Err(refusal)) => {
-                assert_eq!(refusal.code, "unknown_module");
-                assert_eq!(refusal.message, "core's own refusal");
+        for error in [
+            CallError::Module(own.clone()),
+            CallError::RouteDead(Box::new(own)),
+        ] {
+            match core_attempt("persona.workspace_document", Err(error)) {
+                Attempt::Settled(Err(refusal)) => {
+                    assert_eq!(refusal.code, "unknown_module");
+                    assert_eq!(refusal.message, "core's own refusal");
+                }
+                other => panic!("{other:?}"),
             }
-            other => panic!("{other:?}"),
         }
         let lost = CallError::OutcomeUnknown("no answer in time".into());
         match core_attempt("persona.workspace_document", Err(lost)) {
@@ -3001,6 +3002,31 @@ impl Handler {
     }
 }
 
+/// The body of an Error frame on an already-open route. The SDK now names
+/// route death separately, but ck-mc still reports the same code and detail.
+pub trait EstablishedRefusal {
+    fn established_refusal(&self) -> Option<&subc_protocol::ErrorBody>;
+}
+
+impl EstablishedRefusal for subc_client_rs::CallError {
+    fn established_refusal(&self) -> Option<&subc_protocol::ErrorBody> {
+        match self {
+            Self::Module(body) => Some(body),
+            Self::RouteDead(body) => Some(body),
+            _ => None,
+        }
+    }
+}
+
+impl EstablishedRefusal for subc_client_rs::SubscriptionEnd {
+    fn established_refusal(&self) -> Option<&subc_protocol::ErrorBody> {
+        match self {
+            Self::Error(body) | Self::RouteDead(body) => Some(body),
+            _ => None,
+        }
+    }
+}
+
 /// A failed runner call, keeping the refusal's code when the runner refused
 /// the route at bind or the call itself.
 fn call_error(method: &str, error: &subc_client_rs::CallError) -> ClientError {
@@ -3010,14 +3036,14 @@ fn call_error(method: &str, error: &subc_client_rs::CallError) -> ClientError {
         .or_else(|| error.code().map(str::to_owned));
     // A runner's own refusal keeps its detail: some refusals, such as an
     // account wait, say in it when to ask again.
-    let detail = match error {
-        subc_client_rs::CallError::Module(body) => body.detail.clone(),
-        _ => None,
-    };
+    let refusal = error.established_refusal();
     ClientError {
-        message: format!("{method}: {error:?}"),
+        message: match refusal {
+            Some(body) => format!("{method}: Module({body:?})"),
+            None => format!("{method}: {error:?}"),
+        },
         code,
-        detail,
+        detail: refusal.and_then(|body| body.detail.clone()),
         // A request may have reached the runner when the client wrote it and
         // saw no answer (`OutcomeUnknown`), and also when a `NotSent` can't
         // prove it stayed unsent (`never_forwarded() == Some(false)`: the

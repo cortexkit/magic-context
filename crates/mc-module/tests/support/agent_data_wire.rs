@@ -25,6 +25,7 @@ use mc_mock_runner::runner::Report;
 use mc_mock_runner::script::Step;
 use mc_mock_runner::subc::{PlayRequest, MOCK_PLAY};
 use mc_module::agent_data::door::{hex, unhex};
+use mc_module::transport::EstablishedRefusal;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -298,12 +299,14 @@ impl StandIn {
                         );
                         json!({"reply": body.to_string()})
                     }
-                    Err(subc_client_rs::CallError::Module(body)) => json!({"refused": {
-                        "code": body.code,
-                        "message": body.message,
-                        "detail": body.detail,
-                    }}),
-                    Err(other) => json!({"failed": format!("{other:?}")}),
+                    Err(error) => match error.established_refusal() {
+                        Some(body) => json!({"refused": {
+                            "code": body.code,
+                            "message": body.message,
+                            "detail": body.detail,
+                        }}),
+                        None => json!({"failed": format!("{error:?}")}),
+                    },
                 })
             }
             // As Entorhinal does for a read it does not serve: ck-mc then
@@ -772,9 +775,9 @@ impl Machine {
             }),
         )
         .await
-        .map_err(|error| match error {
-            subc_client_rs::CallError::Module(body) => (body.code, body.detail),
-            other => panic!("the app read failed in transport: {other:?}"),
+        .map_err(|error| match error.established_refusal() {
+            Some(body) => (body.code.clone(), body.detail.clone()),
+            None => panic!("the app read failed in transport: {error:?}"),
         })
     }
 
@@ -798,8 +801,10 @@ impl Machine {
             .await
         {
             Ok(report) => Ok(serde_json::from_value(report).unwrap()),
-            Err(subc_client_rs::CallError::Module(body)) => Err(body.message),
-            Err(other) => panic!("mock.play failed in transport: {other:?}"),
+            Err(error) => match error.established_refusal() {
+                Some(body) => Err(body.message.clone()),
+                None => panic!("mock.play failed in transport: {error:?}"),
+            },
         }
     }
 

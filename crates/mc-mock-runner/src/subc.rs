@@ -234,8 +234,11 @@ impl SubcProvider {
             }
         }
         .map_err(|error| match error {
-            // The provider refused by name (compaction contract W1.3).
+            // Mirror which established-route errors ck-mc treats as refusal bodies.
             subc_client_rs::consumer::CallError::Module(body) => {
+                CallError::refused(body.code, format!("{label}: {}", body.message))
+            }
+            subc_client_rs::consumer::CallError::RouteDead(body) => {
                 CallError::refused(body.code, format!("{label}: {}", body.message))
             }
             other => CallError::new(format!("{label}: {other:?}")),

@@ -115,8 +115,9 @@ fn run_module_cli() -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 fn lab_run() -> Result<String, String> {
+    use mc_module::transport::EstablishedRefusal;
     use serde_json::json;
-    use subc_client_rs::{CallError, CallOptions, ConsumerOptions, SubcConsumer};
+    use subc_client_rs::{CallOptions, ConsumerOptions, SubcConsumer};
     use subc_protocol::{BindIdentity, RouteTarget};
 
     let mut args = std::env::args_os().skip(2);
@@ -158,19 +159,18 @@ fn lab_run() -> Result<String, String> {
         consumer.close().await;
         let bytes = match reply {
             Ok(bytes) => bytes,
-            Err(CallError::Module(error)) => {
-                return Err(format!("{}: {}", error.code, error.message))
-            }
-            Err(error) if error.route_open_refusal().is_some() => {
-                let error = error.route_open_refusal().expect("checked route refusal");
-                return Err(format!("{}: {}", error.code, error.message));
-            }
-            // Do not dump the SDK's connection details or error payloads.
-            Err(_) => {
+            Err(error) => {
+                if let Some(body) = error
+                    .established_refusal()
+                    .or_else(|| error.route_open_refusal())
+                {
+                    return Err(format!("{}: {}", body.code, body.message));
+                }
+                // Do not dump the SDK's connection details or error payloads.
                 return Err(
                     "local daemon request failed; check the output directory before retrying"
                         .into(),
-                )
+                );
             }
         };
         let reply: serde_json::Value =

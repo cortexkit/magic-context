@@ -98,12 +98,12 @@ cortexkit-bus-trait = "=0.3.1"
 cortexkit-bus-naming = "=0.5.4"
 # The computer's box id (`BusClient::box_id`), which names every memory this
 # computer shares with the user's other computers (`replica/`).
-cortexkit-bus-client = "=0.1.19"
+cortexkit-bus-client = "=0.1.20"
 # API keys the user names as `{vault:<credential id>}` are read from the
 # CortexKit vault over ck-mc's own SDK consumer (`vault.rs`), and shared
 # memories are sealed and opened under the fleet epoch key with its typed
 # fleet epoch calls (`replica/seal.rs`).
-cortexkit-claustrum-client = "=0.14.0"
+cortexkit-claustrum-client = "=0.17.2"
 # Used directly for the bus events that carry a payload and replica traffic.
 async-nats = { version = "0.50", default-features = false, features = ["jetstream"] }
 futures-util = { version = "0.3.34", default-features = false }
