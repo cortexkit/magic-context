@@ -2,7 +2,7 @@ import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { SingleStoreMigrationRequiredError } from "./single-store-refusal";
 /// <reference types="bun-types" />
 
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, jest, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
@@ -122,6 +122,37 @@ function deferred<T = void>(): {
     });
     return { promise, resolve, reject };
 }
+
+function freezeTransportTime() {
+    jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+    jest.setSystemTime(new Date("2026-08-11T12:00:00Z"));
+}
+
+function flushTransport() {
+    return new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+function settlementOf(call: Promise<unknown>) {
+    let settled = false;
+    const finish = () => {
+        settled = true;
+    };
+    void call.then(finish, finish);
+    return () => settled;
+}
+
+async function assertTransportDeadline(call: Promise<unknown>, deadline: number) {
+    const settled = settlementOf(call);
+    await flushTransport();
+    jest.advanceTimersByTime(deadline - 1);
+    await flushTransport();
+    expect(settled()).toBe(false);
+    jest.advanceTimersByTime(1);
+    await flushTransport();
+    expect(settled()).toBe(true);
+}
+
+afterEach(() => jest.useRealTimers());
 
 describe("SubcModuleTransport", () => {
     it("serializes management dispatch from the call method over the real socket and preserves facade envelopes", async () => {
@@ -687,6 +718,7 @@ describe("SubcModuleTransport", () => {
     });
 
     it("bounds a half-open transform route without retrying", async () => {
+        freezeTransportTime();
         const timeoutMs = 30;
         const transport = new SubcModuleTransport(
             "unused-connection-file",
@@ -715,8 +747,6 @@ describe("SubcModuleTransport", () => {
             internals.client = client;
             return client;
         };
-        const startedAt = performance.now();
-
         const failure = transport.call({
             sessionId: "session-half-open-client",
             projectRoot: "/workspace/project",
@@ -724,13 +754,14 @@ describe("SubcModuleTransport", () => {
             body: { method: "transform", v: 1 },
         });
 
+        await assertTransportDeadline(failure, timeoutMs);
         await expect(failure).rejects.toMatchObject({ code: "ETIMEDOUT" });
-        expect(performance.now() - startedAt).toBeLessThan(1_000);
         expect(connectionCount).toBe(1);
         expect(routeOpenCount).toBe(1);
     });
 
     it("bounds a hung transform without a fresh-connection resend", async () => {
+        freezeTransportTime();
         const timeoutMs = 30;
         const transport = new SubcModuleTransport(
             "unused-connection-file",
@@ -761,8 +792,6 @@ describe("SubcModuleTransport", () => {
             internals.client = client;
             return client;
         };
-        const startedAt = performance.now();
-
         const failure = transport.call({
             sessionId: "session-hung-client",
             projectRoot: "/workspace/project",
@@ -770,11 +799,11 @@ describe("SubcModuleTransport", () => {
             body: { method: "transform", v: 1 },
         });
 
+        await assertTransportDeadline(failure, timeoutMs);
         await expect(failure).rejects.toMatchObject({
             code: "transform_transport_interrupted",
             cause: { code: "ETIMEDOUT" },
         });
-        expect(performance.now() - startedAt).toBeLessThan(1_000);
         expect(connectionCount).toBe(1);
         expect(requestCount).toBe(1);
         const interrupted = await failure.catch((error: Error) => error);
@@ -1512,6 +1541,15 @@ describe("SubcModuleTransport", () => {
 });
 
 describe("connection backoff in-pass wait", () => {
+    let random: ReturnType<typeof spyOn<typeof Math, "random">>;
+
+    afterEach(() => random?.mockRestore());
+
+    function freezeBackoffTime() {
+        freezeTransportTime();
+        random = spyOn(Math, "random").mockReturnValue(0.5);
+    }
+
     function makeBackoffTransport(): {
         transport: SubcModuleTransport;
         internals: {
@@ -1545,52 +1583,45 @@ describe("connection backoff in-pass wait", () => {
     }
 
     it("waits out an under-budget backoff remainder and serves the pass", async () => {
+        freezeBackoffTime();
         const { transport, internals, connectCount } = makeBackoffTransport();
         // A latch armed by an earlier failure with only 300ms left — far under
         // the wait budget. The pass must wait and connect, not fail.
         internals.nextProbeMs = Date.now() + 300;
-        const startedAt = performance.now();
-
-        await expect(
-            transport.call({
-                sessionId: "session-backoff-wait",
-                projectRoot: "/workspace/project",
-                method: "transform",
-                body: { method: "transform", v: 1, session_id: "session-backoff-wait" },
-            }),
-        ).resolves.toEqual({ result: { sessionId: "session-backoff-wait" } });
-
-        const elapsedMs = performance.now() - startedAt;
-        expect(elapsedMs).toBeGreaterThanOrEqual(280);
-        // Remainder plus jitter only — no retry ladder, no budget overrun.
-        expect(elapsedMs).toBeLessThan(1_000);
+        const call = transport.call({
+            sessionId: "session-backoff-wait",
+            projectRoot: "/workspace/project",
+            method: "transform",
+            body: { method: "transform", v: 1, session_id: "session-backoff-wait" },
+        });
+        // The 300ms remainder plus 50ms of fixed jitter takes one wait, not a series of retries.
+        await assertTransportDeadline(call, 350);
+        expect(await call).toEqual({ result: { sessionId: "session-backoff-wait" } });
         expect(connectCount()).toBe(1);
     });
 
     it("fails fast when the backoff remainder exceeds the wait budget", async () => {
+        freezeBackoffTime();
         const { transport, internals, connectCount } = makeBackoffTransport();
         internals.nextProbeMs = Date.now() + 20_000;
-        const startedAt = performance.now();
-
-        await expect(
-            transport.call({
-                sessionId: "session-backoff-over-budget",
-                projectRoot: "/workspace/project",
-                method: "transform",
-                body: { method: "transform", v: 1 },
-            }),
-        ).rejects.toMatchObject({ code: "SUBC_CONNECTION_BACKOFF" });
-
-        expect(performance.now() - startedAt).toBeLessThan(1_000);
+        const call = transport.call({
+            sessionId: "session-backoff-over-budget",
+            projectRoot: "/workspace/project",
+            method: "transform",
+            body: { method: "transform", v: 1 },
+        });
+        const settled = settlementOf(call);
+        await flushTransport();
+        expect(settled()).toBe(true);
+        await expect(call).rejects.toMatchObject({ code: "SUBC_CONNECTION_BACKOFF" });
         expect(connectCount()).toBe(0);
     });
 
     it("does not serialize sibling sessions behind one session's backoff wait", async () => {
+        freezeBackoffTime();
         const { transport, internals, connectCount } = makeBackoffTransport();
         internals.nextProbeMs = Date.now() + 500;
-        const startedAt = performance.now();
-
-        const [responseA, responseB] = await Promise.all([
+        const calls = Promise.all([
             transport.call({
                 sessionId: "session-backoff-a",
                 projectRoot: "/workspace/project",
@@ -1605,21 +1636,19 @@ describe("connection backoff in-pass wait", () => {
             }),
         ]);
 
-        const wallMs = performance.now() - startedAt;
+        // Both wait 500ms plus 50ms of jitter, not two consecutive waits.
+        await assertTransportDeadline(calls, 550);
+        const [responseA, responseB] = await calls;
         expect(responseA).toEqual({ result: { sessionId: "session-backoff-a" } });
         expect(responseB).toEqual({ result: { sessionId: "session-backoff-b" } });
-        // Each pass waits on its own timer; a serialized (global) wait would pay
-        // the ~500ms remainder twice. The connection itself coalesces once.
-        expect(wallMs).toBeGreaterThanOrEqual(450);
-        expect(wallMs).toBeLessThan(900);
         expect(connectCount()).toBe(1);
     });
 
     it("stops waiting when the pass is aborted mid-backoff", async () => {
+        freezeBackoffTime();
         const { transport, internals, connectCount } = makeBackoffTransport();
         internals.nextProbeMs = Date.now() + 2_000;
         const controller = new AbortController();
-        const startedAt = performance.now();
         const call = transport.call({
             sessionId: "session-backoff-abort",
             projectRoot: "/workspace/project",
@@ -1627,10 +1656,15 @@ describe("connection backoff in-pass wait", () => {
             body: { method: "transform", v: 1 },
             signal: controller.signal,
         });
-        setTimeout(() => controller.abort(new Error("turn cancelled")), 50);
-
+        const settled = settlementOf(call);
+        await flushTransport();
+        jest.advanceTimersByTime(50);
+        await flushTransport();
+        expect(settled()).toBe(false);
+        controller.abort(new Error("turn cancelled"));
+        await flushTransport();
+        expect(settled()).toBe(true);
         await expect(call).rejects.toThrow("turn cancelled");
-        expect(performance.now() - startedAt).toBeLessThan(1_000);
         expect(connectCount()).toBe(0);
     });
 });

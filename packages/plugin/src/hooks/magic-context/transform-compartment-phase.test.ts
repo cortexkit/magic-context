@@ -341,6 +341,8 @@ describe("runCompartmentPhase boundary handoff", () => {
 });
 
 describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
+    afterEach(() => jest.useRealTimers());
+
     // High pressure may survive many transform passes. Publish one RPC status
     // per active historian run, never a user row that could extend that run.
     it("sends the 95% comparting notification at most once per active compartment run", async () => {
@@ -438,6 +440,8 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
         expect(notifText).toContain("Context at 97%");
     });
     it("bounds a stuck historian join at 60 seconds and adopts its later publication", async () => {
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        jest.setSystemTime(new Date("2026-08-11T12:00:00Z"));
         const log = spyOn(logger, "sessionLog").mockImplementation(() => {});
         const sessionId = "ses-bounded-historian-join";
         const db = openDatabase();
@@ -475,9 +479,19 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
 
         try {
             expect(resolveHistorianInlineJoinBudget(600_000)).toBe(HISTORIAN_INLINE_JOIN_BUDGET_MS);
-            const started = performance.now();
-            const timedOut = await runCompartmentPhase(args);
-            expect(performance.now() - started).toBeLessThan(250);
+            let settled = false;
+            const joined = runCompartmentPhase(args).then((result) => {
+                settled = true;
+                return result;
+            });
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            jest.advanceTimersByTime(14);
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            expect(settled).toBe(false);
+            jest.advanceTimersByTime(1);
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            expect(settled).toBe(true);
+            const timedOut = await joined;
             expect(timedOut.historianJoinTimedOut).toBe(true);
             expect(timedOut.historianJoinBudgetMs).toBe(15);
             const lines = log.mock.calls.map((call) => String(call[1]));
