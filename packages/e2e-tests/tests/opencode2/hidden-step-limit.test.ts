@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { assertOpenPaths, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
+import { providerSystemText } from "../../src/provider-system-text";
 
 async function waitFile(path: string) {
     const deadline = Date.now() + 90_000;
@@ -44,7 +45,7 @@ test("OpenCode 2 dreamer tool loop reaching its cap records step_limit, not prov
         const user = await client.session.create({ title: "user", location: { directory: host.cwd }, model: { providerID: "openai", id: "mock-model" } });
         let calls = 0;
         host.mock.addMatcher((body) => {
-            if (typeof body.instructions !== "string" || !body.instructions.includes("curate")) return null;
+            if (!providerSystemText(body).includes("curate")) return null;
             calls++;
             if (calls === 1) return { error: { status: 500, type: "server_error", message: "one retried step" } };
             return { openaiOutput: [{ type: "function_call", id: `fc_cap_${calls}`, call_id: `call_cap_${calls}`, name: "ctx_memory", arguments: JSON.stringify({ action: "list", value: "fixture" }) }], usage: { input_tokens: 100, output_tokens: 10 } };
