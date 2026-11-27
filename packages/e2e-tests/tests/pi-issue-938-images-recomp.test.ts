@@ -496,16 +496,14 @@ export default function (pi) {
             };
         });
         let pending: Array<(body: Record<string, unknown>) => ReturnType<typeof toolUse>> = [];
-        // The reply after the live turn's tool result is held this long, so the
-        // command below runs while the turn is under way.
-        let holdNextReplyMs = 0;
+        let holdNextReply: Promise<void> | undefined;
         h.mock.addMatcher((body) => {
             if (!isMainRequest(body)) return null;
             const next = pending.shift();
             if (next) return next(body);
-            const delayMs = holdNextReplyMs;
-            holdNextReplyMs = 0;
-            return { text: "Done.", usage: usageFor(body), delayMs };
+            const until = holdNextReply;
+            holdNextReply = undefined;
+            return { text: "Done.", usage: usageFor(body), until };
         });
         const usage = { input_tokens: 1_000, output_tokens: 20 };
         const mainBodies = () =>
@@ -520,32 +518,50 @@ export default function (pi) {
         await h.waitForMockQuiescence({ label: "early turn" });
 
         pending = [(body) => toolUse(body, "generate_image", { index: 1 }, usage)];
-        holdNextReplyMs = 30_000;
-        const liveTurn = h.sendPrompt(sessionId, "LIVE_PROMPT_938: draw frame one", { timeoutMs: 300_000 });
-        // The live turn's second request (after its tool result) is being held.
-        await h.waitFor(
-            () =>
-                mainBodies().filter((body) => JSON.stringify(body.messages).includes("LIVE_PROMPT_938")).length >= 2,
-            { timeoutMs: 120_000, label: "live turn reaches its held reply" },
-        );
-        await h.invokeExtensionCommandDuringTurn("ctx-recomp");
-        await h.invokeExtensionCommandDuringTurn("ctx-recomp");
-        const rebuilt = await h.waitFor(
-            () => {
-                const row = h
-                    .contextDb()
-                    .prepare(
-                        "SELECT end_message, end_message_id, title FROM compartments WHERE session_id = ? ORDER BY sequence DESC LIMIT 1",
-                    )
-                    .get(sessionId) as { end_message: number; end_message_id: string; title: string } | null;
-                return row?.title === "REBUILT_MID_TURN_938" ? row : null;
-            },
-            { timeoutMs: 180_000, label: "mid-turn recomp publishes" },
-        );
-        // The recomp read the branch during the turn: its newest summary ends on
-        // the live turn's tool result (a raw message whose id starts with
-        // `synth-user-`), inside that turn.
-        expect(rebuilt.end_message_id.startsWith("synth-user-")).toBe(true);
+        // Hold the tool-result step until ctx-recomp publishes its summary,
+        // so it reads the branch before the turn appends its final reply.
+        let releaseReply!: () => void;
+        holdNextReply = new Promise<void>((resolve) => {
+            releaseReply = resolve;
+        });
+        const liveTurn = h.sendPrompt(sessionId, "LIVE_PROMPT_938: draw frame one", {
+            timeoutMs: 300_000,
+        });
+        let rebuilt: { end_message: number; end_message_id: string; title: string };
+        try {
+            // The live turn's second request (after its tool result) is being held.
+            await h.waitFor(
+                () =>
+                    mainBodies().filter((body) =>
+                        JSON.stringify(body.messages).includes("LIVE_PROMPT_938"),
+                    ).length >= 2,
+                { timeoutMs: 120_000, label: "live turn reaches its held reply" },
+            );
+            await h.invokeExtensionCommandDuringTurn("ctx-recomp");
+            await h.invokeExtensionCommandDuringTurn("ctx-recomp");
+            rebuilt = await h.waitFor(
+                () => {
+                    const row = h
+                        .contextDb()
+                        .prepare(
+                            "SELECT end_message, end_message_id, title FROM compartments WHERE session_id = ? ORDER BY sequence DESC LIMIT 1",
+                        )
+                        .get(sessionId) as {
+                        end_message: number;
+                        end_message_id: string;
+                        title: string;
+                    } | null;
+                    return row?.title === "REBUILT_MID_TURN_938" ? row : null;
+                },
+                { timeoutMs: 180_000, label: "mid-turn recomp publishes" },
+            );
+            // The command read the branch during the turn: its newest summary ends on
+            // the live turn's tool result (a raw message whose id starts with
+            // `synth-user-`), inside that turn.
+            expect(rebuilt.end_message_id.startsWith("synth-user-")).toBe(true);
+        } finally {
+            releaseReply();
+        }
         await liveTurn;
         await h.waitForMockQuiescence({ label: "live turn" });
 
