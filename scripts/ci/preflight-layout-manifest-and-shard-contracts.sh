@@ -18,6 +18,32 @@ check golden-checker-tests python3 scripts/check-goldens.test.py -v
 check mode-manifest bun packages/e2e-tests/scripts/validate-mode-manifest.ts
 check gate-tests bash -c 'cd packages/e2e-tests && bun test ../../scripts/gate.test.ts ../../scripts/gate-tools.test.ts'
 check shard-contracts bash -c 'cd packages/e2e-tests && bun test scripts/validate-mode-manifest.test.ts scripts/known-oc2-failures.test.ts scripts/select-rust-shard.test.ts scripts/select-host-shard.test.ts scripts/select-unit-shard.test.ts scripts/ci-workflow.test.ts scripts/run-slow-unit-tests.test.ts scripts/test-db-guard.test.ts'
+check e2e-harness-tests bash -c 'cd packages/e2e-tests && bun test \
+    scripts/check-rust-prerequisites.test.ts \
+    scripts/tool-sweep-concurrency-gate.test.ts \
+    src/contention-turn-outcome.test.ts \
+    src/host-open-files.test.ts \
+    src/live-providers/calibrate.test.ts \
+    src/live-providers/recorder.test.ts \
+    src/live-providers/thinking-matrix.test.ts \
+    src/live-providers/trim-only.test.ts \
+    src/live-providers/wire.test.ts \
+    src/mid-turn-prefix-ab.test.ts \
+    src/mock-provider/server.test.ts \
+    src/mock-routing.test.ts \
+    src/opencode-runner/spawn.test.ts \
+    src/opencode2-runner/cli-resolution.test.ts \
+    src/opencode2-runner/open-file-inventory.test.ts \
+    src/opencode2-runner/opencode1-prompt-diagnostics.test.ts \
+    src/opencode2-runner/plugin-activation.test.ts \
+    src/opencode2-runner/schema-guard.test.ts \
+    src/pi-harness.test.ts \
+    src/pi-runner/rpc-client.test.ts \
+    src/repro/prefill-tail-repro.test.ts \
+    src/rust-pass-observation.test.ts \
+    src/rust-runner/executable-staging.test.ts \
+    src/rust-runner/hermetic-subc.test.ts \
+    src/temp-dir.test.ts'
 check slow-unit-inventory bash -c 'cd packages/e2e-tests && bun scripts/run-slow-unit-tests.ts --dry-run'
 # doctor --issue keeps a log line's wording only when the line matches a template
 # generated from source, so a new or edited plugin/Pi log call must regenerate

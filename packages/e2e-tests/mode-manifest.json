@@ -341,12 +341,12 @@
         },
         {
             "path": "tests/adv-identical-bytes-hard.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "adversarial gate reproduction for identical-bytes HARD folds on a real OpenCode 1 host; run by hand, outside the mode lanes",
+            "rationale": "adversarial gate reproduction for identical-bytes HARD folds on a real OpenCode 1 host",
             "contract_refs": [
                 "FOLD-UNDER-PRESSURE"
             ],
@@ -1028,12 +1028,12 @@
         },
         {
             "path": "tests/opencode2/empty-text-sentinels.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: a system row Magic Context neutralizes on canonical Anthropic must leave the request instead of reaching the API as an empty text block (OpenCode 2 sends system rows to Claude models with native system updates as they are), checked against an Anthropic-strict mock on the real host; the v2 lane runs from its own invocation (bun test tests/opencode2), not through the v1 mode-selected spawn seam",
+            "rationale": "OpenCode v2 lane: a system row Magic Context neutralizes on canonical Anthropic must leave the request instead of reaching the API as an empty text block (OpenCode 2 sends system rows to Claude models with native system updates as they are), checked against an Anthropic-strict mock on the real host.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1148,12 +1148,12 @@
         },
         {
             "path": "tests/opencode2/compartment-boundary-host-row.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: the host writes an instruction update (changed AGENTS.md) as a session_message system row it never serves by id; a /ctx-wrapup cut and a compartment stored by an older build both end on that row, and the HARD pass plus two defers after it must serve a byte-stable prefix with no degraded injection and no covered row served raw; the v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "rationale": "OpenCode v2 lane: the host writes an instruction update (changed AGENTS.md) as a session_message system row it never serves by id; a /ctx-wrapup cut and a compartment stored by an older build both end on that row, and the HARD pass plus two defers after it must serve a byte-stable prefix with no degraded injection and no covered row served raw.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1193,12 +1193,12 @@
         },
         {
             "path": "tests/opencode2/execute-threshold-model.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: with execute_threshold_percentage {default 50, the session's model 20}, a pass at 31% on that model executes and the proactive historian floor derives from 20%, read from the plugin's per-pass threshold and scheduler logs; before the context hook supplied the draft model key it deferred against the default. The v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "rationale": "OpenCode v2 lane: with execute_threshold_percentage {default 50, the session's model 20}, a pass at 31% on that model executes and the proactive historian floor derives from 20%, read from the plugin's per-pass threshold and scheduler logs; before the context hook supplied the draft model key it deferred against the default.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1208,12 +1208,12 @@
         },
         {
             "path": "tests/opencode2/execute-threshold-tokens.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: with execute_threshold_percentage 80 and execute_threshold_tokens.default 20000 on a 100k window, a pass after a 10k-token turn defers (the control) and a pass after a 30k-token turn executes, read from the plugin's per-pass scheduler log; before the token threshold reached the OpenCode 2 context hook that pass deferred. The v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "rationale": "OpenCode v2 lane: with execute_threshold_percentage 80 and execute_threshold_tokens.default 20000 on a 100k window, a pass after a 10k-token turn defers (the control) and a pass after a 30k-token turn executes, read from the plugin's per-pass scheduler log; before the token threshold reached the OpenCode 2 context hook that pass deferred.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1223,12 +1223,12 @@
         },
         {
             "path": "tests/opencode2/tool-result-image.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: an image the agent reads with the host's read tool comes back as a content tool result holding a file entry, which the host sends as a provider image block. With Magic Context loaded it must reach the provider as the host's own image block, never serialized into the tool output as base64 text, across a priced pass and the defer after it (whose shared prefix must be byte-identical), and after a host compaction checkpoint in the same process and after a host restart. The v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "rationale": "OpenCode v2 lane: an image the agent reads with the host's read tool comes back as a content tool result holding a file entry, which the host sends as a provider image block. With Magic Context loaded it must reach the provider as the host's own image block, never serialized into the tool output as base64 text, across a priced pass and the defer after it (whose shared prefix must be byte-identical), and after a host compaction checkpoint in the same process and after a host restart.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1292,12 +1292,12 @@
         },
         {
             "path": "tests/opencode2/bounded-raw-reads.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode 2 adapter reads raw history through bounded store queries (readPage/getCount and the provider id/ordinal lookups) instead of decoding every session_message row; it runs only in the dedicated v2 lane",
+            "rationale": "OpenCode 2 adapter reads raw history through bounded store queries (readPage/getCount and the provider id/ordinal lookups) instead of decoding every session_message row",
             "contract_refs": [
                 "S2-MIGRATION",
                 "OC2-S1"
@@ -1339,9 +1339,9 @@
         },
         {
             "path": "tests/opencode2/converted-drop-replay.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
             "rationale": "Converted 1.x tool arc reduced via the real ctx_reduce tool and replayed on the pinned OpenCode 2 host; the runner validates every returned draft against the host schema",
@@ -1355,9 +1355,9 @@
         },
         {
             "path": "tests/opencode2/mural-media-schema.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
             "rationale": "The real OpenCode 2 host replays a persisted vision mural and validates m0 media against its own LLM schema",
@@ -1371,9 +1371,9 @@
         },
         {
             "path": "tests/opencode2/synthetic-todo-schema.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
             "rationale": "The real OpenCode 2 host with a native todowrite fixture captures todo state, then validates priced and cached synthetic reminder drafts against its own LLM schema",
@@ -1433,9 +1433,9 @@
         },
         {
             "path": "tests/opencode2/entry-s2-context.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
             "rationale": "Real OpenCode 2 directory-load proof for the dual-loader entry",
@@ -1466,12 +1466,12 @@
         },
         {
             "path": "tests/opencode2/harness-s3-identity.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "Real GA OpenCode 2 boot-time harness identity proof runs in the dedicated v2 lane",
+            "rationale": "Real GA OpenCode 2 boot-time harness identity proof runs in the",
             "contract_refs": [
                 "R12"
             ],
@@ -1481,12 +1481,12 @@
         },
         {
             "path": "tests/opencode2/session-project-binding.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "Real OpenCode 2 host: a session in a git and in a non-git directory gets its session_projects binding (the Dashboard's project grouping) and the plugin logs under the opencode2 temp subtree; runs in the dedicated v2 lane",
+            "rationale": "Real OpenCode 2 host: a session in a git and in a non-git directory gets its session_projects binding (the Dashboard's project grouping) and the plugin logs under the opencode2 temp subtree; runs in the",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1496,12 +1496,12 @@
         },
         {
             "path": "tests/opencode2/hidden-child-native-remove.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "Native hidden runs are removed at completion without touching the user's session or the permanent background holder; dedicated v2 lane",
+            "rationale": "Native hidden runs are removed at completion without touching the user's session or the permanent background holder",
             "contract_refs": [
                 "R44",
                 "OC2-S1"
@@ -1520,12 +1520,12 @@
         },
         {
             "path": "tests/opencode2/hidden-child-terminal-failure.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "Native hidden children preserve host provider retries, clean up terminal failures and isolate user sessions; dedicated v2 lane",
+            "rationale": "Native hidden children preserve host provider retries, clean up terminal failures and isolate user sessions",
             "contract_refs": [
                 "R44",
                 "R44b"
@@ -1567,9 +1567,9 @@
         },
         {
             "path": "tests/opencode2/hidden-child-two-directories.test.ts",
-            "tier": "excluded",
-            "invocation": { "ts": false, "rust": false },
-            "rationale": "Real OpenCode 2 host dispatches hidden runs from two git worktrees with shared project identity to their respective directory hooks; dedicated v2 lane",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 2 host dispatches hidden runs from two git worktrees with shared project identity to their respective directory hooks",
             "contract_refs": ["R44"],
             "hosts": ["opencode2"]
         },
@@ -1591,12 +1591,12 @@
         },
         {
             "path": "tests/opencode2/hidden-child-host-compaction.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: a hidden child the real host compacts before its first step (started as /ctx-dream map-memories under serve --service) must still run its registered prompt, reach the provider and record progress, instead of being refused as an unregistered prompt; needs the real v2 host's compaction and checkpoint rendering, so it runs only in the dedicated v2 lane",
+            "rationale": "OpenCode v2 lane: a hidden child the real host compacts before its first step (started as /ctx-dream map-memories under serve --service) must still run its registered prompt, reach the provider and record progress, instead of being refused as an unregistered prompt; needs the real v2 host's compaction and checkpoint rendering",
             "contract_refs": [
                 "OC2-S1",
                 "ISSUE-602"
@@ -1645,12 +1645,12 @@
         },
         {
             "path": "tests/opencode2/probes.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: boots the real @opencode/cli@2.0.5 in the hermetic v2 runner (throwaway roots, fd guard); v1/v2 payload, hidden-agent and rpc-entry probes; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "rationale": "OpenCode v2 lane: boots the real OpenCode 2 CLI in the hermetic v2 runner (throwaway roots, fd guard); v1/v2 payload, hidden-agent and rpc-entry probes.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1676,12 +1676,12 @@
         },
         {
             "path": "tests/opencode2/rpc-s2-listener.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: the v2 RPC listener publishes a non-zero sidebar snapshot after a real prompt on the pinned GA host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "rationale": "OpenCode v2 lane: the v2 RPC listener publishes a non-zero sidebar snapshot after a real prompt on the pinned GA host.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1691,12 +1691,12 @@
         },
         {
             "path": "tests/opencode2/runner.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: hermetic runner guards and handoff against the real GA host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "rationale": "OpenCode v2 lane: hermetic runner guards and handoff against the real GA host.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1706,12 +1706,12 @@
         },
         {
             "path": "tests/opencode2/store-directories.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: a replayed store's session directories are moved under the run root (or the run refuses), and the post-run write fence and live-store snapshot each catch what the other cannot; runs from the v2 lane's own invocation (bun test tests/opencode2), not the v1 mode-selected spawn seam",
+            "rationale": "OpenCode v2 lane: a replayed store's session directories are moved under the run root (or the run refuses), and the post-run write fence and live-store snapshot each catch what the other cannot.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1752,9 +1752,9 @@
         },
         {
             "path": "tests/opencode2/rust-mode-limitation.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
             "rationale": "OpenCode v2 lane: transform_mode \"rust\" is accepted on OpenCode 2 without naming a host limitation, and with no module reachable the status surfaces report canonical session state as unavailable rather than answering with host-side numbers; it needs no Rust stack, so it runs from the v2 lane's own invocation (bun test tests/opencode2) rather than the mode-selected spawn seam",
@@ -1836,9 +1836,9 @@
         },
         {
             "path": "tests/opencode2/overflow-reading-retention.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
             "rationale": "OpenCode 2 provider overflow rejection records request input tokens and subsequent context passes retain that reading until a newer reply completes",
@@ -1852,12 +1852,12 @@
         },
         {
             "path": "tests/opencode2/v1-v2-reconversion.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "Clears the conversion marker and reconverts a throwaway store on a real OpenCode 2 host to prove doctor never offers the reconversion that deletes post-conversion messages; the dedicated OC2 host step runs this sequentially",
+            "rationale": "Clears the conversion marker and reconverts a throwaway store on a real OpenCode 2 host to prove doctor never offers the reconversion that deletes post-conversion messages",
             "contract_refs": [
                 "S2-MIGRATION",
                 "OC2-S1"
@@ -1884,12 +1884,12 @@
         },
         {
             "path": "tests/opencode2/store-reader.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: session_message reader against real v2 host writes; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "rationale": "OpenCode v2 lane: session_message reader against real v2 host writes.",
             "contract_refs": [
                 "OC2-S1"
             ],

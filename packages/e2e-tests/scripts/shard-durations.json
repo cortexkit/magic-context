@@ -1,5 +1,5 @@
 {
-  "source": "Rust: GitHub check run 39854138656 (2026-10-22), all eight hermetic consumer logs, including measured whole-file times after the marker split. Hosts: run 38469513397 (2026-10-13), OC1 115554164074, OC2 115554229054",
+  "source": "Rust: GitHub check run 39854138656 (2026-10-22), all eight hermetic consumer logs, including measured whole-file times after the marker split. Hosts: run 38469513397 (2026-10-13), OC1 115554164074, OC2 115554229054; added OC2 files use the maximum observed in three isolated runs per CI version",
   "reason": "Elapsed whole-file seconds, including setup/teardown; Rust uses file:start to file:end, hosts use group to endgroup. Longest-first assignment balances real waits without splitting scenarios. New files use the lane median until measured. Historical train-only entries are retained for its next merge; selection always comes from the live validated manifest.",
   "seconds": {
     "rust": {
@@ -112,6 +112,30 @@
       "tests/todo-synthesis.test.ts": 73.1
     },
     "opencode2": {
+        "tests/opencode2/bounded-raw-reads.test.ts": 3,
+        "tests/opencode2/compartment-boundary-host-row.test.ts": 13,
+        "tests/opencode2/converted-drop-replay.test.ts": 22,
+        "tests/opencode2/empty-text-sentinels.test.ts": 3,
+        "tests/opencode2/entry-s2-context.test.ts": 3,
+        "tests/opencode2/execute-threshold-model.test.ts": 4,
+        "tests/opencode2/execute-threshold-tokens.test.ts": 6,
+        "tests/opencode2/harness-s3-identity.test.ts": 4,
+        "tests/opencode2/hidden-child-host-compaction.test.ts": 3,
+        "tests/opencode2/hidden-child-native-remove.test.ts": 14,
+        "tests/opencode2/hidden-child-terminal-failure.test.ts": 6,
+        "tests/opencode2/hidden-child-two-directories.test.ts": 8,
+        "tests/opencode2/mural-media-schema.test.ts": 7,
+        "tests/opencode2/overflow-reading-retention.test.ts": 3,
+        "tests/opencode2/probes.test.ts": 12,
+        "tests/opencode2/rpc-s2-listener.test.ts": 7,
+        "tests/opencode2/runner.test.ts": 9,
+        "tests/opencode2/rust-mode-limitation.test.ts": 18,
+        "tests/opencode2/session-project-binding.test.ts": 10,
+        "tests/opencode2/store-directories.test.ts": 1,
+        "tests/opencode2/store-reader.test.ts": 1,
+        "tests/opencode2/synthetic-todo-schema.test.ts": 3,
+        "tests/opencode2/tool-result-image.test.ts": 21,
+        "tests/opencode2/v1-v2-reconversion.test.ts": 16,
       "tests/cache-invariants.test.ts": 28.1,
       "tests/cache-stability.test.ts": 3.4,
       "tests/compaction-off.test.ts": 3.1,
