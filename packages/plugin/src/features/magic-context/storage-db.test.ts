@@ -428,7 +428,10 @@ describe("storage-db", () => {
             const callerUmask = process.umask();
             expect(existsSync(dbPath)).toBe(true);
             expect(statSync(dirname(dbPath)).mode & 0o777).toBe(0o777 & ~callerUmask);
-            expect(statSync(dbPath).mode & 0o777).toBe(0o666 & ~callerUmask);
+            // SQLite creates a database file with mode 0644, not 0666, and the
+            // umask then clears bits from that. The two only agree under umask
+            // 0022; a user with a private group (umask 0002) gets 0644 as well.
+            expect(statSync(dbPath).mode & 0o777).toBe(0o644 & ~callerUmask);
         });
 
         it("#when private permission enforcement is enabled #then storage and database are private", () => {
