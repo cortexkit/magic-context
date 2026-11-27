@@ -169,6 +169,8 @@ pub(crate) struct Plan {
     pub budget: f64,
     /// The scores the line compared, after the reference scale.
     pub scores: Vec<f64>,
+    /// The scores the floor compared ([`floor_scores`]).
+    pub floor_scores: Vec<f64>,
 }
 
 /// The budget a fold works with: `budget`, or the fallback when there is none.
@@ -226,6 +228,19 @@ pub(crate) fn reference_score(rank: f64) -> f64 {
 /// lower score, with tied summaries at the middle of their group, so equal
 /// scores get one value.
 pub(crate) fn line_scores(summaries: &[Summary], reference_scale: bool) -> Vec<f64> {
+    ranked_scores(summaries, reference_scale, false)
+}
+
+/// The scores the floor compares: as [`line_scores`], but a tie group counts
+/// at its highest rank. At the middle, a top score shared by more than about
+/// one summary in seventy would map below the floor's score, and a session
+/// whose summarizer gives its best work one score would have no floor.
+pub(crate) fn floor_scores(summaries: &[Summary], reference_scale: bool) -> Vec<f64> {
+    ranked_scores(summaries, reference_scale, true)
+}
+
+/// [`line_scores`], with each tie group at its highest rank when `top`.
+fn ranked_scores(summaries: &[Summary], reference_scale: bool, top: bool) -> Vec<f64> {
     let scores: Vec<f64> = summaries.iter().map(|summary| summary.score).collect();
     let scored = summaries.iter().filter(|summary| summary.scored).count();
     if !reference_scale || scored < REFERENCE_MIN_SCORED {
@@ -239,7 +254,12 @@ pub(crate) fn line_scores(summaries: &[Summary], reference_scale: bool) -> Vec<f
         .map(|&score| {
             let first = sorted.partition_point(|&other| other < score);
             let last = sorted.partition_point(|&other| other <= score) - 1;
-            reference_score(100.0 * ((first + last) as f64 / 2.0 + 0.5) / count)
+            let position = if top {
+                last as f64
+            } else {
+                (first + last) as f64 / 2.0
+            };
+            reference_score(100.0 * (position + 0.5) / count)
         })
         .collect()
 }
@@ -261,7 +281,12 @@ pub(crate) fn plan(
 ) -> Plan {
     let budget = effective_budget(budget);
     let scores = line_scores(summaries, options.reference_scale);
-    let mut chosen = search(summaries, &scores, budget, costs, options);
+    let floor_scores = floor_scores(summaries, options.reference_scale);
+    let ranked = Scores {
+        line: &scores,
+        floor: &floor_scores,
+    };
+    let mut chosen = search(summaries, ranked, budget, costs, options);
     // The search ends over the budget only when nothing fits at any
     // stretch, so at the smallest.
     if chosen.2 as f64 > budget {
@@ -278,14 +303,23 @@ pub(crate) fn plan(
         joints,
         budget,
         scores,
+        floor_scores,
     }
+}
+
+/// The scores a plan compares, one of each per summary: the line's
+/// ([`line_scores`]) and the floor's ([`floor_scores`]).
+#[derive(Clone, Copy)]
+pub(crate) struct Scores<'s> {
+    pub line: &'s [f64],
+    pub floor: &'s [f64],
 }
 
 /// The stretch factor the search settles on (`None` when everything fits in
 /// full), with its forms, total and day groups.
 fn search(
     summaries: &[Summary],
-    scores: &[f64],
+    scores: Scores,
     budget: f64,
     costs: &mut impl Costs,
     options: Options,
@@ -358,7 +392,7 @@ fn step_down(
 /// summed only until it is over `limit` ([`cost_within`]).
 fn forms_at(
     summaries: &[Summary],
-    scores: &[f64],
+    scores: Scores,
     stretch: f64,
     budget: f64,
     costs: &mut impl Costs,
@@ -373,29 +407,38 @@ fn forms_at(
 /// The form the line gives each summary at `stretch`, with the floor's
 /// titles for `budget`.
 pub(crate) fn forms_on_line(
-    scores: &[f64],
+    scores: Scores,
     stretch: f64,
     budget: f64,
     costs: &mut impl Costs,
 ) -> Vec<u8> {
-    let count = scores.len();
+    let Scores { line, floor } = scores;
+    let count = line.len();
     let mut forms: Vec<u8> = (0..count)
         .map(|index| {
             let age = (count - 1 - index) as f64;
-            form_under_line(scores[index], line_height(age, stretch))
+            form_under_line(line[index], line_height(age, stretch))
         })
         .collect();
 
     // The floor: hidden summaries with the highest scores come back as
     // titles, the newer first on equal scores, while they fit in their share
-    // of the budget. Each is charged its title on its own.
+    // of the budget. Each is charged its title on its own. The order is the
+    // line's scores; within equal ones the floor's (which only differ there
+    // for summaries of different stored scores), so the summaries the floor
+    // accepts come first.
     let mut hidden: Vec<usize> = (0..count)
         .filter(|&index| forms[index] == NOT_SHOWN)
         .collect();
-    hidden.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(b.cmp(&a)));
+    hidden.sort_by(|&a, &b| {
+        line[b]
+            .total_cmp(&line[a])
+            .then(floor[b].total_cmp(&floor[a]))
+            .then(b.cmp(&a))
+    });
     let mut room = FLOOR_SHARE * budget;
     for index in hidden {
-        if scores[index] < FLOOR_SCORE {
+        if floor[index] < FLOOR_SCORE {
             break;
         }
         let cost = costs.piece(index, TITLE) as f64;

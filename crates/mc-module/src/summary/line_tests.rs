@@ -249,7 +249,7 @@ fn generated_sessions_keep_the_lines_promises_at_every_budget() {
                 for (index, (&form, &line)) in plan.forms.iter().zip(&by_line).enumerate() {
                     // Never longer than the line gives, except a hidden summary
                     // scored 90 or more that the floor brings back as a title.
-                    let floor = line == NOT_SHOWN && form == TITLE && plan.scores[index] >= 90.0;
+                    let floor = line == NOT_SHOWN && form == TITLE && plan.floor_scores[index] >= 90.0;
                     assert!(
                         form >= line || floor,
                         "{at}: summary {index} at {form}, line {line}"
@@ -294,7 +294,11 @@ fn the_plan_fits_its_budget_or_is_empty_at_any_budget() {
                 if plan.stretch != Some(STRETCH_MIN) {
                     continue;
                 }
-                let on_line = forms_on_line(&plan.scores, STRETCH_MIN, budget, &mut table);
+                let scores = Scores {
+                    line: &plan.scores,
+                    floor: &plan.floor_scores,
+                };
+                let on_line = forms_on_line(scores, STRETCH_MIN, budget, &mut table);
                 let Some(last) = (0..count).rev().find(|&i| plan.forms[i] != on_line[i]) else {
                     continue;
                 };
@@ -671,4 +675,116 @@ fn stopping_the_sums_early_changes_nothing_on_the_lab_session() {
             assert_eq!(with, without, "at {budget}, {options:?}");
         }
     }
+}
+
+/// The floor in a session whose top scores are tied: the tie group counts at
+/// its highest rank for the floor, so it still has candidates, taken newest
+/// first within the floor's share of the budget, while the forms keep the
+/// middle of the group.
+#[test]
+fn a_tied_top_group_still_has_floor_titles() {
+    // (summaries, share tied at the top, the top score); the tied summaries
+    // are the oldest, so the line hides them.
+    let cases = [(1_000usize, 0.03, 100.0), (3_800, 0.015, 95.0), (200, 1.0, 60.0)];
+    for (count, share, top) in cases {
+        let tied = (count as f64 * share) as usize;
+        let summaries: Vec<Summary> = (0..count)
+            .map(|index| Summary {
+                score: if index < tied {
+                    top
+                } else {
+                    15.0 + (index % 75) as f64
+                },
+                scored: true,
+                day: None,
+            })
+            .collect();
+        let mut table = Table {
+            forms: vec![[400, 150, 60, 40, 20]; count],
+            lines: vec![16; count],
+            header: 12,
+        };
+        let budget = 6_000.0;
+        let at = format!("{tied} of {count} tied at {top}");
+        let plan = plan(&summaries, budget, &mut table, Options::default());
+        let stretch = plan.stretch.unwrap();
+        // The forms still read the middle of the group: below the floor.
+        assert!(plan.scores[0] < 90.0, "{at}: {}", plan.scores[0]);
+        let by_line = line_forms(&plan.scores, stretch);
+        let floored: Vec<usize> = (0..count)
+            .filter(|&i| by_line[i] == NOT_SHOWN && plan.forms[i] == TITLE)
+            .collect();
+        assert!(!floored.is_empty(), "{at}: no floor titles");
+        assert!(floored.iter().all(|&i| i < tied), "{at}");
+        // Within the floor's share, and the newest of the group first: the
+        // next newer hidden one did not fit.
+        let spent = floored.len() as f64 * 20.0;
+        assert!(spent <= 0.05 * budget, "{at}: spent {spent}");
+        let hidden_tied: Vec<usize> = (0..tied)
+            .filter(|&i| plan.forms[i] == NOT_SHOWN)
+            .collect();
+        assert!(!hidden_tied.is_empty(), "{at}: the cap did not cut");
+        assert!(
+            hidden_tied.iter().max() < floored.iter().min(),
+            "{at}: an older one was taken before a newer one"
+        );
+        assert!(spent + 20.0 > 0.05 * budget, "{at}: room left for the next");
+    }
+}
+
+/// The lab session's floor and forms with the reference scale: 34 summaries
+/// qualify, and the forms at the six budgets are pinned (day headings off).
+#[test]
+fn the_lab_sessions_floor_on_the_reference_scale_is_pinned() {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        score: f64,
+        date: String,
+        costs: [u64; 5],
+    }
+    #[derive(serde::Deserialize)]
+    struct Fixture {
+        rows: Vec<Row>,
+    }
+    let fixture: Fixture =
+        serde_json::from_str(include_str!("../../testdata/history-line-shape.json")).unwrap();
+    let summaries: Vec<Summary> = fixture
+        .rows
+        .iter()
+        .map(|row| Summary {
+            score: row.score,
+            scored: true,
+            day: Some(&row.date),
+        })
+        .collect();
+    let mut table = Table {
+        forms: fixture.rows.iter().map(|row| row.costs).collect(),
+        lines: vec![0; fixture.rows.len()],
+        header: 0,
+    };
+    let options = Options {
+        day_headers: false,
+        ..Options::default()
+    };
+    let candidates = floor_scores(&summaries, true)
+        .iter()
+        .filter(|&&score| score >= 90.0)
+        .count();
+    assert_eq!(candidates, 34);
+    let pinned: [(f64, u32); 6] = [
+        (5_000.0, 1_052_589_277),
+        (15_000.0, 1_108_801_024),
+        (30_000.0, 2_191_712_027),
+        (60_000.0, 208_577_252),
+        (98_000.0, 570_235_141),
+        (150_000.0, 1_748_734_472),
+    ];
+    let found: Vec<(f64, u32)> = pinned
+        .iter()
+        .map(|&(budget, _)| {
+            let plan = plan(&summaries, budget, &mut table, options);
+            (budget, fnv1a32(&plan.forms))
+        })
+        .collect();
+    assert_eq!(found, pinned);
 }
