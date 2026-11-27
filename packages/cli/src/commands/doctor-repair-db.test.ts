@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import {
     chmodSync,
     closeSync,
+    existsSync,
     mkdirSync,
     openSync,
     readdirSync,
@@ -171,7 +172,7 @@ function seedCurrentDatabase(dbPath: string): void {
         for (let index = 1; index <= 3; index++) insertDreamRun.run(index, index);
     })();
     db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    db.exec("PRAGMA journal_mode=DELETE");
+    expect(db.prepare("PRAGMA journal_mode=DELETE").get()).toEqual({ journal_mode: "delete" });
     db.close();
 }
 
@@ -357,13 +358,8 @@ describe("doctor repair-db", () => {
         recovered.close();
         expect(version.version).toBe(LATEST_SUPPORTED_VERSION);
 
-        const files = readdirSync(storageDir);
-        const backup = files.find((name) => name.startsWith("context.db.corrupt-backup-"));
-        const original = files.find((name) => name.startsWith("context.db.corrupt-original-"));
-        expect(backup).toBeDefined();
-        expect(original).toBeDefined();
-        expect(digest(join(storageDir, backup as string))).toBe(corruptDigest);
-        expect(digest(join(storageDir, original as string))).toBe(corruptDigest);
+        expect(digest(`${dbPath}.corrupt-backup-20260811T123456789Z`)).toBe(corruptDigest);
+        expect(digest(`${dbPath}.corrupt-original-20260811T123456789Z`)).toBe(corruptDigest);
         const output = prompts.messages.join("\n");
         expect(output).toContain(`Database: ${dbPath}`);
         expect(output).toContain("Attempting SQLite .recover");
@@ -421,10 +417,20 @@ describe("doctor repair-db", () => {
                 seq: 10000,
             });
             source.close();
+            // Apple SQLite can leave an SHM file after switching to DELETE mode. Keep that
+            // stopped-store layout on other platforms too; DELETE mode ignores the sidecar.
+            const shmPath = `${dbPath}-shm`;
+            if (!existsSync(shmPath)) writeFileSync(shmPath, "leftover SHM fixture");
             const originalDigest = digest(dbPath);
+            const originalShmDigest = digest(shmPath);
             const prompts = new MockPrompts();
 
-            const code = await runRepairDb({ dbPath, storageDir, prompts });
+            const code = await runRepairDb({
+                dbPath,
+                storageDir,
+                prompts,
+                deps: { now: () => new Date("2026-08-11T12:34:57.789Z") },
+            });
 
             expect({
                 code,
@@ -460,11 +466,10 @@ describe("doctor repair-db", () => {
                 count: 26,
             });
             recovered.close();
-            const backup = readdirSync(storageDir).find((name) =>
-                /^context\.db\.corrupt-backup-[^.]+$/.test(name),
-            );
-            expect(backup).toBeDefined();
-            expect(digest(join(storageDir, backup!))).toBe(originalDigest);
+            // Name the main backup exactly: directory order can put its -shm sidecar first.
+            const backup = `${dbPath}.corrupt-backup-20260811T123457789Z`;
+            expect(digest(backup)).toBe(originalDigest);
+            expect(digest(`${backup}-shm`)).toBe(originalShmDigest);
         },
     );
 

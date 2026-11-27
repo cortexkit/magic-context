@@ -2,7 +2,7 @@ import { drainNotifications } from "../../shared/rpc-notifications";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 /// <reference types="bun-types" />
 
-import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -764,6 +764,24 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
 });
 
 describe("runCompartmentPhase - recovery keeps summarizing until the request fits", () => {
+    beforeEach(() => {
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        jest.setSystemTime(new Date("2026-08-11T12:00:00Z"));
+    });
+    afterEach(() => {
+        jest.useRealTimers();
+    });
+
+    function flushJoins(): Promise<void> {
+        // Let publication and join promises settle before stepping to the next deadline.
+        return new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    async function advance(ms: number): Promise<void> {
+        jest.advanceTimersByTime(ms);
+        await flushJoins();
+    }
+
     // On a pass in overflow or model-shrink recovery, one historian run can
     // leave the request far over the window. The blocking join keeps starting
     // the historian on the next eligible chunk while the request it would send
@@ -967,17 +985,16 @@ describe("runCompartmentPhase - recovery keeps summarizing until the request fit
         const sessionId = "ses-recovery-chain-budget";
         const harness = recoveryHarness(sessionId, ["publish", "hang"], [30_000]);
         try {
-            const started = performance.now();
-            // The budget covers the whole chain, including the first two runs'
-            // publication work. 80 ms was too tight for a loaded CI runner: the
-            // second chained run sometimes never started before the budget ran out.
-            const result = await harness.run(400);
-            // One budget for the whole chain, not one per run.
-            expect(performance.now() - started).toBeLessThan(1_500);
+            const pass = harness.run(400);
+            await flushJoins();
             expect(harness.started).toEqual([3, 5]);
+            await advance(399);
+            expect(getActiveCompartmentRun(sessionId)?.inlineJoinTimedOutBudgetMs).toBeUndefined();
+            await advance(1);
+            expect(getActiveCompartmentRun(sessionId)?.inlineJoinTimedOutBudgetMs).toBe(400);
+            const result = await pass;
             expect(result.historianJoinTimedOut).toBe(true);
             expect(result.historianJoinBudgetMs).toBe(400);
-            expect(getActiveCompartmentRun(sessionId)?.inlineJoinTimedOutBudgetMs).toBe(400);
             // The chunks already published are still adopted on this pass.
             expect(result.awaitedCompartmentRun).toBe(true);
             expect(result.pendingCompartmentInjection?.compartmentCount).toBe(2);
@@ -996,14 +1013,21 @@ describe("runCompartmentPhase - recovery keeps summarizing until the request fit
         // hangs and may wait only for what is left of the same budget.
         const harness = recoveryHarness(sessionId, [{ publishAfterMs: 600 }, "hang"], [30_000]);
         try {
-            const result = await harness.run(2_000);
+            const pass = harness.run(2_000);
+            await flushJoins();
+            expect(harness.started).toEqual([3]);
+            await advance(600);
             expect(harness.started).toEqual([3, 5]);
+            await advance(1_399);
+            expect(getActiveCompartmentRun(sessionId)?.inlineJoinTimedOutBudgetMs).toBeUndefined();
+            await advance(1);
+            expect(getActiveCompartmentRun(sessionId)?.inlineJoinTimedOutBudgetMs).toBe(2_000);
+            const result = await pass;
             expect(result.historianJoinTimedOut).toBe(true);
             const waited = log.mock.calls
                 .map(([, text]) => String(text).match(/compartment await timed out after (\d+)ms/))
                 .find((match) => match !== null);
-            expect(waited).toBeDefined();
-            expect(Number(waited?.[1])).toBeLessThanOrEqual(1_400);
+            expect(waited?.[1]).toBe("1400");
         } finally {
             harness.cleanup();
             log.mockRestore();
@@ -1014,17 +1038,20 @@ describe("runCompartmentPhase - recovery keeps summarizing until the request fit
         const sessionId = "ses-recovery-chain-min-budget";
         const log = spyOn(logger, "sessionLog");
         // A 2 s budget needs 500 ms left to start a chained run; the first
-        // chained run leaves about 300 ms.
+        // chained run leaves exactly 300 ms.
         const harness = recoveryHarness(sessionId, [{ publishAfterMs: 1_700 }], [30_000]);
         try {
-            const result = await harness.run(2_000);
+            const pass = harness.run(2_000);
+            await flushJoins();
+            await advance(1_700);
+            const result = await pass;
             expect(harness.started).toEqual([3]);
             expect(result.historianJoinTimedOut).toBe(false);
             expect(result.compartmentInProgress).toBe(false);
             expect(
                 log.mock.calls.some(([, text]) =>
-                    /recovery chain stops: \d+ms of the 2000ms inline join budget is left, under the 500ms a chained run needs/.test(
-                        String(text),
+                    String(text).includes(
+                        "recovery chain stops: 300ms of the 2000ms inline join budget is left, under the 500ms a chained run needs",
                     ),
                 ),
             ).toBe(true);
