@@ -57,15 +57,15 @@ forEachHost(import.meta.url, "context-limit resolution", (host) => {
         // Mock Anthropic uses a shared context window: resolveLimit reserves
         // min(8,192, 25% of 50,000) = 8,192 output tokens, leaving 41,808
         // usable input tokens. The exact pressure is 20,000 / 41,808 * 100.
-        // Give the event handler a moment to persist last_context_percentage.
-        await Bun.sleep(300);
-
-        const row = h
-            .contextDb()
-            .prepare("SELECT last_context_percentage FROM session_meta WHERE session_id = ?")
-            .get(sessionId) as { last_context_percentage: number } | null;
-
-        const pct = row?.last_context_percentage ?? 0;
+        // The host can finish the prompt before the usage event is persisted.
+        const usage = h.contextDb().prepare(
+            `SELECT last_context_percentage FROM session_meta
+             WHERE session_id = ? AND harness = ? AND last_context_percentage > 0`,
+        );
+        const { last_context_percentage: pct } = await h.waitFor(
+            () => usage.get(sessionId, h.harnessId) as { last_context_percentage: number } | null,
+            { timeoutMs: 5_000, label: `reported context usage for ${sessionId}` },
+        );
         console.log(
             `[TEST] last_context_percentage = ${pct} (expected 47.83773440489858 for 20K/41,808)`,
         );
