@@ -161,7 +161,7 @@ interface TokenSegment {
 // Segmented token breakdown bar with legend
 const TokenBreakdown = (props: {
     theme: TuiThemeCurrent
-    snapshot: SidebarSnapshot
+    snapshot: SidebarSnapshot | null
     // Collapsed mode renders only the proportional bar (no per-category legend
     // rows) so the sidebar shrinks to the progress bar + a few summary lines.
     collapsed?: boolean
@@ -175,8 +175,8 @@ const TokenBreakdown = (props: {
     // space on the right on wide sidebars.
     const segments = createMemo<TokenSegment[]>(() => {
         const s = props.snapshot
-        const total = s.inputTokens || 1
         const result: TokenSegment[] = []
+        if (!s) return result
 
         // System Prompt (purple)
         if (s.systemPromptTokens > 0) {
@@ -250,12 +250,14 @@ const TokenBreakdown = (props: {
         // segment is also skipped in the bar at 0 width because the segment
         // builder uses `Math.max(1, ...)` only when tokens > 0 (see
         // segmentWidths), so the visual bar stays correct either way.
-        result.push({
-            key: "conv",
-            tokens: s.conversationTokens,
-            color: COLORS.conversation,
+        if (s.conversationTokens != null) {
+            result.push({
+                key: "conv",
+                tokens: s.conversationTokens,
+                color: COLORS.conversation,
                 label: "Conversation",
-        })
+            })
+        }
 
         // Tool Calls = tool_use/tool_result/tool/tool-invocation parts in messages
         // (actionable — users can reduce via ctx_reduce)
@@ -284,7 +286,7 @@ const TokenBreakdown = (props: {
         return result
     })
 
-    const totalTokens = createMemo(() => props.snapshot.inputTokens || 1)
+    const totalTokens = createMemo(() => props.snapshot?.inputTokens || 1)
 
     // Render-time segments for the bar. Zero-token segments are filtered out
     // entirely (no flex weight, no rendered box) so they don't claim any
@@ -739,6 +741,51 @@ const SidebarContent = (props: {
 
     const s = createMemo(() => snapshot())
     const compactionOff = () => s()?.compaction_enabled === false
+    const nativeRows = createMemo(() => {
+        const current = s()
+        return current?.compaction_enabled === false ? compactionOffSidebarRows(current) : []
+    })
+    const dreamerLabel = createMemo(() => {
+        const progress = s()?.dreamerProgress
+        if (!progress) return
+        return `Dreamer ${progress.task}: ${progress.processed}/${progress.total} processed`
+    })
+    const contextSummary = createMemo(() => {
+        const current = s()
+        if (!current || !(current.inputTokens > 0 && current.contextLimit > 0)) return
+        const tokens = `${compactTokens(current.inputTokens)} / ${compactTokens(current.contextLimit)}`
+        if (current.compaction_enabled === false) {
+            return { tokens, native: nativeCompactionContextLabel(current) }
+        }
+        const usage = current.usagePercentage?.toFixed(1)
+        const threshold = current.executeThreshold == null
+            ? undefined
+            : `${formatThresholdPercent(current.executeThreshold)}%${current.executeThresholdClamped ? "*" : ""}`
+        return { tokens, usage, threshold }
+    }, undefined, {
+        equals: (a, b) =>
+            a?.tokens === b?.tokens && a?.native === b?.native &&
+            a?.usage === b?.usage && a?.threshold === b?.threshold,
+    })
+    const hygieneSummary = createMemo(() => {
+        const current = s()
+        if (!current || !(current.inputTokens > 0)) return
+        const hygiene = current.tailHygiene
+        if (!hygiene) return
+        return { value: hygieneValue(hygiene), warning: !hygiene.evaluable }
+    }, undefined, {
+        equals: (a, b) => a?.value === b?.value && a?.warning === b?.warning,
+    })
+    const totalInputTokensLabel = () => {
+        const tokens = s()?.totalInputTokens
+        return tokens == null ? undefined : compactTokens(tokens)
+    }
+    const collapsedMemoryValue = () => {
+        const current = s()
+        const count = current?.memoryCount ?? 0
+        const injected = current?.memoryBlockCount ?? 0
+        return injected > 0 ? `${injected}/${count}` : String(count)
+    }
     const contextSummaryColor = createMemo(() => {
         if (compactionOff()) return props.theme.accent
         const usage = s()?.usagePercentage ?? 0
@@ -778,11 +825,13 @@ const SidebarContent = (props: {
             {/* The fence probe writes the failure into the server-owned snapshot,
                 so this survives sidebar refreshes and is visible independently of
                 the one-shot toast. */}
-            {s()?.lastTransformError && (
-                <box marginTop={1} width="100%">
-                    <text fg={props.theme.error}>⚠ {s()!.lastTransformError}</text>
-                </box>
-            )}
+            <Show keyed when={s()?.lastTransformError}>
+                {(error) => (
+                    <box marginTop={1} width="100%">
+                        <text fg={props.theme.error}>⚠ {error}</text>
+                    </box>
+                )}
+            </Show>
 
             {s()?.projectBindingWarning && (
                 <box marginTop={1} width="100%">
@@ -802,47 +851,51 @@ const SidebarContent = (props: {
                 )}
             </For>
 
-            {s()?.dreamerProgress && (
-                <box marginTop={1} width="100%">
-                    <text fg={props.theme.warning}>
-                        Dreamer {s()!.dreamerProgress!.task}: {s()!.dreamerProgress!.processed}/{s()!.dreamerProgress!.total} processed
-                    </text>
-                </box>
-            )}
+            <Show keyed when={dreamerLabel()}>
+                {(label) => (
+                    <box marginTop={1} width="100%">
+                        <text fg={props.theme.warning}>{label}</text>
+                    </box>
+                )}
+            </Show>
 
             {/* Token breakdown bar. In collapsed mode the header, bar and the
                 3 summary rows stack with no vertical padding for a compact look;
                 expanded mode keeps the 1-row gap above the bar. */}
-            {s() && s()!.inputTokens > 0 && (
+            {(s()?.inputTokens ?? 0) > 0 && (
                 <box marginTop={collapsed() ? 0 : 1} flexDirection="column">
-                    {(s()?.contextLimit ?? 0) > 0 && (
-                        <box width="100%" flexDirection="row" justifyContent="space-between">
-                            {compactionOff() ? (
-                                <text fg={contextSummaryColor()}>
-                                    <b>{nativeCompactionContextLabel(s()!)}</b>
-                                </text>
-                            ) : (
-                                <text fg={contextSummaryColor()}>
-                                    <b>{s()!.usagePercentage.toFixed(1)}%</b> / {formatThresholdPercent(s()!.executeThreshold)}%{s()!.executeThresholdClamped ? "*" : ""}
-                                </text>
-                            )}
-                            {/* Right: absolute token usage against the usable
-                                scheduler window — the same denominator as the
-                                percentage and nudge/trigger scheduling. */}
-                            <text fg={contextSummaryColor()}>
-                                {compactTokens(s()!.inputTokens)} / {compactTokens(s()!.contextLimit)}
-                            </text>
-                        </box>
-                    )}
-                    <TokenBreakdown theme={props.theme} snapshot={s()!} collapsed={collapsed()} />
-                    {s()!.tailHygiene !== undefined && (
-                        <StatRow
-                            theme={props.theme}
-                            label="Hygiene"
-                            value={hygieneValue(s()!.tailHygiene!)}
-                            warning={!s()!.tailHygiene!.evaluable}
-                        />
-                    )}
+                    <Show keyed when={contextSummary()}>
+                        {(summary) => (
+                            <box width="100%" flexDirection="row" justifyContent="space-between">
+                                {summary.native != null ? (
+                                    <text fg={contextSummaryColor()}>
+                                        <b>{summary.native}</b>
+                                    </text>
+                                ) : (
+                                    <text fg={contextSummaryColor()}>
+                                        {summary.usage != null && <b>{summary.usage}%</b>}
+                                        {summary.usage != null && summary.threshold != null ? " / " : ""}
+                                        {summary.threshold ?? ""}
+                                    </text>
+                                )}
+                                {/* Right: absolute token usage against the usable
+                                    scheduler window — the same denominator as the
+                                    percentage and nudge/trigger scheduling. */}
+                                <text fg={contextSummaryColor()}>{summary.tokens}</text>
+                            </box>
+                        )}
+                    </Show>
+                    <TokenBreakdown theme={props.theme} snapshot={s()} collapsed={collapsed()} />
+                    <Show keyed when={hygieneSummary()}>
+                        {(hygiene) => (
+                            <StatRow
+                                theme={props.theme}
+                                label="Hygiene"
+                                value={hygiene.value}
+                                warning={hygiene.warning}
+                            />
+                        )}
+                    </Show>
                 </box>
             )}
 
@@ -852,7 +905,7 @@ const SidebarContent = (props: {
             {collapsed() && (
                 <box width="100%" flexDirection="column">
                     {compactionOff() ? (
-                        compactionOffSidebarRows(s()!).map((row) => (
+                        nativeRows().map((row) => (
                             <StatRow
                                 theme={props.theme}
                                 label={row.label}
@@ -883,11 +936,7 @@ const SidebarContent = (props: {
                             </Show>
                             <box width="100%" flexDirection="row" justifyContent="space-between">
                                 <text fg={props.theme.textMuted}>Memories</text>
-                                <text fg={props.theme.textMuted}>
-                                    {(s()?.memoryBlockCount ?? 0) > 0
-                                        ? `${s()!.memoryBlockCount}/${s()?.memoryCount ?? 0}`
-                                        : String(s()?.memoryCount ?? 0)}
-                                </text>
+                                <text fg={props.theme.textMuted}>{collapsedMemoryValue()}</text>
                             </box>
                             <box width="100%" flexDirection="row" justifyContent="space-between">
                                 <text fg={props.theme.textMuted}>Status</text>
@@ -941,7 +990,7 @@ const SidebarContent = (props: {
                 <>
             <SectionHeader theme={props.theme} title="Memory" />
             {compactionOff() ? (
-                compactionOffSidebarRows(s()!)
+                nativeRows()
                     .filter((row) => row.label === "Memories")
                     .map((row) => (
                         <StatRow theme={props.theme} label={row.label} value={row.value} accent />
@@ -954,14 +1003,11 @@ const SidebarContent = (props: {
                         value={String(s()?.memoryCount ?? 0)}
                         accent
                     />
-                    {(s()?.memoryBlockCount ?? 0) > 0 && (
-                        <StatRow
-                            theme={props.theme}
-                            label="Injected"
-                            value={String(s()!.memoryBlockCount)}
-                            dim
-                        />
-                    )}
+                    <Show keyed when={(s()?.memoryBlockCount ?? 0) > 0 && s()?.memoryBlockCount}>
+                        {(count) => (
+                            <StatRow theme={props.theme} label="Injected" value={String(count)} dim />
+                        )}
+                    </Show>
                 </>
             )}
                 </>
@@ -976,7 +1022,7 @@ const SidebarContent = (props: {
                     <>
                         <SectionHeader theme={props.theme} title="Status" />
                         {compactionOff() ? (
-                            compactionOffSidebarRows(s()!)
+                            nativeRows()
                                 .filter((row) => row.label !== "Memories")
                                 .map((row) => (
                                     <StatRow
@@ -988,29 +1034,21 @@ const SidebarContent = (props: {
                                 ))
                         ) : (
                             <>
-                                {(s()?.pendingOpsCount ?? 0) > 0 && (
-                                    <StatRow
-                                        theme={props.theme}
-                                        label="Queue"
-                                        value={`${s()!.pendingOpsCount} pending`}
-                                        warning
-                                    />
-                                )}
-                                {(s()?.sessionNoteCount ?? 0) > 0 && (
-                                    <StatRow
-                                        theme={props.theme}
-                                        label="Notes"
-                                        value={String(s()!.sessionNoteCount)}
-                                    />
-                                )}
-                                {(s()?.readySmartNoteCount ?? 0) > 0 && (
-                                    <StatRow
-                                        theme={props.theme}
-                                        label="Smart Notes"
-                                        value={`${s()!.readySmartNoteCount} ready`}
-                                        accent
-                                    />
-                                )}
+                                <Show keyed when={(s()?.pendingOpsCount ?? 0) > 0 && s()?.pendingOpsCount}>
+                                    {(count) => (
+                                        <StatRow theme={props.theme} label="Queue" value={`${count} pending`} warning />
+                                    )}
+                                </Show>
+                                <Show keyed when={(s()?.sessionNoteCount ?? 0) > 0 && s()?.sessionNoteCount}>
+                                    {(count) => (
+                                        <StatRow theme={props.theme} label="Notes" value={String(count)} />
+                                    )}
+                                </Show>
+                                <Show keyed when={(s()?.readySmartNoteCount ?? 0) > 0 && s()?.readySmartNoteCount}>
+                                    {(count) => (
+                                        <StatRow theme={props.theme} label="Smart Notes" value={`${count} ready`} accent />
+                                    )}
+                                </Show>
                             </>
                         )}
                     </>
@@ -1059,17 +1097,14 @@ const SidebarContent = (props: {
                 snapshot fields (newWorkTokens, totalInputTokens) and the
                 session_meta columns are still populated; only the UI is
                 simplified for now. */}
-            {sections().stats && s()?.totalInputTokens != null && (
-                <>
-                    <SectionHeader theme={props.theme} title="Stats" />
-                    <StatRow
-                        theme={props.theme}
-                        label="Total tokens"
-                        value={compactTokens(s()!.totalInputTokens ?? 0)}
-                        dim
-                    />
-                </>
-            )}
+            <Show keyed when={sections().stats && totalInputTokensLabel()}>
+                {(total) => (
+                    <>
+                        <SectionHeader theme={props.theme} title="Stats" />
+                        <StatRow theme={props.theme} label="Total tokens" value={total} dim />
+                    </>
+                )}
+            </Show>
                 </>
             )}
         </box>
