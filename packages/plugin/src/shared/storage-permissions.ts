@@ -75,8 +75,11 @@ export const MAGIC_CONTEXT_STORAGE_ENTRIES: readonly (string | RegExp)[] = [
 ];
 
 /**
- * Storage roots and their configured aliases. Marker invalidation must stop
- * at the storage boundary whether a writer uses the physical path or the alias.
+ * Storage roots and their configured aliases. When a writer finds a loose
+ * mode in the tree, it deletes the marker file that certifies the tree as
+ * private, looking upward from the path it wrote. That search must stop at
+ * the storage root, whether the writer reached it by its real path or
+ * through a link.
  */
 const storagePermissionRoots = new Set<string>();
 
@@ -531,7 +534,7 @@ export function tightenStorageTreeSync(
             return;
         }
         for (const entry of entries) {
-            // The snapshot may still list the certificate this check just removed.
+            // The snapshot may still list the marker file this check just removed.
             if (
                 entryPath === root &&
                 linkedEntries &&

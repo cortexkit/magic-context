@@ -244,7 +244,9 @@ function describeLinkedStorageSkip(
     }
 }
 
-// Fixed text is retained by the issue-report log templates; exception prose is not.
+// An issue report keeps a log line's text only where it matches a fixed
+// template (packages/cli/src/lib/issue-log-templates.generated.ts) and omits
+// free text. Return one of a few fixed strings so the reason survives there.
 function describeLinkedStorageFailure(failure: string, nonDirectoryPath?: string): string {
     if (nonDirectoryPath !== undefined) return `${nonDirectoryPath} is not a directory`;
     switch (failure) {
