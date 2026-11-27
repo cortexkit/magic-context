@@ -435,8 +435,8 @@ fn the_line_replay_reports_both_renderers_on_a_generated_store() {
     assert!(replay(&store, None, &["missing".into()], 20_000.0, DEFAULT_MODEL).is_err());
 }
 
-/// Summaries shaped like a real session's: the sizes of the lab session's
-/// forms (about 250, 120, 55, 45 and 25 tokens), prose from a varied
+/// Summaries shaped like a real session's: the sizes of the forms in the
+/// session `testdata/history-line-shape.json` describes (about 250, 120, 55, 45 and 25 tokens), prose from a varied
 /// vocabulary, about 25 a day, and scores mostly between 15 and 89.
 fn realistic(count: usize, seed: u64) -> Vec<StoredCompartment> {
     realistic_in(count, seed, &LATIN)
@@ -628,7 +628,7 @@ fn line_fold_time() {
     }
 }
 
-/// The six budgets the lab's fixture was checked at.
+/// The six budgets `testdata/history-line-shape.json` holds expected results for.
 const LAB_BUDGETS: [f64; 6] = [5_000.0, 15_000.0, 30_000.0, 60_000.0, 98_000.0, 150_000.0];
 
 /// How many texts a fold counts and how many characters they hold, with
@@ -662,7 +662,7 @@ fn counting(
 /// The forms the search picks on estimates are counted for real, and a
 /// pick over the budget is searched again on real counts: on long Chinese,
 /// Japanese and Russian text, where a token holds the fewest characters,
-/// every lab budget ends within the budget, with either counter.
+/// each of those six budgets ends within it, with either counter.
 #[test]
 fn the_estimated_search_ends_within_the_budget_on_non_latin_text() {
     let rows: Vec<DecayRenderCompartment> = realistic_in(1_200, 3, &NON_LATIN)
@@ -726,7 +726,7 @@ fn two_folds_of_the_same_store_give_the_same_bytes() {
     assert_eq!(first.summary_items, second.summary_items);
 }
 
-/// Where the estimates leave the search, for the six lab budgets, on the
+/// Where the estimates leave the search, for each of those six budgets, on the
 /// realistic session and on long non-Latin text: the real total of the pick
 /// against the budget before the check, after it, and the wrapped block.
 #[test]

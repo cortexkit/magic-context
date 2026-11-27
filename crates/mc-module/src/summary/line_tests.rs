@@ -1,6 +1,7 @@
-//! The history line's choices, on injected token costs: the lab's own
-//! calculation on a real session's shape, and the properties the design
-//! promises on generated sessions.
+//! The history line's choices, on injected token costs: the reference
+//! calculation's results on a real session's shape
+//! (`testdata/history-line-shape.json`), and the line's promises on
+//! generated sessions.
 
 use super::line::*;
 
@@ -46,7 +47,7 @@ impl Random {
 }
 
 /// A generated session: scores, days and costs shaped like real ones (the
-/// sizes of the lab session's forms, a few summaries scored 90 or more, about
+/// sizes of the forms in testdata/history-line-shape.json, a few summaries scored 90 or more, about
 /// 25 summaries a day).
 pub(super) struct Generated {
     pub scores: Vec<f64>,
@@ -144,7 +145,7 @@ fn the_line_matches_the_lab_on_a_real_sessions_shape() {
         expected: Vec<Expected>,
     }
     // One real session's history without text (scores, start days and the
-    // token cost of each form) and what the lab's calculation
+    // token cost of each form) and what the reference calculation
     // (`export-shape.mjs`) chose for six budgets, with the floor on, scores as
     // stored and no day headings.
     let fixture: Fixture =

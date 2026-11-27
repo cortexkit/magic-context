@@ -119,7 +119,8 @@ fn joints_cost(forms: &[u8], groups: &[Vec<usize>], costs: &mut impl Costs) -> u
     (costs.joint() * pieces.saturating_sub(1) as f64).ceil() as u64
 }
 
-/// Switches the tests use to compare with the lab's calculation.
+/// Switches the tests use to compare with the reference calculation in
+/// `testdata/history-line-shape.json`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Options {
     /// Map scores onto the reference scale (for sessions with enough scores).

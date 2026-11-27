@@ -44,8 +44,9 @@ def allow_list():
            f"{OLD}.db", ("src/storage_paths.rs", 6), ("tests/startup.rs", 2))
     module("The content-addressed text reference is persisted in session state.",
            f'"{OLD}_text"', ("src/store_text.rs", 4))
-    module("This storage golden includes the same persisted reference.",
-           f'\\"{OLD}_text\\"', ("testdata/head-bytes-df3a14aa.json", 3))
+    module("These storage goldens include the same persisted reference.",
+           f'\\"{OLD}_text\\"', ("testdata/head-bytes-df3a14aa.json", 3),
+           ("testdata/head-bytes-before-line.json", 3))
     module("The 0.49 plugin and CLI read the persisted session move marker.",
            f"{OLD}_move:", ("src/move_in.rs", 1), ("src/rekey/rekey_tests.rs", 1),
            ("tests/broca_move_tests.rs", 4), ("tests/scenarios.rs", 2),
