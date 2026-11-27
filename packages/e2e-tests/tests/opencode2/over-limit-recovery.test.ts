@@ -15,6 +15,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { Database } from "../../../plugin/src/shared/sqlite";
+import { V2StoreReader } from "../../../plugin/src/v2/store-reader";
 import { buildMockHistorianPayload, findHistorianOrdinalRange } from "../../src/mock-historian";
 import { MockProvider } from "../../src/mock-provider/server";
 import {
@@ -30,7 +31,10 @@ const MODEL_WINDOW = 1_000_000;
 // which is how a 1,000,000-token model ends up with a 750,000-token usable window.
 const MODEL_OUTPUT = 384_000;
 const REPORTED_INPUT = 962_842;
-const TOOL_COUNT = 24;
+// About 670k of the mocked 963k input tokens must come from tool results.
+// With less tool output, the rest alone exceeds the 300k reclaim target, so the
+// plugin correctly skips dropping tool results.
+const TOOL_COUNT = 292;
 const RESULT_TEXT = "payload ".repeat(2_300);
 
 /**
@@ -41,17 +45,19 @@ const RESULT_TEXT = "payload ".repeat(2_300);
  */
 function seedLargeToolTail(path: string, sessionID: string): void {
 	const db = new Database(path);
+	const reader = new V2StoreReader(path);
 	try {
 		const rows = db
 			.prepare("SELECT id, type, data FROM session_message WHERE session_id = ? ORDER BY seq")
 			.all(sessionID) as Array<{ id: string; type: string; data: string }>;
 		const user = rows.find((row) => row.type === "user");
 		const tool = rows.find((row) => row.type === "assistant" && row.data.includes('"type":"tool"'));
-		const overLimit = [...rows]
-			.reverse()
-			.find((row) => row.type === "assistant" && row.data.includes('"text":"big"'));
+		// The converted tool is inline, but the new host may store its reply in session_part.
+		const overLimit = reader.history(sessionID).findLast((row) =>
+			row.type === "assistant" && row.data.content?.some((part) => part.type === "text" && part.text === "big"),
+		);
 		if (!user || !tool || !overLimit) throw new Error("conversion did not produce the tool and over-limit rows");
-		const overLimitTokens = (JSON.parse(overLimit.data) as { tokens: unknown }).tokens;
+		const overLimitTokens = overLimit.data.tokens;
 		const add = db.prepare(`INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
 			SELECT ?, session_id, type, ?, time_created, time_updated, ? FROM session_message WHERE id = ?`);
 		const max = db.prepare("SELECT MAX(seq) AS seq FROM session_message WHERE session_id = ?").get(sessionID) as {
@@ -79,6 +85,7 @@ function seedLargeToolTail(path: string, sessionID: string): void {
 			db.prepare("UPDATE event_sequence SET seq = ? WHERE aggregate_id = ?").run(seq, sessionID);
 		})();
 	} finally {
+		reader.close();
 		db.close();
 	}
 }
