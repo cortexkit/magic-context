@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { readdirSync, readFileSync, rmSync } from "node:fs";
+import { readdirSync, readFileSync, rmdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { isPidAlive, readProcessStartTime } from "./rpc-utils";
 import {
@@ -61,25 +61,29 @@ const pause = new Int32Array(new SharedArrayBuffer(4));
  * Unique names mean reclaiming a dead ticket cannot unlink a successor's lock.
  */
 export function withStorageFileMutex<T>(directory: string, work: () => T, timeoutMs = 1000): T {
-    ensurePrivateStorageDirectorySync(directory);
+    const deadline = performance.now() + timeoutMs;
     const name = `${process.pid}-${randomUUID()}.lock`;
     const ownPath = join(directory, name);
     const birth = processBirth(process.pid);
     const ticket: Ticket = { choosing: true, number: 0, birth, checksum: "" };
     const encodedTicket = () =>
         JSON.stringify({ ...ticket, checksum: ticketChecksum(name, ticket) });
-    for (let attempt = 0; ; attempt++) {
+    for (;;) {
         try {
+            ensurePrivateStorageDirectorySync(directory);
             writeStorageFileSync(ownPath, encodedTicket(), { flag: "wx", forcePrivate: true });
             break;
         } catch (error) {
-            // A session cleanup can remove an empty directory between mkdir and
-            // ticket creation. No ticket exists yet, so retry before contending.
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT" || attempt >= 2) throw error;
-            ensurePrivateStorageDirectorySync(directory);
+            // A peer can remove the empty directory before this process writes its ticket.
+            // On macOS, this race can also give EEXIST from mkdir or EINVAL from open.
+            const code = (error as NodeJS.ErrnoException).code;
+            if (
+                (code !== "ENOENT" && code !== "EEXIST" && code !== "EINVAL") ||
+                performance.now() >= deadline
+            )
+                throw error;
         }
     }
-    const deadline = performance.now() + timeoutMs;
     const peers = (): [string, Ticket | null][] => {
         const found: [string, Ticket | null][] = [];
         for (const other of readdirSync(directory)) {
@@ -136,5 +140,10 @@ export function withStorageFileMutex<T>(directory: string, work: () => T, timeou
         return result;
     } finally {
         rmSync(ownPath, { force: true });
+        try {
+            rmdirSync(directory);
+        } catch {
+            // Do not remove a live contender's ticket.
+        }
     }
 }

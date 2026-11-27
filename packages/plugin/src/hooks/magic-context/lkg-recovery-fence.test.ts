@@ -1,6 +1,7 @@
 import { Database as BunDatabase } from "bun:sqlite";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
@@ -10,7 +11,7 @@ import {
 import { clearSession, closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { deleteSessionScopedRows } from "../../features/magic-context/storage-session-tables";
 import type { Database } from "../../shared/sqlite";
-import { writeStorageFileSync } from "../../shared/storage-permissions";
+import { tightenStorageTreeSync, writeStorageFileSync } from "../../shared/storage-permissions";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import {
     clearPersistedLkgSlotStrict,
@@ -117,6 +118,37 @@ ${code}`,
 }
 
 describe.skipIf(process.platform === "win32")("durable recovery fence", () => {
+    test("locked publications remove their directory after two operations on the same fence", () => {
+        const f = fixture();
+        try {
+            expect(existsSync(`${f.path}.locks`)).toBe(false);
+            f.dirty();
+            expect(existsSync(`${f.path}.locks`)).toBe(false);
+            expect(saveLkgSlotToDb(f.db, "session", slot, undefined, { rebuild: true })).toBe(true);
+            expect(existsSync(`${f.path}.locks`)).toBe(false);
+        } finally {
+            f.raw.close();
+        }
+    });
+    test("temp cleanup removes only the known name without listing the fence folder", () => {
+        const f = fixture();
+        const known = `${f.path}.tmp`;
+        const unrelated = `${f.path}.unrelated.tmp`;
+        writeStorageFileSync(known, "stale", { forcePrivate: true });
+        writeStorageFileSync(unrelated, "keep", { forcePrivate: true });
+        const list = spyOn(fs, "readdirSync");
+        try {
+            f.dirty();
+            expect(existsSync(known)).toBe(false);
+            expect(readFileSync(unrelated, "utf8")).toBe("keep");
+            expect(
+                list.mock.calls.filter(([path]) => String(path) === dirname(f.path)),
+            ).toHaveLength(0);
+        } finally {
+            list.mockRestore();
+            f.raw.close();
+        }
+    });
     test("warm synchronous captures perform zero fence I/O", () => {
         const f = fixture();
         const operations: string[] = [];
@@ -327,7 +359,8 @@ describe.skipIf(process.platform === "win32")("durable recovery fence", () => {
     test("two processes racing to publish serialize commit through clean certification", async () => {
         const f = fixture();
         f.raw.exec("CREATE TABLE publication_log (ordinal INTEGER PRIMARY KEY, actor TEXT)");
-        const run = async (actor: string) => {
+        const publicationsPerActor = 12;
+        const run = (actor: string) => {
             const script = `
 import { Database } from 'bun:sqlite';
 import { loadPersistedLkgSlot, saveLkgSlotToDb } from ${JSON.stringify(join(import.meta.dir, "lkg-persist.ts"))};
@@ -336,7 +369,7 @@ const db = new Database(${JSON.stringify(f.dbPath)});
 db.exec('PRAGMA busy_timeout=5000');
 const pause = new Int32Array(new SharedArrayBuffer(4));
 __test.setObserver(phase => { if (phase === 'committed') Atomics.wait(pause, 0, 0, 15); });
-for (let i=0, attempts=0; i<12;) {
+for (let i=0, attempts=0; i<${publicationsPerActor};) {
  if (++attempts > 1000) throw new Error('publication never completed');
  const old = loadPersistedLkgSlot(db, 'session');
  const value = {...old, jsonPrefix:JSON.stringify([{text:${JSON.stringify(actor)} + i}]), capturedAt:Date.now()};
@@ -358,24 +391,26 @@ for (let i=0, attempts=0; i<12;) {
                 windowsHide: true,
                 stderr: "pipe",
             });
-            const [exit, error] = await Promise.all([
-                child.exited,
-                new Response(child.stderr).text(),
-            ]);
-            expect(exit, error).toBe(0);
+            return Promise.all([child.exited, new Response(child.stderr).text()]);
         };
         try {
-            await Promise.all([run("A"), run("B")]);
-            expect(
-                (f.raw.query("SELECT COUNT(*) AS n FROM publication_log").get() as { n: number }).n,
-            ).toBe(24);
-            expect(f.record().slotKey).toBe(lkgRecoverySlotKey(f.load()!));
-            clearLkgFenceProcessState("session");
-            expect(hasCleanLkgRecoveryFence("session", f.load()!)).toBe(true);
+            const count = f.raw.query<{ n: number }, []>(
+                "SELECT COUNT(*) AS n FROM publication_log",
+            );
+            for (let round = 1; round <= 20; round++) {
+                const results = await Promise.all([run("A"), run("B")]);
+                for (const [exit, error] of results) {
+                    expect(exit, `Round ${round}: ${error}`).toBe(0);
+                }
+                expect(count.get()?.n).toBe(round * 2 * publicationsPerActor);
+                expect(f.record().slotKey).toBe(lkgRecoverySlotKey(f.load()!));
+                clearLkgFenceProcessState("session");
+                expect(hasCleanLkgRecoveryFence("session", f.load()!)).toBe(true);
+            }
         } finally {
             f.raw.close();
         }
-    });
+    }, 60_000);
     test("a failed final clean notification cannot leave a visible clean certificate", () => {
         const f = fixture();
         f.dirty();
@@ -400,14 +435,23 @@ for (let i=0, attempts=0; i<12;) {
             f.raw.close();
         }
     });
-    test("session clear removes the certificate and orphan temporary records", () => {
+    test("session clear removes the certificate and its known temporary record", () => {
         const f = fixture();
         try {
-            writeStorageFileSync(`${f.path}.dead.tmp`, "orphan", { forcePrivate: true });
+            writeStorageFileSync(`${f.path}.tmp`, "orphan", { forcePrivate: true });
+            writeStorageFileSync(`${f.path}.dead.tmp`, "legacy", { forcePrivate: true });
+            const old = new Date(Date.now() - 11 * 60_000);
+            fs.utimesSync(`${f.path}.dead.tmp`, old, old);
+            const unrelated = join(dirname(f.path), "unrelated.tmp");
+            writeStorageFileSync(unrelated, "keep", { forcePrivate: true });
             clearPersistedLkgSlotStrict(f.db, "session");
             expect(f.load()).toBeUndefined();
             expect(existsSync(f.path)).toBe(false);
+            expect(existsSync(`${f.path}.tmp`)).toBe(false);
+            expect(existsSync(`${f.path}.dead.tmp`)).toBe(true);
+            expect(tightenStorageTreeSync(dirname(dirname(f.path))).failures).toBe(0);
             expect(existsSync(`${f.path}.dead.tmp`)).toBe(false);
+            expect(readFileSync(unrelated, "utf8")).toBe("keep");
             clearLkgRecoveryFence("session");
         } finally {
             f.raw.close();

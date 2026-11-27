@@ -9,6 +9,7 @@ import {
     readFileSync,
     rmSync,
     statSync,
+    symlinkSync,
     utimesSync,
     writeFileSync,
 } from "node:fs";
@@ -231,6 +232,22 @@ describe("upstream migration version lane", () => {
 
 describe("explicit shared storage resolution", () => {
     for (const asynchronous of [false, true]) {
+        it.skipIf(process.platform === "win32")(
+            `refuses a linked private storage root on the first ${asynchronous ? "async" : "sync"} open`,
+            async () => {
+                const open = asynchronous ? openDatabaseAsync : openDatabase;
+                const root = makeTempDir("storage-db-linked-root-");
+                const target = join(root, "target");
+                const alias = join(root, "alias");
+                mkdirSync(target, { mode: 0o700 });
+                symlinkSync(target, alias);
+                await expect(
+                    Promise.resolve().then(() => open(join(alias, "context.db"))),
+                ).rejects.toThrow("Private storage directory is not a real directory");
+                expect(readdirSync(target)).toEqual([]);
+            },
+        );
+
         it(`selects native turn routing before the first ${asynchronous ? "async" : "sync"} open`, async () => {
             const open = asynchronous ? openDatabaseAsync : openDatabase;
             const dbPath = join(makeTempDir("storage-db-turn-routing-"), "context.db");

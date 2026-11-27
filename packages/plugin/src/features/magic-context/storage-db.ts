@@ -1,6 +1,7 @@
 import {
     type Dirent,
     existsSync,
+    lstatSync,
     readdirSync,
     readFileSync,
     rmdirSync,
@@ -206,10 +207,17 @@ export const BOOT_SQLITE_BUSY_TIMEOUT_MS = 5_000;
 
 function ensureSecureStorageDir(dir: string): void {
     ensureStorageDirectorySync(dir);
+    if (
+        process.platform !== "win32" &&
+        shouldEnforcePrivateStoragePermissions() &&
+        !lstatSync(resolve(dir)).isDirectory()
+    ) {
+        throw new Error("Private storage directory is not a real directory");
+    }
 }
 
-function tightenStorageTree(dir: string): void {
-    const { failures } = tightenStorageTreeSync(dir);
+function tightenStorageTree(dbPath: string): void {
+    const { failures } = tightenStorageTreeSync(dirname(dbPath), dbPath);
     log(`[magic-context] storage permission tightening failures=${failures}`);
 }
 
@@ -1156,7 +1164,7 @@ function finishDatabaseOpen(
     // created them. Externally managed trusted-group storage skips this entirely.
     // SQLite creates WAL sidecars itself; the startup tree pass also covers files
     // materialized during this open. The helper logs failure counts only.
-    tightenStorageTree(dirname(dbPath));
+    tightenStorageTree(dbPath);
     databases.set(dbPath, db);
     pathByDatabase.set(db, dbPath);
     persistenceByDatabase.set(db, true);
@@ -2716,7 +2724,7 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
             migrateLegacyStorageIfNeeded(dbPath, dbDir);
         }
         ensureSecureStorageDir(dbDir);
-        tightenStorageTree(dbDir);
+        tightenStorageTree(dbPath);
         if (!existsSync(dbPath) && shouldEnforcePrivateStoragePermissions()) {
             try {
                 writeStorageFileSync(dbPath, new Uint8Array(), { flag: "wx" });
@@ -2838,7 +2846,7 @@ export async function openDatabaseAsync(
         try {
             if (!explicitDbPath) migrateLegacyStorageIfNeeded(dbPath, dbDir);
             ensureSecureStorageDir(dbDir);
-            tightenStorageTree(dbDir);
+            tightenStorageTree(dbPath);
             if (!existsSync(dbPath) && shouldEnforcePrivateStoragePermissions()) {
                 try {
                     writeStorageFileSync(dbPath, new Uint8Array(), { flag: "wx" });
