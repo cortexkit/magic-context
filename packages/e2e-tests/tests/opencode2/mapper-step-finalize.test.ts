@@ -34,7 +34,8 @@ test.skipIf(process.env.MC_E2E_MAPPER_STEP_PROBE !== "1")("real OpenCode 2 verif
         host.mock.addMatcher((body) => {
             const batch = verifyPromptIds({ messages: body.input });
             if (!batch.length) return null;
-            expect(batch).toHaveLength(20);
+            // The probe seeds a twenty-memory backlog, but one child investigates five.
+            expect(batch).toHaveLength(5);
             if (JSON.stringify(body).includes("You're out of token budget")) {
                 finalizes++;
                 expect(body.tools ?? []).toEqual([]);
