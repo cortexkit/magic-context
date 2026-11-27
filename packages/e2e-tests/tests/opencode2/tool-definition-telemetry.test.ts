@@ -31,7 +31,8 @@ interface WireTool {
 function headText(body: Record<string, unknown>): string {
     const input = body.input;
     if (!Array.isArray(input) || input.length === 0) return "";
-    // A developer item may precede the user-role history head on the Responses wire.
+    // In a Responses request a developer item can come before the first user item,
+    // and the first user item is the one Magic Context writes its history into.
     const content = input.find((item) => item?.role === "user")?.content;
     if (typeof content === "string") return content;
     if (!Array.isArray(content)) return "";
@@ -51,11 +52,13 @@ function systemText(body: Record<string, unknown>): string {
 
 /**
  * OpenCode 2 has no `tool.definition` hook. Its request draft carries the
- * whole catalog, so the sidebar cost must come from the draft.
+ * whole catalog, so the token cost of the tool definitions that the sidebar
+ * shows must be measured from the draft.
  *
  * Recording the measurement must not change bytes when the catalog is unchanged.
- * Changing the session's own tool names or descriptions is different: the
- * provider loses its cached prefix, so the plugin can also rebuild the history head.
+ * Changing the session's own tool names or descriptions is different: the tool
+ * list comes before the messages, so the provider's cache is lost anyway and the
+ * plugin may rebuild the history it writes into the first user message.
  */
 test("v2 measures tool definitions from the request draft without moving a served byte", async () => {
     const host = await spawnOpencode2({

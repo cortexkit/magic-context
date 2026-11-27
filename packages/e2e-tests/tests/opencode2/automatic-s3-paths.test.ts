@@ -43,7 +43,9 @@ test("R36 automatic pressure schedules one historian generate on real GA without
             hidden++;
             return { text: `<compartment start="${range[1]}" end="${range[2]}" title="Organic history"><p1>The bounded source turns were preserved.</p1></compartment>`, usage: { input_tokens: 100, output_tokens: 10 } };
         });
-        // Leave enough room for the historian prompt while crossing the primary execute threshold.
+        // The reported usage must cross the level at which a top-level session starts
+        // summarizing (65% of the window by default) and still leave room for the
+        // summarizer's own prompt.
         host.mock.setDefault({ text: "pressure answer", usage: { input_tokens: 60_000, output_tokens: 10 } });
         await turn("Prime organic pressure");
         host.mock.setDefault({ text: "normal turn", usage: { input_tokens: 100, output_tokens: 10 } });

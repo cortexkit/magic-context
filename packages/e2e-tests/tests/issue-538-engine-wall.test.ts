@@ -301,7 +301,9 @@ describe("issue 538: engine rejects oversized prompts before any model call", ()
             const wall = turns.find((turn) => turn.turn === wallTurn)!;
             const expired = turns.find((turn) => turn.turn === wall.turn + 1);
             // The rejected request did not supply an overflow signal or refresh
-            // the clock. Expiry by itself does not authorize changing the prefix.
+            // the clock. An expired provider cache alone is no reason to change the
+            // part of the request the provider had cached: resending the same bytes
+            // costs the same and keeps signed thinking valid.
             expect(expired).toMatchObject({
                 cacheExpired: true,
                 executeDecisions: 0,

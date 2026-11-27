@@ -18,8 +18,9 @@ import {
  * This proves both halves on the pinned real host with no terminal UI running
  * at all: the commands are listed, and invoking one produces its server-side
  * effect. `/ctx-flush` is the command under test because its effect is
- * observable: the next request must allow queued drops and cleanup as an
- * explicit user flush, which the plugin records in its own log.
+ * observable: the next request must be allowed to apply waiting removals
+ * (content the agent marked with `ctx_reduce`) and automatic cleanup, with the
+ * user's flush as the reason, which the plugin records in its own log.
  */
 const HEURISTICS_DECISION = "heuristics WILL";
 const EXPLICIT_FLUSH = "heuristics WILL RUN — reason=pending_materialization origin=user_flush";

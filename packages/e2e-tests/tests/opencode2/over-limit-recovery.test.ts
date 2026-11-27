@@ -52,7 +52,8 @@ function seedLargeToolTail(path: string, sessionID: string): void {
 			.all(sessionID) as Array<{ id: string; type: string; data: string }>;
 		const user = rows.find((row) => row.type === "user");
 		const tool = rows.find((row) => row.type === "assistant" && row.data.includes('"type":"tool"'));
-		// The converted tool is inline, but the new host may store its reply in session_part.
+		// The tool call converted from the OpenCode 1 store is inline in its message row,
+		// but OpenCode 2.4 can store the text of a new reply in the session_part table.
 		const overLimit = reader.history(sessionID).findLast((row) =>
 			row.type === "assistant" && row.data.content?.some((part) => part.type === "text" && part.text === "big"),
 		);

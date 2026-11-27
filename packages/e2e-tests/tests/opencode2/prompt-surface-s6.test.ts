@@ -87,8 +87,9 @@ export default { id: "s6-surface", async setup(context) {
 		const hashes = sameModel.slice(0, 3).map((frame) => sha(frame.tools));
 		expect(new Set(hashes).size).toBe(1);
 
-		// The observer sees a draft; the provider request proves which descriptions
-		// the host actually sent. Only the light model should get the light text.
+		// The schema-guard plugin above records the request before the host has
+		// finished building it. The request the mock provider received proves which
+		// descriptions were really sent. Only the light model should get the light text.
 		const wireDescriptions = (modelID: string) =>
 			host.mock
 				.requests()

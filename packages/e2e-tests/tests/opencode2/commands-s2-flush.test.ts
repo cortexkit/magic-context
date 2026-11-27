@@ -14,8 +14,11 @@ import {
 
 /**
  * The TUI's `/ctx-flush` calls the `flush` RPC handler. The next request must
- * allow queued drops and cleanup as a user flush, not as a system change or fit
- * retry. With nothing queued, that permission does not require rewriting the prefix.
+ * be allowed to apply waiting removals (content the agent marked with
+ * `ctx_reduce`) and automatic cleanup, and the plugin must record the user's
+ * flush as the reason, not a changed system prompt or a retry of a request that
+ * did not fit the window. With nothing waiting, that permission changes no
+ * bytes of the request the provider has cached.
  */
 const HEURISTICS_DECISION = "heuristics WILL";
 const EXPLICIT_FLUSH = "heuristics WILL RUN — reason=pending_materialization origin=user_flush";
