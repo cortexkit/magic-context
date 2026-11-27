@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, spyOn, test } from "bun:test";
 import { createServer, type Server } from "node:http";
 import type { Socket } from "node:net";
 import { insertMemory } from "../../features/magic-context/memory";
@@ -18,18 +18,15 @@ describe("OpenCode ctx_search with a hanging embedding endpoint", () => {
     let db: Database;
     let embed: ReturnType<typeof spyOn<typeof embeddingModule, "embedTextForProject">>;
     let invoke: (signal?: AbortSignal) => Promise<string>;
-    let requestSeen: Promise<void>;
+    let requestArrival: ReturnType<typeof Promise.withResolvers<void>>;
 
     beforeEach(async () => {
         requests = 0;
-        let onRequest: () => void;
-        requestSeen = new Promise<void>((resolve) => {
-            onRequest = resolve;
-        });
+        requestArrival = Promise.withResolvers<void>();
         server = createServer((request) => {
             requests++;
             request.resume();
-            onRequest();
+            requestArrival.resolve();
         });
         server.on("connection", (socket) => {
             sockets.add(socket);
@@ -79,6 +76,7 @@ describe("OpenCode ctx_search with a hanging embedding endpoint", () => {
     });
 
     afterEach(async () => {
+        jest.useRealTimers();
         for (const socket of sockets) socket.destroy();
         sockets.clear();
         await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -88,26 +86,45 @@ describe("OpenCode ctx_search with a hanging embedding endpoint", () => {
     });
 
     test("returns keyword results in 5s and repeated search deadlines open the circuit", async () => {
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        jest.setSystemTime(new Date("2026-08-11T12:00:00Z"));
+        const flushSearch = () => new Promise<void>((resolve) => setImmediate(resolve));
         for (let i = 0; i < 3; i++) {
-            const started = performance.now();
-            expect(await invoke()).toContain("needle keyword fallback survives");
-            const elapsed = performance.now() - started;
-            expect(elapsed).toBeGreaterThanOrEqual(4_500);
-            expect(elapsed).toBeLessThan(6_500);
+            requestArrival = Promise.withResolvers<void>();
+            let done = false;
+            const search = invoke().then((result) => {
+                done = true;
+                return result;
+            });
+            // Cancel a request that actually reached the HTTP server, not one
+            // stalled in local socket setup.
+            await Promise.race([requestArrival.promise, search]);
             expect(requests).toBe(i + 1);
+            jest.advanceTimersByTime(4_999);
+            await flushSearch();
+            expect(done).toBe(false);
+            expect(provider._getFailureCount()).toBe(i);
+            jest.advanceTimersByTime(1);
+            await flushSearch();
+            expect(done).toBe(true);
+            expect(await search).toContain("needle keyword fallback survives");
             expect(provider.getLastFailureReason()?.reason).toBe("request timed out after 5000ms");
         }
         expect(provider._getCircuitState()).toBe("open");
-        const started = performance.now();
-        expect(await invoke()).toContain("needle keyword fallback survives");
-        expect(performance.now() - started).toBeLessThan(500);
+        let answer: string | undefined;
+        const search = invoke().then((result) => {
+            answer = result;
+        });
+        await flushSearch();
+        expect(answer).toContain("needle keyword fallback survives");
+        await search;
         expect(requests).toBe(3);
     }, 40_000);
 
     test("tool caller cancellation is propagated without counting an endpoint failure", async () => {
         const controller = new AbortController();
         const pending = invoke(controller.signal);
-        await requestSeen;
+        await requestArrival.promise;
         controller.abort(new Error("caller cancelled"));
         await pending;
         expect(provider._getFailureCount()).toBe(0);

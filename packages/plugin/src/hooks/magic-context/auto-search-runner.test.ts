@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, spyOn, test } from "bun:test";
 import * as embedding from "../../features/magic-context/memory/embedding";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
@@ -249,6 +249,7 @@ describe("auto-search-runner", () => {
     });
 
     afterEach(() => {
+        jest.useRealTimers();
         _resetAutoSearchCache();
         snapshotSpy.mockRestore();
         closeQuietly(db);
@@ -385,6 +386,12 @@ describe("auto-search-runner", () => {
     });
 
     test("timeout path: returns without hanging transform and does NOT inject a hint", async () => {
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        jest.setSystemTime(new Date("2026-08-11T12:00:00Z"));
+        // The deadline reads the monotonic clock as well as scheduling a timer.
+        const epoch = Date.now();
+        const clock = spyOn(performance, "now").mockImplementation(() => Date.now() - epoch);
+        const flushSearch = () => new Promise<void>((resolve) => setImmediate(resolve));
         // Hanging search: never resolves.
         const spy = spyOn(searchModule, "searchAutoHint").mockImplementation(
             () =>
@@ -395,22 +402,24 @@ describe("auto-search-runner", () => {
                 makeUserMsg("u1", "a long enough prompt to pass the minPromptChars gate"),
             ];
 
-            const started = Date.now();
+            let settled = false;
             const runPromise = runAutoSearchHint({
                 sessionId: "s1",
                 db,
                 messages,
                 options: baseOptions,
+            }).then(() => {
+                settled = true;
             });
-            const outerCap = new Promise<"cap">((resolve) =>
-                setTimeout(() => resolve("cap"), 5_000),
-            );
-            const winner = await Promise.race([runPromise.then(() => "done" as const), outerCap]);
-            const elapsed = Date.now() - started;
-
-            expect(winner).toBe("done");
-            // Must complete within the 3s AUTO_SEARCH_TIMEOUT_MS + some slack.
-            expect(elapsed).toBeLessThan(4_000);
+            await flushSearch();
+            expect(spy).toHaveBeenCalledTimes(1);
+            jest.advanceTimersByTime(999);
+            await flushSearch();
+            expect(settled).toBe(false);
+            jest.advanceTimersByTime(1);
+            await flushSearch();
+            expect(settled).toBe(true);
+            await runPromise;
             // Timeout must not inject a hint into the user message.
             expect(findUserPromptText(messages[0])).not.toContain("<ctx-search-hint>");
 
@@ -426,6 +435,7 @@ describe("auto-search-runner", () => {
             expect(findUserPromptText(messages[0])).not.toContain("<ctx-search-hint>");
         } finally {
             spy.mockRestore();
+            clock.mockRestore();
         }
     }, 10_000);
 
