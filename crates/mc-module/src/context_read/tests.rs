@@ -245,7 +245,10 @@ fn context_read_memories_reuse_head_selection_including_the_sessions_workspace()
 }
 
 #[test]
-fn context_read_plugin_summaries_use_existing_no_pressure_decay_newest_first() {
+fn context_read_plugin_summaries_use_the_folds_forms_newest_first() {
+    // The fixture's window is unknown, so the fold renders against the
+    // fallback history budget, in which these twelve summaries all fit in
+    // full (the decay curve used to shorten the older ones here).
     let fixture = Fixture::new();
     let answer = fixture.read("context.summaries", params());
     let items = answer["summaries"].as_array().unwrap();
@@ -255,8 +258,7 @@ fn context_read_plugin_summaries_use_existing_no_pressure_decay_newest_first() {
     assert_eq!(items[0]["end"], 120);
     assert_eq!(items[0]["title"], "Summary 11");
     assert!(items[0]["text"].as_str().unwrap().contains("verbose fact"));
-    assert!(items[11]["text"].as_str().unwrap().contains("short fact"));
-    assert!(!items[11]["text"].as_str().unwrap().contains("verbose fact"));
+    assert!(items[11]["text"].as_str().unwrap().contains("verbose fact"));
     assert_eq!(
         items[0]["tokens"],
         mc_tokenizer::estimate_tokens(items[0]["text"].as_str().unwrap())

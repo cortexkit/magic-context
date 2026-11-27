@@ -13,14 +13,23 @@ pub mod fit;
 pub mod hashes;
 pub mod head;
 pub mod index;
+pub(crate) mod line;
 pub mod prompt;
 pub mod prompts;
 pub mod render;
+#[cfg(test)]
+pub(crate) mod render_before_line;
 pub mod run;
 pub(crate) mod telemetry;
 pub mod trigger;
 pub mod two_pass;
 pub mod validate;
 
+#[cfg(test)]
+mod line_replay_tests;
+#[cfg(test)]
+mod line_tests;
+#[cfg(test)]
+mod render_line_tests;
 #[cfg(test)]
 mod replay_tests;

@@ -1,23 +1,20 @@
-//! Deterministic decay renderer: turns a chronological compartment set into the
+//! The history renderer: turns a chronological summary set into the
 //! markdown-heading history bytes that fill m0/m1.
 //!
-//! Faithful port of the shared `decay-render.ts`. It picks a tier per compartment
-//! from age + importance + budget pressure (via [`mc_core::decay`], pressure computed
-//! ONCE per pass), renders the chosen paraphrase tier (P1..P4; P5 = archived =
-//! omitted), and demotes oldest-first under a hard token budget as a drift guard.
+//! Which form each summary takes (full, lighter, condensed, one line, title
+//! only, or left out) is decided by [`super::line`], from the summary's age
+//! and score and the budget. This file renders one summary at a form, joins
+//! the chosen pieces into the block, and counts each piece with the injected
+//! `estimate_tokens` (the session's own token counter at a fold), so the
+//! search for the budget sees the real size of every form.
 //!
-//! This is byte-producing, so it lives in mc-module (mc-core stays pure decision
-//! math). The byte-identity invariant that matters is intra-module determinism (same
-//! compartments + budget → same bytes across passes); a differential golden cross-
-//! checks the v2 paraphrase path against the TS reference.
-//!
-//! The budget-guard loop needs a token estimator, which is its own subsystem and a
-//! later port — so it is INJECTED (`estimate_tokens`). The renderer stays pure; with
-//! a budget loose enough that the guard never fires, the output is estimator-
-//! independent and purely curve-driven (which is what the golden exercises).
+//! How one summary renders (its heading, escaping, legacy rows) is a port of
+//! the TypeScript plugin's `decay-render.ts` and stays byte-identical to it;
+//! goldens in `testdata/` check that. Same summaries and budget always give
+//! the same bytes.
 
+use super::line::{self, Costs, CountedCosts, Options, Piece, Summary, NOT_SHOWN, TITLE};
 use crate::context_db::StoredCompartment;
-use crate::decay::{compute_budget_pressure, rendered_tier, DecayInput};
 
 /// Default history budget when a caller doesn't supply one.
 pub const DEFAULT_HISTORY_BUDGET_TOKENS: u32 = 60_000;
@@ -217,7 +214,7 @@ fn legacy_body_for_tier(content: &str, tier: u8) -> String {
 }
 
 /// Legacy compartments start at P3 if the body has a `U:` line, else P4.
-fn legacy_tier(c: &DecayRenderCompartment) -> u8 {
+pub(super) fn legacy_tier(c: &DecayRenderCompartment) -> u8 {
     if c.content.lines().any(|l| l.starts_with("U:")) {
         3
     } else {
@@ -225,18 +222,24 @@ fn legacy_tier(c: &DecayRenderCompartment) -> u8 {
     }
 }
 
-/// Render a single compartment at an explicit tier. Exposed for the m1 "new
-/// compartments" block, which always renders newest compartments at P1 (full
-/// fidelity — no decay applies to brand-new deltas).
+/// Render a single compartment at an explicit tier: 1 to 4 are the stored
+/// forms (full, lighter, condensed, one line), 5 is the heading alone, 6 and
+/// above render nothing. Exposed for the m1 "new compartments" block, which
+/// always renders newest compartments at P1 (full fidelity — no decay applies
+/// to brand-new deltas), and for readers that show one summary at the tier
+/// the head recorded for it.
 pub fn render_compartment_at_tier(c: &DecayRenderCompartment, tier: u8) -> String {
     render_one_compartment(c, tier)
 }
 
-fn render_one_compartment(c: &DecayRenderCompartment, tier: u8) -> String {
-    if c.is_no_content() || tier >= 5 {
-        return String::new(); // archived
+pub(super) fn render_one_compartment(c: &DecayRenderCompartment, tier: u8) -> String {
+    if c.is_no_content() || tier >= NOT_SHOWN {
+        return String::new();
     }
     let heading = compartment_heading(c);
+    if tier == TITLE {
+        return heading;
+    }
 
     // Legacy rows AND malformed pseudo-v2 rows (legacy=0 but no usable p1) render via
     // flat `content`, never as an empty title-only heading — otherwise a
@@ -260,247 +263,168 @@ fn render_one_compartment(c: &DecayRenderCompartment, tier: u8) -> String {
     )
 }
 
-/// Compute the rendered tier for each compartment, given budget pressure derived once
-/// from the whole set. `compartments` are chronological (oldest first); the decay
-/// curve indexes from newest (1 = newest). Legacy rows are governed by deterministic
-/// truncation, not the curve, and are EXCLUDED from the pressure inputs so unrelated
-/// legacy cost can't demote v2 paraphrases (budget honesty for mixed sessions).
-///
-/// Accepts owned or borrowed compartments so callers holding references (the
-/// prepared renderer) need not copy summary bodies just to pick tiers.
-fn compute_tiers<C: std::borrow::Borrow<DecayRenderCompartment>>(
-    compartments: &[C],
-    history_budget: f64,
-) -> Vec<u8> {
-    let v2_indices: Vec<usize> = compartments
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.borrow().legacy != Some(1))
-        .map(|(i, _)| i)
-        .collect();
-    let v2_total = v2_indices.len();
-
-    // curve index per original index: 1-based from newest v2 row.
-    let mut curve_index_by_original = std::collections::HashMap::new();
-    let mut curve_inputs = Vec::with_capacity(v2_total);
-    for (v2_ordinal, &original_index) in v2_indices.iter().enumerate() {
-        let curve_index = (v2_total - v2_ordinal) as u32;
-        curve_index_by_original.insert(original_index, curve_index);
-        let importance = compartments[original_index]
-            .borrow()
-            .importance
-            .unwrap_or(50)
-            .clamp(1, 100);
-        curve_inputs.push(DecayInput {
-            index: curve_index,
-            importance,
-        });
-    }
-    let pressure = if history_budget > 0.0 {
-        compute_budget_pressure(&curve_inputs, history_budget)
+/// The tier a summary renders at for the form the line chose. Rows written
+/// before summaries had stored forms (legacy rows) never render longer than
+/// they always have: the 420-character cut when the row has a user line, the
+/// heading alone otherwise. Their title and leaving them out work as for any
+/// other row.
+pub(super) fn rendered_tier(c: &DecayRenderCompartment, form: u8) -> u8 {
+    if c.legacy == Some(1) && form < TITLE {
+        form.max(legacy_tier(c))
     } else {
-        1.0
-    };
-
-    compartments
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let c = c.borrow();
-            if c.legacy == Some(1) {
-                legacy_tier(c)
-            } else {
-                rendered_tier(
-                    *curve_index_by_original.get(&i).unwrap_or(&1),
-                    c.importance.unwrap_or(50),
-                    pressure,
-                    0.0,
-                )
-            }
-        })
-        .collect()
-}
-
-/// Render the decayed compartment-history body (no `<session-history>` wrapper —
-/// callers add their own framing). Demotes oldest-first under the budget as a drift
-/// guard, measured by the injected `estimate_tokens` (the estimator is its own
-/// subsystem). Never renders session facts (v2 faithful).
-pub fn render_decayed_compartments(
-    compartments: &[DecayRenderCompartment],
-    history_budget_tokens: f64,
-    estimate_tokens: impl Fn(&str) -> usize,
-) -> String {
-    render_decayed_with_items(compartments, history_budget_tokens, estimate_tokens).0
-}
-
-/// Retain the final tier and exact rendered bytes for attribution, after the
-/// budget guard has finished demoting summaries. Indices refer to the input.
-pub(crate) fn render_decayed_with_items(
-    compartments: &[DecayRenderCompartment],
-    history_budget_tokens: f64,
-    estimate_tokens: impl Fn(&str) -> usize,
-) -> (String, Vec<(usize, u8, String)>) {
-    if compartments.is_empty() {
-        return (String::new(), Vec::new());
+        form
     }
-    let indices: Vec<_> = compartments
+}
+
+/// The day a summary's first message was written, which titles are grouped by.
+fn summary_day(c: &DecayRenderCompartment) -> Option<&str> {
+    c.start_date.as_deref().filter(|day| !day.is_empty())
+}
+
+/// The heading over a run of titles of one day. Its range runs from the first
+/// summary's first message to the last one's last message, so it still reads
+/// as one `## start-end` stretch of history.
+fn group_header(rows: &[&DecayRenderCompartment], members: &[usize]) -> String {
+    let first = rows[members[0]];
+    let last = rows[members[members.len() - 1]];
+    format!(
+        "## {}-{} · {} · {} summaries",
+        first.start_message,
+        last.end_message,
+        summary_day(first).unwrap_or_default(),
+        members.len()
+    )
+}
+
+/// One title under a day heading, with the message it starts at. Its stretch
+/// ends before the next line's start, or at the heading's end.
+fn group_line(c: &DecayRenderCompartment) -> String {
+    format!(
+        "- {}: {}",
+        c.start_message,
+        sanitize_compartment_title(&c.title)
+    )
+}
+
+/// A rendered history block, with what it shows of each summary.
+pub(crate) struct RenderedHistory {
+    pub text: String,
+    /// For each shown summary: its index in the input, the tier it renders
+    /// at (5 for a title, alone or under a day heading) and its tokens. A
+    /// day heading's tokens are counted with the first title under it, so
+    /// the items add up to the block's pieces.
+    pub items: Vec<(usize, u8, u64)>,
+    /// The line's choice, over the summaries with content. Only tests and the
+    /// replay harness read it; a fold needs the text and the items.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub plan: line::Plan,
+}
+
+/// Render the history block for `history_budget_tokens` (no `<session-history>`
+/// wrapper — callers add their own framing), counting each piece with
+/// `estimate_tokens`. A budget of zero or less means the window is unknown
+/// ([`line::HISTORY_BUDGET_WHEN_WINDOW_UNKNOWN`]).
+pub(crate) fn render_history(
+    compartments: &[DecayRenderCompartment],
+    history_budget_tokens: f64,
+    estimate_tokens: impl Fn(&str) -> usize,
+) -> RenderedHistory {
+    let indices: Vec<usize> = compartments
         .iter()
         .enumerate()
         .filter(|(_, c)| !c.is_no_content())
         .map(|(i, _)| i)
         .collect();
-    let filtered;
-    let compartments = if compartments
+    let rows: Vec<&DecayRenderCompartment> = indices.iter().map(|&i| &compartments[i]).collect();
+    let summaries: Vec<Summary> = rows
         .iter()
-        .any(DecayRenderCompartment::is_no_content)
-    {
-        filtered = compartments
-            .iter()
-            .filter(|c| !c.is_no_content())
-            .cloned()
-            .collect::<Vec<_>>();
-        filtered.as_slice()
-    } else {
-        compartments
-    };
-    let mut tiers = compute_tiers(compartments, history_budget_tokens);
-    let mut pieces = TierPieces::new(compartments);
-    let mut body = pieces.join(&tiers);
-
-    // Budget guard: the curve already targets the budget, but estimate drift or a very
-    // tight budget can overshoot. Demote oldest-first until it fits. This follows the
-    // plugin's renderer (decay-render.ts): it first demotes against the sum of each
-    // summary's own count, then checks the joined body, whose separators and
-    // boundary tokens the sum misses, and keeps demoting while that is over.
-    // Re-rendering and re-counting the whole history after every single demotion
-    // instead costs (demotions x history size) of tokenizer work, which took seconds
-    // with an exact tokenizer on a head with hundreds of summaries, while the head
-    // waited for the view.
-    if history_budget_tokens > 0.0 {
-        let mut running: i64 = (0..tiers.len())
-            .map(|i| pieces.tokens(i, tiers[i], &estimate_tokens) as i64)
-            .sum();
-        let mut guard = compartments.len() * 5;
-        let mut oldest = 0usize;
-        while running as f64 > history_budget_tokens && guard > 0 {
-            if !demote_oldest(
-                &mut tiers,
-                &mut oldest,
-                &mut pieces,
-                &mut running,
-                &estimate_tokens,
-            ) {
-                break;
-            }
-            guard -= 1;
-        }
-        body = pieces.join(&tiers);
-        while estimate_tokens(&body) as f64 > history_budget_tokens && guard > 0 {
-            if !demote_oldest(
-                &mut tiers,
-                &mut oldest,
-                &mut pieces,
-                &mut running,
-                &estimate_tokens,
-            ) {
-                break;
-            }
-            guard -= 1;
-            body = pieces.join(&tiers);
-        }
-    }
-    let items = (0..compartments.len())
-        .filter_map(|i| {
-            let text = pieces.text(i, tiers[i]).to_string();
-            (!text.is_empty()).then(|| (indices[i], tiers[i], text))
+        .map(|c| Summary {
+            score: f64::from(c.importance.unwrap_or(50).clamp(1, 100)),
+            scored: c.importance.is_some(),
+            day: summary_day(c),
         })
         .collect();
-    (body, items)
-}
-
-/// Moves the oldest summary that can still shrink one tier down and updates the
-/// running sum. `oldest` only moves forward, because tiers only ever grow.
-fn demote_oldest(
-    tiers: &mut [u8],
-    oldest: &mut usize,
-    pieces: &mut TierPieces<'_>,
-    running: &mut i64,
-    estimate_tokens: &impl Fn(&str) -> usize,
-) -> bool {
-    while *oldest < tiers.len() && tiers[*oldest] >= 5 {
-        *oldest += 1;
-    }
-    let Some(tier) = tiers.get(*oldest).copied() else {
-        return false;
-    };
-    *running += pieces.tokens(*oldest, tier + 1, estimate_tokens) as i64
-        - pieces.tokens(*oldest, tier, estimate_tokens) as i64;
-    tiers[*oldest] = tier + 1;
-    true
-}
-
-/// Each summary's rendered text and token count at a tier, computed on first use.
-/// Both are fixed for the length of one render, so no summary is rendered or
-/// counted twice at the same tier.
-struct TierPieces<'a> {
-    compartments: &'a [DecayRenderCompartment],
-    text: std::collections::HashMap<(usize, u8), String>,
-    tokens: std::collections::HashMap<(usize, u8), usize>,
-}
-
-impl<'a> TierPieces<'a> {
-    fn new(compartments: &'a [DecayRenderCompartment]) -> Self {
-        Self {
-            compartments,
-            text: std::collections::HashMap::new(),
-            tokens: std::collections::HashMap::new(),
-        }
-    }
-
-    fn text(&mut self, index: usize, tier: u8) -> &str {
-        let compartments = self.compartments;
-        self.text
-            .entry((index, tier))
-            .or_insert_with(|| render_one_compartment(&compartments[index], tier))
-    }
-
-    fn tokens(
-        &mut self,
-        index: usize,
-        tier: u8,
-        estimate_tokens: &impl Fn(&str) -> usize,
-    ) -> usize {
-        if let Some(&tokens) = self.tokens.get(&(index, tier)) {
-            return tokens;
-        }
-        let text = self.text(index, tier);
-        let tokens = if text.is_empty() {
-            0
-        } else {
-            estimate_tokens(text)
-        };
-        self.tokens.insert((index, tier), tokens);
-        tokens
-    }
-
-    /// The non-empty summaries at their tiers, joined by blank lines.
-    fn join(&mut self, tiers: &[u8]) -> String {
-        for (index, &tier) in tiers.iter().enumerate() {
-            self.text(index, tier);
-        }
-        let mut body = String::new();
-        for (index, &tier) in tiers.iter().enumerate() {
-            let text = &self.text[&(index, tier)];
-            if text.is_empty() {
-                continue;
+    let count = |text: &str| estimate_tokens(text) as u64;
+    let rows_ref = &rows;
+    let mut costs = CountedCosts::new(
+        rows.len(),
+        |piece: Piece| match piece {
+            Piece::Form(i, form) => {
+                render_one_compartment(rows_ref[i], rendered_tier(rows_ref[i], form))
             }
-            if !body.is_empty() {
-                body.push_str("\n\n");
-            }
-            body.push_str(text);
+            Piece::Line(i) => group_line(rows_ref[i]),
+            Piece::Header(members) => group_header(rows_ref, members),
+        },
+        count,
+    );
+    let plan = line::plan(
+        &summaries,
+        history_budget_tokens,
+        &mut costs,
+        Options::default(),
+    );
+
+    let mut group_of = vec![None; rows.len()];
+    for (number, group) in plan.groups.iter().enumerate() {
+        for &member in group {
+            group_of[member] = Some(number);
         }
-        body
     }
+    let mut sections = Vec::new();
+    let mut items = Vec::new();
+    for (i, &form) in plan.forms.iter().enumerate() {
+        if form >= NOT_SHOWN {
+            continue;
+        }
+        match group_of[i] {
+            Some(number) => {
+                let group = &plan.groups[number];
+                if group[0] != i {
+                    continue;
+                }
+                let mut section = group_header(&rows, group);
+                let mut header_tokens = costs.group_header(group);
+                for &member in group {
+                    section.push('\n');
+                    section.push_str(&group_line(rows[member]));
+                    let tokens = costs.group_line(member) + std::mem::take(&mut header_tokens);
+                    items.push((indices[member], TITLE, tokens));
+                }
+                sections.push(section);
+            }
+            None => {
+                let tier = rendered_tier(rows[i], form);
+                sections.push(render_one_compartment(rows[i], tier));
+                items.push((indices[i], tier, costs.piece(i, form)));
+            }
+        }
+    }
+    RenderedHistory {
+        text: sections.join("\n\n"),
+        items,
+        plan,
+    }
+}
+
+/// Render the history body (no `<session-history>` wrapper — callers add
+/// their own framing). Never renders session facts (v2 faithful).
+pub fn render_decayed_compartments(
+    compartments: &[DecayRenderCompartment],
+    history_budget_tokens: f64,
+    estimate_tokens: impl Fn(&str) -> usize,
+) -> String {
+    render_history(compartments, history_budget_tokens, estimate_tokens).text
+}
+
+/// The history body and, for each shown summary, its input index, tier and
+/// tokens ([`RenderedHistory::items`]).
+pub(crate) fn render_decayed_with_items(
+    compartments: &[DecayRenderCompartment],
+    history_budget_tokens: f64,
+    estimate_tokens: impl Fn(&str) -> usize,
+) -> (String, Vec<(usize, u8, u64)>) {
+    let rendered = render_history(compartments, history_budget_tokens, estimate_tokens);
+    (rendered.text, rendered.items)
 }
 
 /// Extract a top-level m0 block slice (e.g. "session-history") for budget measurement
@@ -518,10 +442,9 @@ pub fn extract_m0_block(m0_text: &str, tag: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde::Deserialize;
-    use sha2::{Digest, Sha256};
 
     fn comp(
         start: i64,
@@ -540,7 +463,7 @@ mod tests {
             ..Default::default()
         }
     }
-    /// A loose budget so the guard never fires (output is purely curve-driven).
+    /// A counter under which everything fits, so every summary renders in full.
     fn no_guard(_: &str) -> usize {
         0
     }
@@ -556,17 +479,18 @@ mod tests {
             importance: Some(50),
             ..Default::default()
         };
-        // index 1 (newest) → tier 1 → p1 body
+        // Everything fits in full → p1 body
         let out = render_decayed_compartments(std::slice::from_ref(&c), 60_000.0, no_guard);
         assert_eq!(out, "## 1-9 · T\nVERBOSE");
     }
 
     #[test]
-    fn archived_tier_is_omitted() {
-        assert_eq!(
-            render_compartment_at_tier(&comp(1, 2, "x", "body", 50), 5),
-            ""
-        );
+    fn title_tier_is_the_heading_and_tier_six_is_omitted() {
+        // Tier 5 used to mean "archived" here; it is now the title-only form,
+        // and leaving a summary out is tier 6.
+        let c = comp(1, 2, "x", "body", 50);
+        assert_eq!(render_compartment_at_tier(&c, 5), "## 1-2 · x");
+        assert_eq!(render_compartment_at_tier(&c, 6), "");
     }
 
     #[test]
@@ -669,35 +593,15 @@ mod tests {
     }
 
     #[test]
-    fn budget_guard_demotes_oldest_first() {
-        // three compartments; a synthetic estimator (chars) forces demotion. Oldest
-        // (index 0, chronologically first) demotes first.
-        let comps = vec![
-            comp(1, 2, "OLD", "oldverbosebody", 50),
-            comp(3, 4, "MID", "midverbosebody", 50),
-            comp(5, 6, "NEW", "newverbosebody", 50),
-        ];
-        let chars = |s: &str| s.chars().count();
-        // tiny budget forces demotion until it fits
-        let out = render_decayed_compartments(&comps, 80.0, chars);
-        assert!(
-            chars(&out) as f64 <= 80.0 || out.is_empty(),
-            "fits budget: {}",
-            chars(&out)
-        );
-        // the newest should retain more fidelity than the oldest after demotion
-        assert!(out.contains(" · NEW"), "newest survives: {out}");
-    }
-
-    #[test]
-    fn budget_guard_counts_each_summary_once_not_the_whole_history_per_demotion() {
-        // Hundreds of summaries over budget need hundreds of demotions. Counting the
-        // whole joined history after each one fed the exact tokenizer hundreds of
-        // copies of the history (seconds on a real head while it waited for its
-        // view). Each summary is now counted once per tier, plus a few joined-body
-        // checks, so the counted text stays within a small multiple of the history.
-        // Every tier is as long as the full text, so only the last tier saves space
-        // and fitting takes several demotions per summary dropped.
+    fn the_stretch_search_counts_each_piece_once_not_the_whole_history_per_step() {
+        // The search for the budget looks at every summary at up to 41
+        // stretch factors. Counting the joined history at each step, or a
+        // summary's form again at each step, would feed an exact tokenizer
+        // dozens of copies of the history (seconds on a real head while it
+        // waits for its view). Each form of each summary is counted once per
+        // fold, so the counted text stays within a small multiple of the
+        // history. Every form is as long as the full text, so only the title
+        // saves space.
         let text = "a summary sentence about the work. ".repeat(20);
         let comps: Vec<_> = (0..300i64)
             .map(|i| DecayRenderCompartment {
@@ -712,10 +616,15 @@ mod tests {
             counted.set(counted.get() + s.len());
             s.chars().count()
         };
-        let full = render_decayed_compartments(&comps, 0.0, |s: &str| s.chars().count());
+        let full = comps
+            .iter()
+            .map(|c| render_compartment_at_tier(c, 1))
+            .collect::<Vec<_>>()
+            .join("\n\n");
         let budget = full.chars().count() as f64 * 0.4;
-        let out = render_decayed_compartments(&comps, budget, chars);
-        assert!(out.chars().count() as f64 <= budget, "fits the budget");
+        let rendered = render_history(&comps, budget, chars);
+        let pieces: u64 = rendered.items.iter().map(|item| item.2).sum();
+        assert!(pieces as f64 <= budget, "fits the budget");
         assert!(
             counted.get() < full.len() * 10,
             "counted {} bytes for a {}-byte history",
@@ -780,10 +689,10 @@ mod tests {
         assert_eq!(extract_m0_block(m0, "missing"), None);
     }
 
-    // --- differential golden vs the TS reference (v2 paraphrase path, guard off) ---
+    // --- differential golden vs the TS reference: one summary's rendering ---
 
     #[derive(Deserialize)]
-    struct RawComp {
+    pub(crate) struct RawComp {
         #[serde(rename = "startMessage")]
         start: i64,
         #[serde(rename = "endMessage")]
@@ -802,48 +711,58 @@ mod tests {
         importance: Option<i32>,
         legacy: Option<i32>,
     }
+
+    impl RawComp {
+        pub(crate) fn to_render(&self) -> DecayRenderCompartment {
+            DecayRenderCompartment {
+                start_message: self.start,
+                end_message: self.end,
+                title: self.title.clone(),
+                content: self.content.clone(),
+                start_date: self.start_date.clone(),
+                end_date: self.end_date.clone(),
+                p1: self.p1.clone(),
+                p2: self.p2.clone(),
+                p3: self.p3.clone(),
+                p4: self.p4.clone(),
+                importance: self.importance,
+                legacy: self.legacy,
+            }
+        }
+    }
+
     #[derive(Deserialize)]
-    struct RenderCase {
-        compartments: Vec<RawComp>,
-        budget: f64,
-        body: Option<String>,
-        body_utf16_hex: Option<String>,
-        forced_tier: Option<u8>,
+    pub(crate) struct RenderCase {
+        pub compartments: Vec<RawComp>,
+        pub budget: f64,
+        pub body: Option<String>,
+        pub body_utf16_hex: Option<String>,
+        pub forced_tier: Option<u8>,
     }
     #[derive(Deserialize)]
-    struct RenderGolden {
-        cases: Vec<RenderCase>,
+    pub(crate) struct RenderGolden {
+        pub cases: Vec<RenderCase>,
     }
 
     #[test]
     fn render_golden_matches_reference() {
-        // Generated by crates/mc-core/testdata/gen-golden.ts. All cases use a loose
-        // budget so the TS estimateTokens guard never fires → the Rust output (guard
-        // off) is the same purely-curve-driven body. Exercises the v2 paraphrase path,
-        // legacy truncation (ASCII), archive omission, and XML escaping.
+        // Generated by crates_old/mc-core/testdata/gen-golden.ts. These are the
+        // golden's cases of one summary: a forced tier, or one summary with a
+        // loose budget, which the TypeScript renderer showed at its newest tier
+        // and the line shows in full because everything fits. They exercise the
+        // v2 paraphrase path, legacy truncation and XML escaping. The cases with
+        // several summaries pin the retired decay curve and run against its
+        // test copy (`render_before_line.rs`).
         let raw = include_str!("../../testdata/render-golden.json");
         let golden: RenderGolden = serde_json::from_str(raw).expect("parse render-golden.json");
-        assert!(!golden.cases.is_empty(), "empty render golden");
-
+        let mut checked = 0;
         for (n, case) in golden.cases.iter().enumerate() {
-            let comps: Vec<DecayRenderCompartment> = case
-                .compartments
-                .iter()
-                .map(|r| DecayRenderCompartment {
-                    start_message: r.start,
-                    end_message: r.end,
-                    title: r.title.clone(),
-                    content: r.content.clone(),
-                    start_date: r.start_date.clone(),
-                    end_date: r.end_date.clone(),
-                    p1: r.p1.clone(),
-                    p2: r.p2.clone(),
-                    p3: r.p3.clone(),
-                    p4: r.p4.clone(),
-                    importance: r.importance,
-                    legacy: r.legacy,
-                })
-                .collect();
+            if case.forced_tier.is_none() && case.compartments.len() > 1 {
+                continue;
+            }
+            checked += 1;
+            let comps: Vec<DecayRenderCompartment> =
+                case.compartments.iter().map(RawComp::to_render).collect();
             let got = case.forced_tier.map_or_else(
                 || render_decayed_compartments(&comps, case.budget, no_guard),
                 |tier| render_compartment_at_tier(&comps[0], tier),
@@ -866,188 +785,7 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn redacted_store_shape_matches_ts_at_real_history_budgets() {
-        #[derive(Deserialize)]
-        struct ShapeFixture {
-            compartments: Vec<RawComp>,
-        }
-        #[derive(Deserialize)]
-        struct DifferentialCase {
-            budget: f64,
-            #[serde(rename = "tsCost")]
-            ts_cost: usize,
-            #[serde(rename = "tsTierCounts")]
-            ts_tier_counts: [usize; 5],
-            #[serde(rename = "bodySha256")]
-            body_sha256: String,
-        }
-        #[derive(Deserialize)]
-        struct DifferentialFixture {
-            cases: Vec<DifferentialCase>,
-        }
-
-        let shape: ShapeFixture =
-            serde_json::from_str(include_str!("../../testdata/decay-store-shape.json"))
-                .expect("parse redacted store shape");
-        assert_eq!(
-            shape.compartments.len(),
-            388,
-            "fixture must preserve the store shape"
-        );
-        let compartments: Vec<DecayRenderCompartment> = shape
-            .compartments
-            .iter()
-            .map(|raw| DecayRenderCompartment {
-                start_message: raw.start,
-                end_message: raw.end,
-                title: raw.title.clone(),
-                content: raw.content.clone(),
-                start_date: raw.start_date.clone(),
-                end_date: raw.end_date.clone(),
-                p1: raw.p1.clone(),
-                p2: raw.p2.clone(),
-                p3: raw.p3.clone(),
-                p4: raw.p4.clone(),
-                importance: raw.importance,
-                legacy: raw.legacy,
-            })
-            .collect();
-        let differential: DifferentialFixture =
-            serde_json::from_str(include_str!("../../testdata/decay-store-differential.json"))
-                .expect("parse TS differential table");
-        assert_eq!(differential.cases.len(), 4);
-
-        let mut previous_cost = None;
-        for case in &differential.cases {
-            let body = render_decayed_compartments(
-                &compartments,
-                case.budget,
-                mc_tokenizer::estimate_tokens,
-            );
-            let rust_cost = mc_tokenizer::estimate_tokens(&body);
-            assert_eq!(
-                rust_cost, case.ts_cost,
-                "token cost drift at budget {}",
-                case.budget
-            );
-            assert!(
-                rust_cost as f64 <= case.budget || body.is_empty(),
-                "render exceeded budget {} with {} tokens",
-                case.budget,
-                rust_cost
-            );
-            if let Some(previous) = previous_cost {
-                assert!(
-                    rust_cost > previous,
-                    "shrinking budget must not grow rendered cost: previous {previous}, current {rust_cost}"
-                );
-            }
-            previous_cost = Some(rust_cost);
-
-            let digest = Sha256::digest(body.as_bytes());
-            let rust_hash = digest
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
-            assert_eq!(
-                rust_hash, case.body_sha256,
-                "byte drift at budget {}",
-                case.budget
-            );
-
-            let sections = if body.is_empty() {
-                Vec::new()
-            } else {
-                body.split("\n\n").collect::<Vec<_>>()
-            };
-            let mut tier_counts = [0usize; 5];
-            for compartment in &compartments {
-                let heading = format!(
-                    "## {}-{}",
-                    compartment.start_message, compartment.end_message
-                );
-                let section = sections
-                    .iter()
-                    .find(|section| section.starts_with(&heading))
-                    .copied();
-                let mut selected = 5usize;
-                for tier in 1..=5u8 {
-                    if render_compartment_at_tier(compartment, tier).as_str()
-                        == section.unwrap_or("")
-                    {
-                        selected = tier as usize;
-                        break;
-                    }
-                }
-                tier_counts[selected - 1] += 1;
-            }
-            assert_eq!(
-                tier_counts, case.ts_tier_counts,
-                "tier drift at budget {}",
-                case.budget
-            );
-        }
-    }
-
-    #[test]
-    fn render_tight_golden_matches_reference_with_real_estimator() {
-        // The budget GUARD path: these cases use budgets tight enough that the TS
-        // renderDecayedCompartments demoted compartments oldest-first (via the REAL
-        // Claude estimateTokens). Here we run the SAME cases with the REAL
-        // mc_tokenizer::estimate_tokens. Because the tokenizer is bit-identical to
-        // ai-tokenizer (proven by mc-tokenizer's differential golden) AND the demotion
-        // loops are structurally identical, the Rust guard must reach the same tiers and
-        // emit byte-identical bodies — including the CJK cases where a char/N proxy would
-        // mis-demote. This is the end-to-end proof that activating the estimator is
-        // faithful, not just that the tokenizer counts match in isolation.
-        let raw = include_str!("../../testdata/render-tight-golden.json");
-        let golden: RenderGolden = serde_json::from_str(raw).expect("parse render-tight-golden");
-        assert!(!golden.cases.is_empty(), "empty tight render golden");
-
-        let mut fired = 0;
-        for (n, case) in golden.cases.iter().enumerate() {
-            let comps: Vec<DecayRenderCompartment> = case
-                .compartments
-                .iter()
-                .map(|r| DecayRenderCompartment {
-                    start_message: r.start,
-                    end_message: r.end,
-                    title: r.title.clone(),
-                    content: r.content.clone(),
-                    start_date: r.start_date.clone(),
-                    end_date: r.end_date.clone(),
-                    p1: r.p1.clone(),
-                    p2: r.p2.clone(),
-                    p3: r.p3.clone(),
-                    p4: r.p4.clone(),
-                    importance: r.importance,
-                    legacy: r.legacy,
-                })
-                .collect();
-            // The real estimator drives the guard, exactly as production's HARD arm does.
-            let got =
-                render_decayed_compartments(&comps, case.budget, mc_tokenizer::estimate_tokens);
-            assert_eq!(
-                Some(&got),
-                case.body.as_ref(),
-                "tight render mismatch in case {n} (budget {})",
-                case.budget
-            );
-            // Confirm this case actually exercised the guard (the real estimator agrees the
-            // body fits): either it demoted to fit, or it hit the floor (empty). A case
-            // whose curve output already fit the tight budget wouldn't prove the guard.
-            if mc_tokenizer::estimate_tokens(&got) as f64 <= case.budget || got.is_empty() {
-                fired += 1;
-            }
-        }
-        assert_eq!(
-            fired,
-            golden.cases.len(),
-            "every tight case must end within budget (or at the floor) under the real estimator"
-        );
+        assert_eq!(checked, 6);
     }
 }
 

@@ -68,7 +68,6 @@ pub mod context_db;
 pub(crate) mod context_migrations;
 pub mod context_read;
 pub mod count;
-pub mod decay;
 pub(crate) mod docs_proposals;
 #[cfg(unix)]
 pub mod doctor;

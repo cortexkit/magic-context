@@ -254,10 +254,15 @@ impl SummaryDays {
     }
 }
 
+/// What the head shows of one summary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryItem {
     pub compartment_id: String,
+    /// 1 to 4 for the stored forms (full, lighter, condensed, one line), 5
+    /// for the title alone.
     pub tier: u8,
+    /// Its rendered tokens. A title under a day heading counts its own line;
+    /// the heading counts with the first title under it.
     pub tokens: u64,
 }
 
@@ -415,16 +420,19 @@ impl Baseline {
     }
 }
 
-/// The `<session-history>` block within `budget` local tokens. The decay
-/// render already fits the summaries' bodies to the budget, but its
-/// estimate drifts and the wrapper adds a little, so a block more than 5%
-/// over is rendered again against a budget 15% tighter, at most three times
-/// (the plugin's `decayPressureMultiplier` loop in `materializeM0`).
-fn fit_history(
+/// The `<session-history>` block within `budget` local tokens. The render
+/// already fits the summaries' pieces to the budget, but the blank lines
+/// between them and the wrapper add a little, so a block more than 5% over
+/// is rendered again against a budget 15% tighter, at most three times (the
+/// plugin's `decayPressureMultiplier` loop in `materializeM0`). A budget of
+/// zero or less means the window is unknown and is replaced by
+/// [`super::line::HISTORY_BUDGET_WHEN_WINDOW_UNKNOWN`] here too.
+pub(super) fn fit_history(
     budget: f64,
     render: impl Fn(f64) -> String,
     estimate: impl Fn(&str) -> usize,
 ) -> String {
+    let budget = super::line::effective_budget(budget);
     let wrap = |history: String| {
         if history.is_empty() {
             HISTORY_EMPTY.to_owned()
@@ -435,7 +443,7 @@ fn fit_history(
     let mut multiplier = 1.0;
     let mut block = wrap(render(budget));
     let mut attempts = 0;
-    while budget > 0.0 && estimate(&block) as f64 > budget * 1.05 && attempts < 3 {
+    while estimate(&block) as f64 > budget * 1.05 && attempts < 3 {
         multiplier *= 1.15;
         block = wrap(render(budget / multiplier));
         attempts += 1;
@@ -493,10 +501,10 @@ pub fn fold_with(inputs: &Inputs, shown: &HashSet<i64>, mural: Option<&str>) -> 
             rendered_items
                 .into_inner()
                 .into_iter()
-                .map(|(i, tier, text)| SummaryItem {
+                .map(|(i, tier, tokens)| SummaryItem {
                     compartment_id: inputs.summaries[i].sequence.to_string(),
                     tier,
-                    tokens: inputs.counter.count(&text),
+                    tokens,
                 })
                 .collect(),
         ),
@@ -1575,7 +1583,8 @@ mod tests {
             (16, 9),
             "the old estimator admits seven memories that do not fit in real tokens"
         );
-        assert_eq!(exact_history.len(), 5243);
+        assert_eq!(exact_history.len(), 5945);
+        assert!(exact_inputs.counter.count(&exact_history) as f64 <= 2000.0 * 1.05);
         assert_eq!(exact_inputs.history_local_budget_tokens, 2000);
     }
 }
