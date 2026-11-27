@@ -928,20 +928,27 @@ fn tool_definitions(spec: &Spec) -> Result<Vec<Value>, String> {
     if spec.tools.contains(&Tool::GitRead) {
         add("git_read", "Read local Git history in a named lab checkout. Omitted refs default to HEAD except diff (two refs) and ls-files (none).",
             json!({"type":"object","additionalProperties":false,"required":["checkout","command"],"properties":{
-                "checkout":{"type":"string","enum":spec.checkouts.keys().collect::<Vec<_>>()},
-                "command":{"type":"string","enum":git::commands().collect::<Vec<_>>()},
-                "refs":{"type":"array","items":{"type":"string"}},
+                "checkout":{"type":"string","enum":spec.checkouts.keys().collect::<Vec<_>>(),"description":"Name of the lab checkout to read, from the listed choices."},
+                "command":{"type":"string","enum":git::commands().collect::<Vec<_>>(),"description":"Git subcommand to run, from the listed choices."},
+                "refs":{"type":"array","items":{"type":"string"},"description":"List of local commit refs, such as branch names, tags or commit IDs."},
                 "paths":{"type":"array","items":{"type":"string"},"description":"Literal paths relative to the checkout; blame takes one path."},
-                "options":{"type":"array","items":{"type":"string","enum":git::options()}}
+                "options":{"type":"array","items":{"type":"string","enum":git::options()},"description":"List of literal Git flags allowed for the chosen subcommand."}
             }}), true)?;
     }
     if spec.tools.contains(&Tool::MemorySearch) {
         add(
             "memory_search",
-            "Find other project memories about the same subject, or look them up by memory id. Returns active matches first, then archived matches marked as archived, with each memory's category, creation date, importance and text. Does not return messages, summaries or commits.",
+            r##"Find other project memories about the same subject, or look memories up by id.
+
+Retrieval matches meaning and exact words and fuses them, so phrase `query` as a natural-language question that still carries the exact terms you expect (a name, a number, a setting); a bare keyword stack finds less.
+- "which memories say how a release tag is cut again after a failed publish?"
+- Not: "release tag re-cut retry"
+A query that is only memory ids ("#123" or "12, 34") returns those memories.
+
+Returns active matches first, then archived matches marked as archived, with each memory's category, creation date, importance and text. Does not return messages, summaries or commits."##,
             json!({"type":"object","additionalProperties":false,"required":["query"],"properties":{
-                "query":{"type":"string"},
-                "limit":{"type":"integer","minimum":1,"maximum":20,"default":10}
+                "query":{"type":"string","description":"A natural-language question about the subject, carrying the exact terms you expect; or memory ids."},
+                "limit":{"type":"integer","minimum":1,"maximum":20,"default":10,"description":"How many memories to return, 1 to 20."}
             }}),
             true,
         )?;
@@ -949,14 +956,22 @@ fn tool_definitions(spec: &Spec) -> Result<Vec<Value>, String> {
     if spec.tools.contains(&Tool::HistorySearch) {
         add(
             "history_search",
-            "Search the project's history: summaries of past work, the person's own messages, and commits. Ask a question in plain language and include the exact names you expect (a file, a setting, a command). `from` and `to` bound the dates. `order: newest` returns the most recent matches first; use it to learn what was done last about a subject. Each summary hit has a `ref`; `history_read` shows that summary in full.",
+            r#"Search the project's history: summaries of past work, the person's own messages, and commits, each in its own group with dates.
+
+Retrieval matches meaning and exact words and fuses them, so phrase `query` as a natural-language question that still carries the exact terms you expect in the answer (a file, a setting, a command); a bare keyword stack finds less.
+- "why did we stop publishing nightly builds?"  (a decision and its reasons)
+- "when was the `retry_limit` setting renamed, and what is it called now?"  (a later change to something a memory names)
+- "what did the person decide about squash merges?"  (a ruling)
+- Not: "nightly build publish stop"
+
+`from` and `to` bound the dates. `order: newest` returns the most recent matches first; use it to learn what was done last about a subject. Each summary hit has a `ref`; `history_read` shows that summary in full."#,
             json!({"type":"object","additionalProperties":false,"required":["query"],"properties":{
-                "query":{"type":"string"},
+                "query":{"type":"string","description":"A natural-language question carrying the exact terms you expect in the answer."},
                 "from":{"type":"string","description":"Inclusive start date (YYYY-MM-DD in UTC, or a full ISO datetime)."},
                 "to":{"type":"string","description":"Inclusive end date (YYYY-MM-DD in UTC, or a full ISO datetime)."},
                 "limit":{"type":"integer","minimum":1,"maximum":3,"default":1,"description":"1 to 3. Each step adds 4 summaries, 4 of the person's messages and 3 commits."},
                 "order":{"type":"string","enum":["relevance","newest"],"default":"relevance","description":"Use newest to learn what was done most recently about the subject."},
-                "include_agent":{"type":"boolean","default":false}
+                "include_agent":{"type":"boolean","default":false,"description":"Also return the agent's own messages. Off by default, because summaries and the person's messages carry the decisions."}
             }}),
             true,
         )?;
@@ -964,8 +979,10 @@ fn tool_definitions(spec: &Spec) -> Result<Vec<Value>, String> {
     if spec.tools.contains(&Tool::HistoryRead) {
         add("history_read", "Read summaries of past work in full. Give the `ref` of a `history_search` hit or of a memory's `origin`, or a `session` with `from` and `to` dates.",
             json!({"type":"object","additionalProperties":false,"properties":{
-                "ref":{"type":"string"},"session":{"type":"string"},
-                "from":{"type":"string"},"to":{"type":"string"},
+                "ref":{"type":"string","description":"Reference to one summary, in the form <session>:<start>-<end>."},
+                "session":{"type":"string","description":"Session ID to read summaries from when using from and to instead of a ref."},
+                "from":{"type":"string","description":"Inclusive start date (YYYY-MM-DD in UTC, or a full ISO datetime)."},
+                "to":{"type":"string","description":"Inclusive end date (YYYY-MM-DD in UTC, or a full ISO datetime)."},
                 "offset":{"type":"integer","minimum":0,"description":"Continue a long summary from this character position; the previous result names the value."}
             },"oneOf":[{"required":["ref"]},{"required":["session","from","to"]}]}), true)?;
     }

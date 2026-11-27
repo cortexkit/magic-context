@@ -374,6 +374,63 @@ async fn scripted_lab_records_verdicts_and_request_with_only_attribution_in_the_
     assert_eq!(frozen_before, fs::read(&fixture.frozen).unwrap());
 }
 
+fn all_lab_tool_definitions() -> Vec<Value> {
+    let spec = serde_json::from_value(json!({
+        "project":"p", "root":"lab", "store":"lab/frozen.db", "persona_dir":"lab/persona",
+        "checkouts":{"0.50":"lab/0.50"}, "memory_ids":[7,2], "context_files":[], "out_dir":"lab/out",
+        "tools":["git_read","memory_search","history_search","history_read","submit"],
+        "confirm_record_removals":true
+    }))
+    .unwrap();
+    tool_definitions(&spec).unwrap()
+}
+
+#[test]
+fn every_lab_tool_property_has_a_description() {
+    fn check_properties(schema: &Value, path: &str) {
+        if let Some(properties) = schema["properties"].as_object() {
+            for (name, property) in properties {
+                let field = format!("{path}.{name}");
+                assert!(
+                    property["description"]
+                        .as_str()
+                        .is_some_and(|text| !text.trim().is_empty()),
+                    "{field} needs a description"
+                );
+                check_properties(property, &field);
+            }
+        }
+        if let Some(items) = schema.get("items") {
+            check_properties(items, &format!("{path}[]"));
+        }
+    }
+
+    let tools = all_lab_tool_definitions();
+    assert_eq!(tools.len(), 5);
+    for tool in tools {
+        check_properties(&tool["input_schema"], tool["name"].as_str().unwrap());
+    }
+}
+
+#[test]
+fn lab_search_descriptions_warn_against_keyword_stacks() {
+    let tools = all_lab_tool_definitions();
+    for (name, example) in [
+        ("history_search", r#"- Not: "nightly build publish stop""#),
+        ("memory_search", r#"- Not: "release tag re-cut retry""#),
+    ] {
+        let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+        assert!(
+            tool["description"]
+                .as_str()
+                .unwrap()
+                .lines()
+                .any(|line| line == example),
+            "{name} needs its keyword-stack counter-example"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_lab_session_runs_without_our_step_and_output_limits() {
     let fixture = Fixture::new();
@@ -424,7 +481,7 @@ async fn lab_without_sidekick_keeps_its_send_and_request_bytes() {
         pins,
         [
             "b7094a89a773d890f4ef21f2a5175ccb2642986aa577b15c95555e0f3769fbe2",
-            "9eb675f9215e8d3b5577f32212ca69c005e1e661371ce9903d0416c6e0413e54",
+            "db74866b98545ff155d1845f1c155e2a847ca8adb3756f5b30861bc512f6a5ba",
         ]
     );
 }

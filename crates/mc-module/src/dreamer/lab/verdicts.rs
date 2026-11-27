@@ -339,24 +339,25 @@ enum Kind {
 pub(super) fn schema(confirm_record_removals: bool) -> Value {
     let mut schema = json!({
         "type":"object", "additionalProperties":false, "required":["verdicts"],
-        "properties":{"verdicts":{"type":"array","minItems":1,"items":{
+        "properties":{"verdicts":{"type":"array","minItems":1,"description":"List of one or more verdict objects to record for lab memories.","items":{
             "type":"object","additionalProperties":false,
             "required":["id","verdict","life","proof","evidence","note"],
             "properties":{
-                "id":{"type":"integer"},
-                "verdict":{"type":"string","enum":["keep","shorten","rewrite","merge","end","retire","unsure"]},
+                "id":{"type":"integer","description":"Numeric ID of the lab memory being reviewed."},
+                "verdict":{"type":"string","enum":["keep","shorten","rewrite","merge","end","retire","unsure"],"description":"Decision for the memory, from the listed choices."},
                 "into":{"type":"integer","description":"Surviving memory ID, for merge only."},
                 "new_text":{"type":"string","description":"Revised text, for shorten, rewrite and merge only."},
-                "life":{"type":"string","enum":["short","long"]},
-                "proof":{"type":"string","enum":["code","record","outside","none"]},
-                "evidence":{"type":"array","items":{
+                "life":{"type":"string","enum":["short","long"],"description":"Expected useful life of the memory, either short or long."},
+                "proof":{"type":"string","enum":["code","record","outside","none"],"description":"Type of proof for the decision, from the listed choices."},
+                "evidence":{"type":"array","description":"List of evidence objects citing what supports the decision.","items":{
                     "type":"object","additionalProperties":false,"required":["kind","ref","quote"],
                     "properties":{
-                        "kind":{"type":"string","enum":["file","commit","memory","history","doc"]},
-                        "ref":{"type":"string"},"quote":{"type":"string"}
+                        "kind":{"type":"string","enum":["file","commit","memory","history","doc"],"description":"Type of source being cited, from the listed choices."},
+                        "ref":{"type":"string","description":"Reference identifying the source, such as a file path, commit ID, memory ID or history ref."},
+                        "quote":{"type":"string","description":"Excerpt from the cited source that supports the decision."}
                     }
                 }},
-                "note":{"type":"string"},
+                "note":{"type":"string","description":"One-line note summarizing the decision."},
                 "reasoning":{"type":"string","maxLength":1200,"description":"What you checked, what you found, and what would make this verdict wrong."}
             }
         }}}
