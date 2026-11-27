@@ -254,6 +254,202 @@ fn body(arguments: Value) -> Vec<u8> {
     serde_json::to_vec(&json!({"name":"tool.catalog","arguments":arguments})).unwrap()
 }
 
+const IGNORED: &str = "the project's settings file is ignored until it is fixed";
+const APPLIES: &str = "the project's settings apply again";
+
+fn refused(message: &str) -> ConfigError {
+    ConfigError::Refused(ErrorBody::new("value_invalid", message))
+}
+
+#[tokio::test]
+async fn refused_project_catalog_wakes_and_answers_without_waiting_again() {
+    let fixture = catalog_fixture(true).await;
+    let request = head_catalog();
+    let capture = crate::test_log::capture();
+    time::pause();
+    let start = TestInstant::now();
+    let mut waiting = Box::pin(fixture.request(1, &request));
+    assert!(waiting.as_mut().now_or_never().is_none());
+    fixture
+        .handler
+        .on_project_config_error(PROJECT.into(), refused("/transform_mode is not valid here"))
+        .await;
+    let answer = waiting.await;
+    assert_elapsed(start, 0);
+    assert_memory_tool(answer, true);
+
+    for channel in [2, 1] {
+        let start = TestInstant::now();
+        let answer = fixture.request(channel, &request).await;
+        assert_elapsed(start, 0);
+        assert_memory_tool(answer, true);
+        fixture
+            .handler
+            .on_project_config_error(PROJECT.into(), refused("/transform_mode is not valid here"))
+            .await;
+    }
+    let logs = capture.text();
+    assert_eq!(capture.count(IGNORED), 1, "{logs}");
+    for expected in [
+        "WARN",
+        PROJECT,
+        "value_invalid",
+        "/transform_mode is not valid here",
+    ] {
+        assert!(logs.contains(expected), "missing {expected}: {logs}");
+    }
+}
+
+#[tokio::test]
+async fn project_refusal_logs_only_state_changes_and_a_valid_view_applies_again() {
+    let fixture = catalog_fixture(true).await;
+    let request = head_catalog();
+    let capture = crate::test_log::capture();
+    time::pause();
+    for message in [
+        "/a is not valid here",
+        "/b is not valid here",
+        "/a is not valid here",
+    ] {
+        fixture
+            .handler
+            .on_project_config_error(PROJECT.into(), refused(message))
+            .await;
+    }
+    let view = fixture.project_view(Some(json!({"memory":{"enabled":false}})));
+    for _ in 0..2 {
+        fixture.handler.config_apply(view.clone()).await.unwrap();
+        let start = TestInstant::now();
+        let answer = fixture.request(2, &request).await;
+        assert_elapsed(start, 0);
+        assert_memory_tool(answer, false);
+    }
+    fixture
+        .handler
+        .on_project_config_error(PROJECT.into(), refused("/a is not valid here"))
+        .await;
+    let start = TestInstant::now();
+    let answer = fixture.request(1, &request).await;
+    assert_elapsed(start, 0);
+    assert_memory_tool(answer, true);
+
+    let logs = capture.text();
+    let changes: Vec<_> = logs
+        .lines()
+        .filter(|line| line.contains(IGNORED) || line.contains(APPLIES))
+        .collect();
+    assert_eq!(changes.len(), 5, "{logs}");
+    for (line, expected) in changes.iter().zip([
+        "/a is not valid here",
+        "/b is not valid here",
+        "/a is not valid here",
+        APPLIES,
+        "/a is not valid here",
+    ]) {
+        assert!(line.contains(expected), "{logs}");
+    }
+    assert!(
+        changes[3].contains("INFO") && changes[3].contains(PROJECT),
+        "{logs}"
+    );
+}
+
+#[tokio::test]
+async fn transient_project_errors_do_not_end_the_catalog_wait() {
+    let fixture = catalog_fixture(true).await;
+    let request = head_catalog();
+    let capture = crate::test_log::capture();
+    time::pause();
+    let start = TestInstant::now();
+    let mut waiting = Box::pin(fixture.request(1, &request));
+    assert!(waiting.as_mut().now_or_never().is_none());
+    for error in [
+        ConfigError::Protocol("missing project view".into()),
+        ConfigError::ConnectionClosed,
+    ] {
+        fixture
+            .handler
+            .on_project_config_error(PROJECT.into(), error)
+            .await;
+        assert!(waiting.as_mut().now_or_never().is_none());
+    }
+    assert_busy(waiting.await);
+    assert_elapsed(start, 2);
+    assert_eq!(capture.count(IGNORED), 0, "{}", capture.text());
+}
+
+#[tokio::test]
+async fn setup_still_answers_immediately_after_a_project_refusal() {
+    use cortexkit_role_compaction::rules::{EditCost, ProviderRules, SignedParts};
+    use cortexkit_role_compaction::setup::{ModelRef, SetupAnswer, SetupRequest};
+
+    let fixture = catalog_fixture(true).await;
+    fixture.bind(3, RouteRole::Compaction, PROJECT);
+    let body = wire::encode(
+        ops::COMPACTION_SETUP,
+        &SetupRequest::new(
+            "worker",
+            ModelRef::new("anthropic", "claude-opus-5-5"),
+            200_000,
+            1_000,
+            ProviderRules::new(SignedParts::None, EditCost::Suffix),
+            Vec::new(),
+            1,
+        ),
+    );
+    fixture
+        .handler
+        .on_project_config_error(PROJECT.into(), refused("/transform_mode is not valid here"))
+        .await;
+    time::pause();
+    let start = TestInstant::now();
+    let reply = fixture.request(3, &body).await.unwrap();
+    assert_elapsed(start, 0);
+    assert!(matches!(
+        serde_json::from_slice(&reply).unwrap(),
+        SetupAnswer::Ready
+    ));
+}
+
+#[tokio::test]
+async fn sdk_passes_the_project_refusal_and_later_catalogs_still_queue_a_refresh() {
+    let mut fixture = catalog_fixture(true).await;
+    let request = head_catalog();
+    let CatalogFixture {
+        handler,
+        handle,
+        wire,
+        ..
+    } = &mut fixture;
+    let call = |channel| handler.dispatch_at(channel, &request, Instant::now(), Some(handle));
+    let mut waiting = Box::pin(call(1));
+    let get = tokio::select! {
+        _ = &mut waiting => panic!("catalog answered before the project refresh"),
+        get = next(wire) => get,
+    };
+    let project_get = json!({"op":"config.get", "project_id":PROJECT});
+    assert_eq!(
+        serde_json::from_slice::<Value>(&get.body).unwrap(),
+        project_get
+    );
+    reply(
+        wire,
+        &get,
+        FrameType::Error,
+        ErrorBody::new("value_invalid", "/transform_mode is not valid here"),
+    )
+    .await;
+    assert_memory_tool(waiting.await, true);
+
+    let next_catalog = call(2).now_or_never().expect("known refusal must not wait");
+    assert_memory_tool(next_catalog, true);
+    let retry = next(wire).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&retry.body).unwrap(),
+        project_get
+    );
+}
+
 #[tokio::test]
 async fn cold_scoped_catalog_waits_for_project_settings_without_setup() {
     let mut fixture = catalog_fixture(true).await;

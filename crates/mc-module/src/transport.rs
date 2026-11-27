@@ -2565,6 +2565,18 @@ impl ModuleHandler for Handler {
             loader.on_config_error(&error);
         }
     }
+
+    #[cfg(feature = "managed-settings")]
+    async fn on_project_config_error(
+        &self,
+        project_id: String,
+        error: subc_client_rs::config::ConfigError,
+    ) {
+        if let Some(loader) = self.module.config().loader() {
+            loader.on_project_config_error(project_id, error);
+        }
+    }
+
     /// Record who opened the route and for which session. Only a module the
     /// daemon attests can open one: the runner's identity is the attested
     /// module, the session is the route's bind identity, and the project is

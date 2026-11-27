@@ -97,6 +97,10 @@ enum ProjectState {
         fallback_at: AsyncInstant,
     },
     View(Tiers),
+    Refused {
+        code: String,
+        message: String,
+    },
 }
 
 /// The user tier's source under managed settings.
@@ -303,6 +307,16 @@ impl Managed {
         }
     }
 
+    fn project_answered(&self, id: &str) -> bool {
+        matches!(
+            self.projects
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(id),
+            Some(ProjectState::View(_) | ProjectState::Refused { .. })
+        )
+    }
+
     fn project_fallback_deadline(&self, id: &str, now: AsyncInstant) -> Option<AsyncInstant> {
         match self
             .projects
@@ -313,6 +327,8 @@ impl Managed {
                 fallback_at: now + FIRST_STATE_WAIT,
             }) {
             ProjectState::View(_) => None,
+            // Use the user settings for now, but still queue another project read.
+            ProjectState::Refused { .. } => Some(now),
             ProjectState::Waiting { fallback_at } => Some(*fallback_at),
         }
     }
@@ -340,27 +356,59 @@ impl Managed {
                 }
             }
         }
-        // The daemon reports refused files. Only a delivered view replaces
-        // these tiers; a refused refresh leaves the last usable view intact.
-        self.projects
+        let previous = self
+            .projects
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id.to_owned(), ProjectState::View(tiers));
+        if matches!(previous, Some(ProjectState::Refused { .. })) {
+            tracing::info!(project_id = %id, "ck-mc: the project's settings apply again");
+        }
         self.project_changed.notify_waiters();
         Ok(())
     }
 
-    fn config_error(&self, error: &ConfigError) {
+    fn config_error(&self, error: &ConfigError) -> bool {
         // Remove the refusal fallback once every supported daemon advertises
         // project settings in HELLO_ACK. File refusals don't signal support.
-        if !self.projects_advertised.load(Ordering::Relaxed)
+        let unsupported = !self.projects_advertised.load(Ordering::Relaxed)
             && matches!(error, ConfigError::Refused(body) if matches!(body.code.as_str(),
-                "unknown_control_op" | "capability_not_advertised"))
-            && !self.projects_unsupported.swap(true, Ordering::Relaxed)
-        {
+                "unknown_control_op" | "capability_not_advertised"));
+        if unsupported && !self.projects_unsupported.swap(true, Ordering::Relaxed) {
             tracing::info!("ck-mc: daemon does not serve project settings; using the user view");
             self.project_changed.notify_waiters();
         }
+        unsupported
+    }
+
+    fn project_config_error(&self, id: String, error: ConfigError) {
+        if self.config_error(&error) {
+            return;
+        }
+        let ConfigError::Refused(body) = error else {
+            return;
+        };
+        let mut projects = self.projects.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(projects.get(&id), Some(ProjectState::Refused { code, message })
+            if code == &body.code && message == &body.message)
+        {
+            return;
+        }
+        tracing::warn!(
+            project_id = %id,
+            code = %body.code,
+            daemon_message = %body.message,
+            "ck-mc: the project's settings file is ignored until it is fixed"
+        );
+        projects.insert(
+            id,
+            ProjectState::Refused {
+                code: body.code,
+                message: body.message,
+            },
+        );
+        drop(projects);
+        self.project_changed.notify_waiters();
     }
 
     /// The daemon has no config gate: read the user file.
@@ -656,7 +704,7 @@ impl Loader {
                 let changed = managed.project_changed.notified();
                 tokio::pin!(changed);
                 changed.as_mut().enable();
-                if managed.project_tiers(id).is_some() || !self.project_settings_available() {
+                if managed.project_answered(id) || !self.project_settings_available() {
                     return;
                 }
                 changed.await;
@@ -677,6 +725,12 @@ impl Loader {
     pub(crate) fn on_config_error(&self, error: &ConfigError) {
         if let Some(managed) = &self.managed {
             managed.config_error(error);
+        }
+    }
+
+    pub(crate) fn on_project_config_error(&self, id: String, error: ConfigError) {
+        if let Some(managed) = &self.managed {
+            managed.project_config_error(id, error);
         }
     }
 
