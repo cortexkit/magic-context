@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, jest, spyOn, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAutoSearchDiagnostics } from "../../features/magic-context/auto-search-diagnostics";
@@ -23,6 +23,7 @@ const directories: string[] = [];
 const databases: Database[] = [];
 afterEach(() => {
     _resetAutoSearchCache();
+    jest.useRealTimers();
     for (const db of databases.splice(0)) db.close();
     for (const directory of directories.splice(0)) cleanupTestTempDir(directory);
 });
@@ -118,6 +119,7 @@ test("a deadline stops waiting but keeps the worker, and the next turn finds the
 
 test("a search of a session whose earlier search is still running is skipped, not queued", async () => {
     const db = fixture();
+    jest.useFakeTimers({ doNotFake: ["setImmediate"] });
     const deadline = new AbortController();
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<null>();
@@ -130,15 +132,20 @@ test("a search of a session whose earlier search is still running is skipped, no
             return release.promise;
         },
     });
-    await entered.promise;
-    deadline.abort();
-    expect(await first).toEqual([]);
-    const started = performance.now();
     try {
-        await expect(
-            searchAutoHint(db, "session", "/synthetic", query, options),
-        ).rejects.toBeInstanceOf(AutoSearchBusyError);
-        expect(performance.now() - started).toBeLessThan(150);
+        await Promise.race([entered.promise, first]);
+        deadline.abort();
+        expect(await first).toEqual([]);
+        let failure: unknown;
+        const second = searchAutoHint(db, "session", "/synthetic", query, options).catch(
+            (error) => {
+                failure = error;
+            },
+        );
+        // Admission must not wait for the still-pending vector call or a timer.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(failure).toBeInstanceOf(AutoSearchBusyError);
+        await second;
     } finally {
         release.resolve(null);
     }

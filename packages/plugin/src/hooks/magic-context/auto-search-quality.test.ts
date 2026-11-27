@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, jest, spyOn, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as embedding from "../../features/magic-context/memory/embedding";
@@ -20,12 +20,31 @@ import { searchAutoHint } from "./auto-search-worker-client";
 const directories: string[] = [];
 const databases: Database[] = [];
 const { buildAutoSearchHint, selectAutoSearchResults } = hints;
+let clock: ReturnType<typeof spyOn<typeof performance, "now">> | undefined;
 afterEach(() => {
     _resetAutoSearchCache();
+    clock?.mockRestore();
+    clock = undefined;
+    jest.useRealTimers();
     for (const db of databases.splice(0)) db.close();
     for (const directory of directories.splice(0)) cleanupTestTempDir(directory);
     _resetHarnessForTesting();
 });
+
+function useSearchClock() {
+    jest.useFakeTimers({ doNotFake: ["setImmediate", "performance"] });
+    const started = Date.now();
+    clock = spyOn(performance, "now").mockImplementation(() => Date.now() - started);
+}
+
+function expireVectorBudget(signal: AbortSignal | undefined) {
+    expect(signal?.aborted).toBe(false);
+    jest.advanceTimersByTime(199);
+    expect(signal?.aborted).toBe(false);
+    jest.advanceTimersByTime(1);
+    expect(signal?.aborted).toBe(true);
+}
+
 function fixture() {
     const directory = createTestTempDirFromPath(join(tmpdir(), "auto-hint-quality-"));
     directories.push(directory);
@@ -271,24 +290,19 @@ test("task notifications are removed at indexing and rendering", () => {
 test("late vectors fall back to keyword results without discarding the hint", async () => {
     const f = fixture();
     f.message(1, "archived", "historian cache wiring answer");
-    let aborted = false;
-    const started = performance.now();
-    const results = await searchAutoHint(f.db, "session", "/synthetic", "historian cache wiring", {
+    useSearchClock();
+    const embeddingEntered = Promise.withResolvers<AbortSignal | undefined>();
+    const search = searchAutoHint(f.db, "session", "/synthetic", "historian cache wiring", {
         ...options,
         embedQuery: async (_text, signal) =>
             new Promise((resolve) => {
-                signal?.addEventListener(
-                    "abort",
-                    () => {
-                        aborted = true;
-                        resolve(null);
-                    },
-                    { once: true },
-                );
+                signal?.addEventListener("abort", () => resolve(null), { once: true });
+                embeddingEntered.resolve(signal);
             }),
     });
-    expect(aborted).toBe(true);
-    expect(performance.now() - started).toBeLessThan(1000);
+    const signal = await Promise.race([embeddingEntered.promise, search.then(() => undefined)]);
+    expireVectorBudget(signal);
+    const results = await search;
     expect(selectAutoSearchResults(results, 0.6).map((result) => result.source)).toEqual([
         "message",
     ]);
@@ -378,6 +392,7 @@ test("a query embedding that never answers is abandoned at the vector budget and
     );
     const backfill = spyOn(workers, "queueAutoSearchBackfill").mockResolvedValue();
     let calls = 0;
+    let embeddingEntered = Promise.withResolvers<AbortSignal | undefined>();
     const embed = spyOn(embedding, "embedTextForProject").mockImplementation(
         async (_project, _text, signal) =>
             new Promise((resolve) => {
@@ -385,17 +400,20 @@ test("a query embedding that never answers is abandoned at the vector budget and
                 // Only an abort can release this call, so a served hint proves the
                 // search stopped waiting for it.
                 signal?.addEventListener("abort", () => resolve(null), { once: true });
+                embeddingEntered.resolve(signal);
             }),
     );
     try {
+        useSearchClock();
         for (let index = 0; index < 5; index++) {
+            embeddingEntered = Promise.withResolvers<AbortSignal | undefined>();
             const messages = [
                 {
                     info: { id: `warm-${index}`, role: "user" },
                     parts: [{ type: "text", text: "historian cache wiring" }],
                 },
             ];
-            await runAutoSearchHint({
+            const search = runAutoSearchHint({
                 db: f.db,
                 sessionId: "session",
                 messages,
@@ -406,6 +424,12 @@ test("a query embedding that never answers is abandoned at the vector budget and
                     minPromptChars: 10,
                 },
             });
+            const signal = await Promise.race([
+                embeddingEntered.promise,
+                search.then(() => undefined),
+            ]);
+            expireVectorBudget(signal);
+            await search;
             expect(messages[0].parts[0].text).toContain("<ctx-search-hint>");
         }
         expect(calls).toBe(5);

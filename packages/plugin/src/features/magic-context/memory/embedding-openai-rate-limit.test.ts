@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, spyOn, test } from "bun:test";
 import * as logger from "../../../shared/logger";
 import { normalizeCompartmentChunkMaxInputTokens } from "../compartment-chunk-embedding";
 import {
@@ -71,6 +71,8 @@ async function waitFor(condition: () => boolean, timeoutMs = 2_000): Promise<voi
     }
 }
 
+const flushEmbeddings = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 describe("OpenAICompatibleEmbeddingProvider HTTP 429 back-pressure", () => {
     let server: FakeEmbeddingServer | undefined;
 
@@ -78,6 +80,7 @@ describe("OpenAICompatibleEmbeddingProvider HTTP 429 back-pressure", () => {
         _resetOpenAICompatibleEmbeddingStateForTests();
     });
     afterEach(() => {
+        jest.useRealTimers();
         server?.stop();
         server = undefined;
         _resetOpenAICompatibleEmbeddingStateForTests();
@@ -137,16 +140,42 @@ describe("OpenAICompatibleEmbeddingProvider HTTP 429 back-pressure", () => {
                 : { status: 200 },
         );
         const provider = providerFor(server.endpoint, 8_000);
-
-        const vectors = await provider.embedBatch(["stored passage"]);
-
-        expect(vectors[0]).not.toBeNull();
-        expect(server.arrivals).toHaveLength(limitedResponses + 1);
-        for (let index = 1; index < server.arrivals.length; index++) {
-            expect(
-                (server.arrivals[index] as number) - (server.arrivals[index - 1] as number),
-            ).toBeGreaterThanOrEqual(990);
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        const started = Date.now();
+        let cooldown = Promise.withResolvers<void>();
+        const logged = spyOn(logger, "log").mockImplementation((message) => {
+            if (message.includes("rate limited (HTTP 429)")) cooldown.resolve();
+        });
+        const batch = provider.embedBatch(["stored passage"]);
+        try {
+            for (let index = 0; index < limitedResponses; index++) {
+                // The endpoint replied and the client recorded the cooldown.
+                expect(
+                    await Promise.race([
+                        cooldown.promise.then(() => true),
+                        batch.then(() => false),
+                    ]),
+                ).toBe(true);
+                cooldown = Promise.withResolvers<void>();
+                await flushEmbeddings();
+                expect(provider._getRateLimitedUntil()).toBe(started + (index + 1) * 1_000);
+                jest.advanceTimersByTime(999);
+                await flushEmbeddings();
+                expect(server.arrivals).toHaveLength(index + 1);
+                jest.advanceTimersByTime(1);
+            }
+        } finally {
+            logged.mockRestore();
         }
+        const vectors = await batch;
+        expect(vectors[0]).not.toBeNull();
+        expect(server.arrivals).toEqual([
+            started,
+            started + 1_000,
+            started + 2_000,
+            started + 3_000,
+            started + 4_000,
+        ]);
         expect(provider._getCircuitState()).toBe("closed");
         expect(provider._getFailureCount()).toBe(0);
         expect(provider.getLastFailureReason()).toBeNull();
@@ -157,17 +186,23 @@ describe("OpenAICompatibleEmbeddingProvider HTTP 429 back-pressure", () => {
             index === 0 ? { status: 429, headers: { "Retry-After": "30" } } : { status: 200 },
         );
         const provider = providerFor(server.endpoint, 8_000);
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
 
         // The query that hits the 429 itself does not wait for the cooldown.
         const firstStarted = Date.now();
         expect(await provider.embed("first query", undefined, "query")).toBeNull();
-        expect(Date.now() - firstStarted).toBeLessThan(1_000);
+        expect(Date.now()).toBe(firstStarted);
+        expect(provider._getRateLimitedUntil()).toBe(firstStarted + 30_000);
         expect(server.arrivals).toHaveLength(1);
 
         const failuresBefore = provider._getFailureCount();
-        const started = Date.now();
-        expect(await provider.embed("during cooldown", undefined, "query")).toBeNull();
-        expect(Date.now() - started).toBeLessThan(100);
+        let query: Float32Array | null | undefined;
+        const during = provider.embed("during cooldown", undefined, "query").then((vector) => {
+            query = vector;
+        });
+        await flushEmbeddings();
+        expect(query).toBeNull();
+        await during;
         expect(server.arrivals).toHaveLength(1);
         expect(provider._getFailureCount()).toBe(failuresBefore);
         expect(provider._getCircuitState()).toBe("closed");
@@ -176,10 +211,22 @@ describe("OpenAICompatibleEmbeddingProvider HTTP 429 back-pressure", () => {
         // another provider instance (another project) on the same endpoint and key.
         const sibling = providerFor(server.endpoint, 8_000);
         const controller = new AbortController();
-        setTimeout(() => controller.abort(), 50);
-        const backgroundStarted = Date.now();
-        expect(await sibling.embedBatch(["stored text"], controller.signal)).toEqual([null]);
-        expect(Date.now() - backgroundStarted).toBeLessThan(1_000);
+        let result: (Float32Array | null)[] | undefined;
+        const background = sibling
+            .embedBatch(["stored text"], controller.signal)
+            .then((vectors) => {
+                result = vectors;
+            });
+        await flushEmbeddings();
+        jest.advanceTimersByTime(50);
+        await flushEmbeddings();
+        expect(result).toBeUndefined();
+        expect(server.arrivals).toHaveLength(1);
+        controller.abort();
+        await flushEmbeddings();
+        expect(result).toEqual([null]);
+        expect(Date.now()).toBe(firstStarted + 50);
+        await background;
         expect(server.arrivals).toHaveLength(1);
     });
 
