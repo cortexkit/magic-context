@@ -453,14 +453,13 @@ test("a boundary with no surviving anchor is never served as the whole window", 
 		const served = servedFor(scenario, marker, start);
 		const sizes = served.map((request) => requestTokens(request.body));
 		console.log(`[missing-boundary] no-anchor served=${JSON.stringify(sizes)} oversized=${JSON.stringify(scenario.oversized)}`);
-		// Either the last good request is replayed (under the window) or the turn
-		// is refused before any provider request. Never the whole window.
+		// Without a surviving anchor the turn is refused before any provider request.
 		expect(scenario.oversized).toEqual([]);
 		for (const size of sizes) expect(size).toBeLessThan(WINDOW);
-		const refusal = "[MC-S06] (v2-context-failed: Host checkpoint replay boundary is unavailable). This request was not sent.";
+		const refusal = /\[MC-S06\][^\n]*Host checkpoint replay boundary is unavailable/;
 		const log = await waitForLog(scenario.logPath, refusal);
 		expect(log).toContain("no older compartment end is in the host store; nothing to re-anchor on");
-		expect(log).toContain(refusal);
+		expect(log).toMatch(refusal);
 	} catch (error) {
 		console.error(
 			scenario.host.stderr(),

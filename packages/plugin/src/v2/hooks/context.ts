@@ -125,7 +125,11 @@ import {
 } from "../../hooks/magic-context/storage-busy-refusal";
 import { retirePendingSystemPromptDelivery } from "../../hooks/magic-context/system-prompt-delivery";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
-import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
+import {
+    createTransform,
+    rendersCompartmentHistory,
+    type TransformDeps,
+} from "../../hooks/magic-context/transform";
 import {
     isClearlyOverWindow,
     UnmanagedOverWindowError,
@@ -605,6 +609,33 @@ export function checkHistoryBoundary(
         sessionLog(sessionID, "history boundary check failed; continuing without repair", error);
         return undefined;
     }
+}
+
+function newBaselineStartAfter(
+    db: Database,
+    reader: Pick<V2StoreReader, "sequenceForId">,
+    sessionID: string,
+    cached: { id: string | null; hasBytes: number } | null,
+    compactionOff: boolean,
+): string | undefined {
+    if (cached?.id != null || cached?.hasBytes) return undefined;
+    // The managed hook resolves the session mode before restoring history. An
+    // unknown mode cannot prove that this pass will render the summary head.
+    const isSubagent = storedSubagentMode(db, sessionID);
+    if (isSubagent === undefined || !rendersCompartmentHistory(isSubagent, compactionOff))
+        return undefined;
+    const newest = db
+        .prepare(
+            "SELECT end_message_id AS id, rebase_status AS status FROM compartments WHERE session_id = ? ORDER BY sequence DESC LIMIT 1",
+        )
+        .get(sessionID) as { id: string | null; status: string } | null;
+    if (
+        newest?.id &&
+        newest.status !== "unresolved" &&
+        reader.sequenceForId(sessionID, newest.id) !== undefined
+    )
+        return newest.id;
+    return undefined;
 }
 
 /**
@@ -2519,9 +2550,9 @@ export async function registerContext(context: V2Context) {
         messages: V2Message[];
         cut: NonNullable<ReturnType<V2StoreReader["latestCompaction"]>>;
         incoming: V2Message;
-        boundaryRepair: HistoryBoundaryRepair | undefined;
+        canRebuild?: true;
     }): Promise<V2Message[]> => {
-        const { db, reader, draft, cut, boundaryRepair } = args;
+        const { db, reader, draft, cut } = args;
         // Rust mode restores against the boundary the module itself published and
         // keeps that boundary row, because the array handed to the module has to
         // begin there — exactly where an OpenCode 1 compaction row would have made
@@ -2532,20 +2563,23 @@ export async function registerContext(context: V2Context) {
         const moduleBoundarySeq = moduleBoundaryID
             ? reader.sequenceForId(draft.sessionID, moduleBoundaryID)
             : undefined;
-        const repairAnchor =
-            boundaryRepair?.kind === "repaired" || boundaryRepair?.kind === "baseline-reset"
-                ? boundaryRepair.anchorEndMessageId
+        const cached = db
+            .prepare(
+                "SELECT cached_m0_last_baseline_end_message_id AS id, cached_m0_bytes IS NOT NULL AS hasBytes FROM session_meta WHERE session_id = ?",
+            )
+            .get(draft.sessionID) as { id: string | null; hasBytes: number } | null;
+        // The shared first render trims through the newest summary. Use
+        // that stored end even if a previous attempt committed a repair but
+        // failed before writing the new baseline.
+        // A read-only replay cannot render and save a fresh baseline.
+        const newStart =
+            args.canRebuild && !rustModeModuleClient
+                ? newBaselineStartAfter(db, reader, draft.sessionID, cached, compactionOff)
                 : undefined;
-        const boundaryID =
-            (
-                db
-                    .prepare(
-                        "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id = ?",
-                    )
-                    .get(draft.sessionID) as { id: string | null } | null
-            )?.id ??
-            repairAnchor ??
-            null;
+        const nativeFloor = await nativeFoldReplay?.restorationFloor(draft.sessionID, cut, reader, {
+            allowMissingFloor: newStart !== undefined,
+        });
+        const boundaryID = cached?.id ?? (nativeFloor === undefined ? newStart : undefined) ?? null;
         // Restore only rows after the cached message prefix and before the host
         // checkpoint; older rows are already present in the cached messages. The
         // first fold has no cached prefix, so it starts immediately before the
@@ -2558,22 +2592,16 @@ export async function registerContext(context: V2Context) {
         const servedBoundary = boundaryID
             ? servedBoundaryRow(reader, draft.sessionID, boundaryID)
             : null;
-        // Repair cleared the cached prefix. A missing native floor must not
-        // prevent rebuilding it from the surviving anchor, but a proven floor
-        // still takes precedence when it covers more of the stored history.
-        const nativeFloor = await nativeFoldReplay?.restorationFloor(draft.sessionID, cut, reader, {
-            allowMissingFloor: repairAnchor !== undefined,
-        });
         const retiredInstructions =
             (await nativeFoldReplay?.instructionRetirement(draft.sessionID, reader)) ??
             (() => false);
         const floor = Math.max(
+            // A valid native floor still wins when higher; rows between the
+            // summary end and that floor are not restored.
             nativeFloor ?? -Infinity,
             // A changed hidden row may have lived inside the frozen
             // prefix. Make it available to the shared-path rebuild too.
-            ((nativeFloor !== undefined || repairAnchor === undefined) &&
-            nativeFoldReplay?.sourceChanged(draft.sessionID) &&
-            !rustModeModuleClient
+            (nativeFoldReplay?.sourceChanged(draft.sessionID) && !rustModeModuleClient
                 ? (reader.earliestSequence(draft.sessionID) ?? 0) - 1
                 : undefined) ??
                 (moduleBoundarySeq !== undefined ? moduleBoundarySeq - 1 : undefined) ??
@@ -3035,7 +3063,6 @@ export async function registerContext(context: V2Context) {
                                     messages,
                                     cut: localCut,
                                     incoming,
-                                    boundaryRepair: undefined,
                                 });
                             }
                         } else if (localCut) return undefined;
@@ -3443,7 +3470,7 @@ export async function registerContext(context: V2Context) {
                             messages: draft.messages,
                             cut: localCut,
                             incoming,
-                            boundaryRepair,
+                            canRebuild: true,
                         })),
                     );
                 }

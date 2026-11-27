@@ -1,7 +1,11 @@
 import { expect, spyOn, test } from "bun:test";
 import { NativeFoldReplay } from "../fold/native-replay";
 import { IMPORTED_MC_SUMMARY } from "../fold/native-replay-v3";
-import { type Oc2ContextFixture, oc2ContextFixture } from "./__tests__/oc2-context.fixture";
+import {
+    installTransientFailure,
+    type Oc2ContextFixture,
+    oc2ContextFixture,
+} from "./__tests__/oc2-context.fixture";
 import { HEAD_IDS } from "./payload";
 import type { SessionContext } from "./types";
 
@@ -59,6 +63,14 @@ function cachedEnd(f: Oc2ContextFixture): string | null {
     ).id;
 }
 
+function cachedBaseline(f: Oc2ContextFixture): { id: string | null; bytes: Buffer | null } {
+    return f.db
+        .prepare(
+            "SELECT cached_m0_last_baseline_end_message_id AS id, cached_m0_bytes AS bytes FROM session_meta WHERE session_id = ?",
+        )
+        .get(f.session) as { id: string | null; bytes: Buffer | null };
+}
+
 function prefix(draft: SessionContext, before: string): string {
     const index = draft.messages.findIndex(({ id }) => id === before);
     expect(index).toBeGreaterThan(0);
@@ -66,6 +78,70 @@ function prefix(draft: SessionContext, before: string): string {
         system: draft.system,
         tools: draft.tools,
         messages: draft.messages.slice(0, index),
+    });
+}
+
+for (const [description, restart, seed] of [
+    ["transient failure on the repair pass", false, 62907],
+    ["transient failure on the repair pass, then a restart", true, 62908],
+] as const) {
+    test(description, async () => {
+        const failure = installTransientFailure();
+        const f = await oc2ContextFixture(seed, options);
+        try {
+            const { anchor, newest } = seedSummaries(f);
+            await f.pass();
+            const cut = await f.nativeFold(3, 2, "", "manual");
+            f.user("repair turn", 1000);
+            deleteBoundary(f, newest.id);
+            await f.restart();
+            failure.state.failNext = true;
+
+            const failed = await f.attempt();
+            expect(failed.error).toBeInstanceOf(Error);
+            expect(failed.logs.join("\n")).toContain("re-anchored on compartment");
+            expect(failed.logs.join("\n")).toContain("storage-busy");
+            expect(cachedBaseline(f)).toEqual({ id: null, bytes: null });
+            expect(
+                f.db
+                    .prepare("SELECT end_message_id FROM compartments WHERE session_id = ?")
+                    .all(f.session),
+            ).toEqual([{ end_message_id: anchor.id }]);
+
+            if (restart) await f.restart();
+            const retry = await f.attempt();
+            expect(retry.logs.join("\n")).not.toContain("history boundary repair:");
+            expect(retry.error).toBeUndefined();
+            const checkpoint = f.raw
+                .prepare("SELECT seq FROM session_message WHERE id = ?")
+                .get(cut) as { seq: number };
+            expect(
+                storedIDs(f, anchor.seq, checkpoint.seq - 1).some(
+                    (id) => !retry.inputIds.includes(id),
+                ),
+            ).toBe(true);
+            expect(rawIDs(retry.draft)).toEqual(storedIDs(f, anchor.seq));
+            expect(cachedEnd(f)).toBe(anchor.id);
+
+            f.user("next turn", 1000);
+            deleteBoundary(f, newest.id);
+            const nextID = f.rows.at(-1)!.id;
+            const next = await f.pass();
+            expect(rawIDs(next.draft)).toEqual(storedIDs(f, anchor.seq));
+            expect(prefix(next.draft, nextID)).toBe(
+                JSON.stringify({
+                    system: retry.draft.system,
+                    tools: retry.draft.tools,
+                    messages: retry.draft.messages,
+                }),
+            );
+            expect(next.logs.join("\n")).not.toMatch(
+                /history boundary repair:|HARD.*executed=true/,
+            );
+        } finally {
+            failure.restore();
+            await f.cleanup();
+        }
     });
 }
 
@@ -166,7 +242,8 @@ test("repair without a local host checkpoint continues to restore the host's unc
     }
 });
 
-test("repair with a higher imported floor keeps the existing bounded restoration", async () => {
+// A fix that restores the uncovered rows should turn these tests red on purpose.
+test("known gap: rows between the newest summary and a higher imported floor are not restored", async () => {
     const f = await oc2ContextFixture(62905, options);
     const native = spyOn(NativeFoldReplay.prototype, "restore");
     try {
@@ -206,7 +283,7 @@ test("repair with a higher imported floor keeps the existing bounded restoration
     }
 });
 
-test("an admissible native replay still precedes a cached-boundary reset", async () => {
+test("known gap: a cached-boundary reset can replay a higher native floor and omit uncovered rows", async () => {
     const f = await oc2ContextFixture(62906, options);
     const native = spyOn(NativeFoldReplay.prototype, "restore");
     try {

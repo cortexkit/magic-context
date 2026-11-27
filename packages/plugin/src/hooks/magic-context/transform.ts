@@ -898,6 +898,10 @@ function fitRequestCounts(
 // signed-fit refusal, check later requests against the model window even if thinking was omitted.
 const SIGNED_FIT_REFUSED_MARKER = "signed_fit:refused:v1";
 
+export function rendersCompartmentHistory(isSubagent: boolean, compactionOff: boolean): boolean {
+    return !isSubagent && !compactionOff;
+}
+
 export function createTransform(deps: TransformDeps) {
     registerSystemDateRefresh(deps.historyRefreshSessions);
     const finalWireUsage = createFinalWireUsageTracker();
@@ -2885,7 +2889,7 @@ export function createTransform(deps: TransformDeps) {
         // render, no raw-tail trim, no boundary splice, no marker write.
         // Memory/docs surfaces materialize independently through the
         // zero-compartment m[0]/m[1] path in postprocess.
-        if (fullFeatureMode && !compactionOff) {
+        if (rendersCompartmentHistory(reducedMode, compactionOff)) {
             const tInj = performance.now();
             pendingCompartmentInjection = prepareCompartmentInjection(
                 db,
