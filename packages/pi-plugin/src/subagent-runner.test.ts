@@ -8,7 +8,7 @@ import {
 	mock,
 	spyOn,
 } from "bun:test";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import {
 	existsSync,
 	mkdirSync,
@@ -4900,6 +4900,157 @@ describe("Pi dreamer prompt-token budget", () => {
 				},
 			});
 		expect(await run).toMatchObject({ ok: false, reason: "token_budget" });
+	});
+
+	async function budgetScript() {
+		const child = createMockChild();
+		const { runner } = runnerWith(child, {
+			invocation,
+			subagentExtensions: ["subagent-entry.js"],
+		});
+		const prompt = once(child.stdin, "data");
+		const run = runner.run({
+			...baseOptions,
+			agent: "dreamer-memory-mapper",
+			tokenBudget: 100,
+		});
+		await prompt;
+		const issueCalls = (input: number, ...ids: string[]) =>
+			child.writeStdoutLine({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					usage: { input },
+					stopReason: "toolUse",
+					content: ids.map((id) => ({ type: "toolCall", id, name: "read" })),
+				},
+			});
+		const queueSteer = () => {
+			expect(child.stdinText).toContain("dreamer-finalize");
+			child.writeStdoutLine({
+				type: "response",
+				command: "steer",
+				id: "dreamer-finalize",
+				success: true,
+			});
+		};
+		const deliverSteer = () => {
+			const steer = JSON.parse(child.stdinText.trimEnd().split("\n").at(-1)!);
+			child.writeStdoutLine({
+				type: "message_end",
+				message: {
+					role: "user",
+					content: [{ type: "text", text: steer.message }],
+				},
+			});
+		};
+		const refuse = (id: string) =>
+			child.writeStdoutLine({
+				type: "tool_execution_end",
+				toolCallId: id,
+				toolName: "read",
+				isError: true,
+				result: {
+					content: [
+						{
+							type: "text",
+							text: "Out of token budget: no more tool calls. Output your result now.",
+						},
+					],
+				},
+			});
+		const answer = () => {
+			child.writeStdoutLine({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					usage: { input: 1 },
+					stopReason: "stop",
+					content: [
+						{ type: "text", text: '<verify><verified id="1"/></verify>' },
+					],
+				},
+			});
+			child.emitClose();
+		};
+		return { child, run, issueCalls, queueSteer, deliverSteer, refuse, answer };
+	}
+
+	it.each([
+		2, 3,
+	])("accepts the finalize answer after %i pending reads are refused", async (count) => {
+		const { run, issueCalls, queueSteer, deliverSteer, refuse, answer } =
+			await budgetScript();
+		const ids = Array.from({ length: count }, (_, i) => `queued-${i}`);
+		issueCalls(81, ...ids);
+		refuse(ids[0]!);
+		queueSteer();
+		for (const id of ids.slice(1).reverse()) refuse(id);
+		deliverSteer();
+		answer();
+		expect(await run).toMatchObject({
+			ok: true,
+			assistantText: '<verify><verified id="1"/></verify>',
+			meta: { tokenBudget: { finalizeFired: true, refusedCalls: 0 } },
+		});
+	});
+
+	it("spares a refused pending read but stops after two reads issued in response to finalize", async () => {
+		const { child, run, issueCalls, queueSteer, deliverSteer, refuse } =
+			await budgetScript();
+		issueCalls(81, "pending");
+		queueSteer();
+		deliverSteer();
+		refuse("pending");
+		issueCalls(1, "post-1", "post-2");
+		refuse("post-1");
+		const killedAfterFirstPost = child.killed;
+		refuse("post-2");
+		child.emitClose();
+		expect(await run).toMatchObject({
+			ok: false,
+			reason: "token_budget",
+			error: "MC-D11: Pi dreamer made two calls after finalize",
+			meta: { tokenBudget: { finalizeFired: true, refusedCalls: 2 } },
+		});
+		expect(killedAfterFirstPost).toBe(false);
+	});
+
+	it("still stops on the second read after finalize with no pending calls", async () => {
+		const { child, run, issueCalls, queueSteer, deliverSteer, refuse } =
+			await budgetScript();
+		issueCalls(81);
+		queueSteer();
+		deliverSteer();
+		issueCalls(1, "post-1", "post-2");
+		refuse("post-1");
+		expect(child.killed).toBe(false);
+		refuse("post-2");
+		child.emitClose();
+		expect(await run).toMatchObject({
+			ok: false,
+			reason: "token_budget",
+			error: "MC-D11: Pi dreamer made two calls after finalize",
+			meta: { tokenBudget: { finalizeFired: true, refusedCalls: 2 } },
+		});
+	});
+
+	it("does not count reads from a new reply that began before steer delivery", async () => {
+		const { run, issueCalls, queueSteer, deliverSteer, refuse, answer } =
+			await budgetScript();
+		issueCalls(81, "pending");
+		refuse("pending");
+		issueCalls(1, "late-1", "late-2");
+		queueSteer();
+		refuse("late-1");
+		refuse("late-2");
+		deliverSteer();
+		answer();
+		expect(await run).toMatchObject({
+			ok: true,
+			assistantText: '<verify><verified id="1"/></verify>',
+			meta: { tokenBudget: { finalizeFired: true, refusedCalls: 0 } },
+		});
 	});
 });
 

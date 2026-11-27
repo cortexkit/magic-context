@@ -1928,6 +1928,10 @@ export class PiSubagentRunner implements SubagentRunner {
 			// + no toolCall content), then drain until natural child exit.
 			const accumulatedMessages: unknown[] = [];
 			accountingMessages = accumulatedMessages;
+			let finalizeDelivered = false;
+			let preSteerToolCalls:
+				| ReturnType<typeof extractToolInvocations>
+				| undefined;
 			const captureFinalAssistant = (messages: unknown[]) => {
 				const result = extractFinalAssistant(messages);
 				finalAssistantText = result.text;
@@ -1973,6 +1977,7 @@ export class PiSubagentRunner implements SubagentRunner {
 					type?: string;
 					messages?: unknown;
 					message?: unknown;
+					toolCallId?: string;
 				};
 				// Capture the current decision before a token/step guard can settle.
 				if (isMemoryMapper) {
@@ -2064,6 +2069,14 @@ export class PiSubagentRunner implements SubagentRunner {
 							});
 							return;
 						}
+						// Match refusals to the assistant reply that issued the calls.
+						// The steer acknowledgement only queues the instruction; even
+						// its delivery must not reclassify calls already issued.
+						if (rpcBudget && (decision === "finalize" || preSteerToolCalls)) {
+							preSteerToolCalls = finalizeDelivered
+								? undefined
+								: extractToolInvocations([message]);
+						}
 						if (decision === "finalize" && rpcBudget) {
 							try {
 								if (!budgetGuardFile)
@@ -2087,6 +2100,19 @@ export class PiSubagentRunner implements SubagentRunner {
 								})}\n`,
 							);
 						}
+					} else if (
+						preSteerToolCalls &&
+						message?.role === "user" &&
+						Array.isArray(message.content) &&
+						message.content.some((part) => {
+							const text = part as { type?: string; text?: string } | null;
+							return (
+								text?.type === "text" &&
+								text.text === TOKEN_BUDGET_FINALIZE_MESSAGE
+							);
+						})
+					) {
+						finalizeDelivered = true;
 					}
 				}
 				const resultParts = (
@@ -2095,6 +2121,7 @@ export class PiSubagentRunner implements SubagentRunner {
 				if (
 					budget?.snapshot().finalizeFired &&
 					e.type === "tool_execution_end" &&
+					!(e.toolCallId && preSteerToolCalls?.has(e.toolCallId)) &&
 					resultParts?.some((part) => part.text === TOKEN_BUDGET_TOOL_REFUSAL)
 				) {
 					const refusal = budget.refuseTool();
