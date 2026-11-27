@@ -21,6 +21,7 @@ describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
         expect(validation.files.length).toBe(265);
         expect(validation.files.length).toBe(264);
+        expect(validation.files.length).toBe(259);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -107,8 +108,6 @@ describe("mode manifest validator", () => {
             "tests/dreamer-host-timeout.test.ts",
             "tests/dreamer-mapper-step-cap-pi.test.ts",
             "tests/dreamer-token-budget-oc1.test.ts",
-            "tests/dreamer-verify-budget.test.ts",
-            "tests/dreamer-verify-token-budget-oc1.test.ts",
             "tests/historian-host-timeout.test.ts",
             "tests/historian-no-tools.test.ts",
             "tests/historian-window-fit.test.ts",
@@ -124,7 +123,6 @@ describe("mode manifest validator", () => {
             "tests/opencode2/context-s2-lanes.test.ts",
             "tests/opencode2/converted-store-overwindow.test.ts",
             "tests/opencode2/emergency-refusal-visible.test.ts",
-            "tests/opencode2/fold-s3-owner.test.ts",
             "tests/opencode2/fork-inheritance.test.ts",
             "tests/opencode2/hidden-run-notifications.test.ts",
             "tests/opencode2/mapper-step-finalize.test.ts",
@@ -141,7 +139,6 @@ describe("mode manifest validator", () => {
             "tests/rust-full-sync-frame-cap.test.ts",
             "tests/rust-plugin-stage-cache.test.ts",
             "tests/system-prompt-change-order.test.ts",
-            "tests/zen-primary-surface.test.ts",
         ]);
         expect(new Set([...ts, ...rust]).size).toBe(behaviorFiles.length - excluded.length);
     });

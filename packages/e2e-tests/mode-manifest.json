@@ -1515,25 +1515,6 @@
             ]
         },
         {
-            "path": "tests/opencode2/fold-s3-owner.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "Checkpoint ownership and restored-tail taxonomy run in the dedicated real GA lane",
-            "contract_refs": [
-                "I6a",
-                "I7",
-                "I8",
-                "R39"
-            ],
-            "hosts": [
-                "opencode2"
-            ]
-        },
-        {
             "path": "tests/opencode2/harness-s3-identity.test.ts",
             "tier": "ts-only",
             "invocation": {
@@ -3093,22 +3074,6 @@
             ]
         },
         {
-            "path": "tests/dreamer-verify-budget.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "verify's per-batch floor on a real OpenCode 1 host: a verify-broad scope too big for the old even split banks its first batch and stops before a batch that cannot get the floor; takes several minutes of wall clock, so it runs by hand outside the mode lanes",
-            "contract_refs": [
-                "DREAMER-TIMEOUTS"
-            ],
-            "hosts": [
-                "opencode"
-            ]
-        },
-        {
             "path": "tests/dreamer-token-budget-oc1.test.ts",
             "exclusion": {"reason": "manual-pinned-host"},
             "tier": "excluded",
@@ -3123,18 +3088,6 @@
             "hosts": [
                 "opencode"
             ]
-        },
-        {
-            "path": "tests/dreamer-verify-token-budget-oc1.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "Opt-in real OpenCode 1.18.30 budget probes (MC_E2E_OC1_BUDGET_PROBE=1): completed manifests, refusal limits, coarse usage and normal verify/map batches; run on demand outside the mode lanes, like dreamer-token-budget-oc1.",
-            "contract_refs": ["DREAMER-TIMEOUTS"],
-            "hosts": ["opencode"]
         },
         {
             "path": "tests/dreamer-host-timeout.test.ts",
@@ -3332,15 +3285,6 @@
             "hosts": ["opencode2"]
         },
         {
-            "path": "tests/zen-primary-surface.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
-            "invocation": { "ts": false, "rust": false },
-            "rationale": "Opt-in probe on real OpenCode 1 and 2 hosts that an ordinary session never exposes the Zen hidden summarizer variants (system prompt, Task tool, agent lists). Set MC_PRIMARY_PROBE_ROOT, MC_PRIMARY_BASE_PLUGIN, MC_PRIMARY_OC1 and MC_PRIMARY_OC2; without them the host tests skip and the carrier-leak guard tests run as plain unit tests.",
-            "contract_refs": ["ZEN-PRIMARY-SURFACE"],
-            "hosts": ["opencode", "opencode2"]
-        },
-        {
             "path": "tests/pi-issue-938-images-recomp.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
@@ -3453,15 +3397,6 @@
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "The durable marker stays pending through an unproven trim and advances once when an explicit flush permits a rewrite.",
-            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
-            "hosts": ["opencode"]
-        },
-        {
-            "path": "scripts/tool-sweep-upgrade-gate.test.ts",
-            "tier": "excluded",
-            "invocation": { "ts": false, "rust": false },
-            "exclusion": {"reason": "manual-opt-in-probe"},
-            "rationale": "Requires MC_PROBE_UPGRADE_FROM and an old comparison bundle compatible with the seeded store schema.",
             "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
             "hosts": ["opencode"]
         },
