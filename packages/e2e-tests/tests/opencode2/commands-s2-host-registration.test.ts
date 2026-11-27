@@ -18,11 +18,11 @@ import {
  * This proves both halves on the pinned real host with no terminal UI running
  * at all: the commands are listed, and invoking one produces its server-side
  * effect. `/ctx-flush` is the command under test because its effect is
- * observable — the next request must be a priced pass that applies the queued
- * work, which the plugin names per pass in its own log.
+ * observable: the next request must allow queued drops and cleanup as an
+ * explicit user flush, which the plugin records in its own log.
  */
 const HEURISTICS_DECISION = "heuristics WILL";
-const EXPLICIT_FLUSH = "heuristics WILL RUN — reason=explicit_flush";
+const EXPLICIT_FLUSH = "heuristics WILL RUN — reason=pending_materialization origin=user_flush";
 
 async function eventually<T>(
 	read: () => T | undefined | Promise<T | undefined>,
@@ -133,13 +133,12 @@ test("OpenCode 2 lists and runs the /ctx-* commands without a terminal UI", asyn
 		});
 
 		await prompt("turn after the command");
+		await prompt("ordinary turn after the flush was consumed");
 		const afterCommand = await eventually(() => {
-			const seen = decisions(logPath, session.id).filter((line) =>
-				line.includes(EXPLICIT_FLUSH),
-			);
-			return seen.length > 0 ? seen : undefined;
-		}, "the post-command turn to run as an explicit-flush pass");
-		expect(afterCommand.length).toBeGreaterThan(0);
+			const seen = decisions(logPath, session.id);
+			return seen.length >= 4 ? seen : undefined;
+		}, "both turns after the command to record a pass decision");
+		expect(afterCommand.map((line) => line.includes(EXPLICIT_FLUSH))).toEqual([false, false, true, false]);
 	} catch (error) {
 		console.error(
 			host.stderr(),
