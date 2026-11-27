@@ -53,6 +53,7 @@ describe.skipIf(!rustPrereqs.ok)("rust adapter performance", () => {
         const dbPath = join(h.env.dataDir, "adapter-context.db");
         if (snapshot) copyFileSync(snapshot, dbPath, constants.COPYFILE_FICLONE);
         const db = new Database(snapshot ? dbPath : ":memory:") as ContextDatabase;
+        db.exec("PRAGMA busy_timeout = 5000");
         cleanups.push(() => { db.close(); });
         if (!snapshot) {
             initializeDatabase(db);

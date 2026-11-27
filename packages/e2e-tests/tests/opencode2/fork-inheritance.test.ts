@@ -65,6 +65,7 @@ function hostDbPath(host: { env: NodeJS.ProcessEnv }): string {
 function readRows<T>(path: string, sql: string, ...params: unknown[]): T[] {
 	const db = new Database(path, { readonly: true, fileMustExist: true });
 	try {
+		db.exec("PRAGMA busy_timeout = 5000");
 		return db.prepare(sql).all(...params) as T[];
 	} finally {
 		db.close();

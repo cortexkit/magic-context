@@ -158,10 +158,13 @@ function barrier() {
             baseUrl: host.url,
             headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` },
         });
-        const contextDb = () =>
-            new Database(join(contextDir, "context.db"), {
+        const contextDb = () => {
+            const db = new Database(join(contextDir, "context.db"), {
                 readonly: true,
             });
+            db.exec("PRAGMA busy_timeout = 5000");
+            return db;
+        };
         const sourcePath = gaDatabasePath(dataDir, "latest", fixture.env);
         const compartments = (sessionID: string) => {
             const db = contextDb();
@@ -180,6 +183,7 @@ function barrier() {
         const checkpoints = (sessionID: string) => {
             const db = new Database(sourcePath, { readonly: true });
             try {
+                db.exec("PRAGMA busy_timeout = 5000");
                 return (
                     db
                         .prepare(
@@ -291,6 +295,7 @@ function barrier() {
             expect(gate.calls).toHaveLength(1);
             const reader = new V2StoreReader(sourcePath);
             const source = new Database(sourcePath, { readonly: true });
+            source.exec("PRAGMA busy_timeout = 5000");
             const rawHistory = source.prepare(
                 "SELECT id, type, data FROM session_message WHERE session_id = ? AND type IN ('user', 'assistant') ORDER BY seq",
             );

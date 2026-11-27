@@ -24,6 +24,7 @@ test("real host KV deletion revokes digest-only provenance before any restarted 
     };
     const rows = () => {
         const db = new Database(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!), { readonly: true });
+        db.exec("PRAGMA busy_timeout = 5000");
         try { return db.prepare("SELECT key, value FROM kv WHERE key LIKE '%:native-fold/%'").all() as { key: string; value: string }[]; }
         finally { db.close(); }
     };
@@ -72,6 +73,7 @@ test("real host KV deletion revokes digest-only provenance before any restarted 
         }
         const source = new Database(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!), { readonly: true });
         try {
+            source.exec("PRAGMA busy_timeout = 5000");
             const floor = source.prepare("SELECT seq FROM session_message WHERE session_id=? AND id=?").get(session.id, replay.floor.id) as { seq: number } | null;
             expect(floor?.seq).toBe(replay.floor.seq);
             const cut = source.prepare("SELECT data FROM session_message WHERE session_id=? AND id=? AND type='compaction'").get(session.id, provenance.proof.admissionID) as { data: string } | null;

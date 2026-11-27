@@ -66,6 +66,7 @@ for (const mode of ["manual", "scheduled"] as const) {
                 }).immediate();
             };
             hostDb = new Database(gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env), { readonly: true, fileMustExist: true });
+            hostDb.exec("PRAGMA busy_timeout = 5000");
             const project = (contextDb.prepare("SELECT project_path FROM session_projects WHERE session_id = ? AND harness = 'opencode2'").get(sessions[0]!) as { project_path: string }).project_path;
             expect(getDreamTaskBacklog(contextDb, project, "retrospective").pending).toBe(5);
             for (const id of sessions) expect(hostDb.prepare("SELECT id FROM session_message WHERE session_id = ? AND type = 'user'").get(id)).toBeTruthy();

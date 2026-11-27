@@ -88,6 +88,7 @@ async function scenario(arm: Arm) {
     const storedRow = () => {
         const db = new Database(contextPath, { readonly: true });
         try {
+            db.exec("PRAGMA busy_timeout = 5000");
             const columns = (
                 db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name: string }>
             ).map((column) => column.name);
@@ -103,6 +104,7 @@ async function scenario(arm: Arm) {
     const checkpointRows = () => {
         const db = new Database(sourcePath, { readonly: true });
         try {
+            db.exec("PRAGMA busy_timeout = 5000");
             return (
                 db
                     .prepare(
@@ -209,7 +211,11 @@ async function scenario(arm: Arm) {
         // Magic Context's two history head messages are the first two user items.
         const heads = (input: string[]) =>
             input.filter((item) => JSON.parse(item).role === "user").slice(0, 2);
-        const context = () => new Database(contextPath);
+        const context = () => {
+            const db = new Database(contextPath);
+            db.exec("PRAGMA busy_timeout = 5000");
+            return db;
+        };
         const pending = () => {
             const db = context();
             try {
@@ -265,6 +271,7 @@ async function scenario(arm: Arm) {
 
         // Queue a drop that only a rebuild may apply.
         const source = new Database(sourcePath, { readonly: true });
+        source.exec("PRAGMA busy_timeout = 5000");
         const mid0 = (
             source
                 .prepare(
@@ -382,6 +389,7 @@ async function scenario(arm: Arm) {
             snapshotPair();
             // The host stored an automatic checkpoint holding Magic Context's note.
             const db = new Database(sourcePath, { readonly: true });
+            db.exec("PRAGMA busy_timeout = 5000");
             const stored = db
                 .prepare(
                     "SELECT data FROM session_message WHERE session_id=? AND type='compaction' ORDER BY seq",

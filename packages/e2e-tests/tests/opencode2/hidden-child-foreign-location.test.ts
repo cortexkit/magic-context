@@ -144,6 +144,7 @@ async function twoDirectoryHost(options: { dreamerDisabledAtBoot?: boolean } = {
 			fileMustExist: true,
 		});
 		try {
+			db.exec("PRAGMA busy_timeout = 5000");
 			for (let index = 0; index < count; index++)
 				memoryIds.push(
 					insertMemory(db as never, {
@@ -169,6 +170,7 @@ async function twoDirectoryHost(options: { dreamerDisabledAtBoot?: boolean } = {
 			fileMustExist: true,
 		});
 		try {
+			read.exec("PRAGMA busy_timeout = 5000");
 			return (
 				read
 					.prepare(

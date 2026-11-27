@@ -55,6 +55,7 @@ function readContextDb<T>(env: NodeJS.ProcessEnv, read: (db: Database) => T): T 
 		fileMustExist: true,
 	});
 	try {
+		db.exec("PRAGMA busy_timeout = 5000");
 		return read(db);
 	} finally {
 		db.close();
@@ -66,6 +67,7 @@ function writeContextDb(env: NodeJS.ProcessEnv, write: (db: Database) => void): 
 		fileMustExist: true,
 	});
 	try {
+		db.exec("PRAGMA busy_timeout = 5000");
 		write(db);
 	} finally {
 		db.close();

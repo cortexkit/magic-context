@@ -28,6 +28,7 @@ test("OpenCode 2 real host advances the raw index after a new post-rebase messag
 		throw new Error("Host did not supply its isolated storage and PID");
 	}
 	const db = new Database(join(storage, "context.db"));
+	db.exec("PRAGMA busy_timeout = 5000");
 	const client = OpenCode.make({
 		baseUrl: host.url,
 		headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` },
@@ -97,6 +98,7 @@ test("OpenCode 2 real host advances the raw index after a new post-rebase messag
 		const rawDb = new Database(gaDatabasePath(dataHome, "latest", host.env), {
 			readonly: true,
 		});
+		rawDb.exec("PRAGMA busy_timeout = 5000");
 		let queryPlans: unknown[];
 		try {
 			queryPlans = [
@@ -222,6 +224,7 @@ test("a committed OpenCode 2 revert serves the same bytes as the unedited branch
 		join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"),
 		{ readonly: true },
 	);
+	db.exec("PRAGMA busy_timeout = 5000");
 	const raw = new V2StoreReader(
 		gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env),
 	);

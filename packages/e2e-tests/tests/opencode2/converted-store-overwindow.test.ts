@@ -33,6 +33,7 @@ interface V1Client {
 function contextRows<T>(path: string, sql: string, ...params: unknown[]): T[] {
     const db = new Database(path, { readonly: true, fileMustExist: true });
     try {
+        db.exec("PRAGMA busy_timeout = 5000");
         return db.prepare(sql).all(...params) as T[];
     } finally {
         db.close();
@@ -42,6 +43,7 @@ function contextRows<T>(path: string, sql: string, ...params: unknown[]): T[] {
 function convertedToolArcCount(path: string, sessionId: string, callIds: readonly string[]): number {
     const db = new Database(path, { readonly: true, fileMustExist: true });
     try {
+        db.exec("PRAGMA busy_timeout = 5000");
         const placeholders = callIds.map(() => "?").join(",");
         const row = db
             .prepare(
@@ -65,6 +67,7 @@ function inflateConvertedToolOutputs(
     outputs: ReadonlyMap<string, string>,
 ): number {
     const db = new Database(path);
+    db.exec("PRAGMA busy_timeout = 5000");
     let changed = 0;
     try {
         const rows = db

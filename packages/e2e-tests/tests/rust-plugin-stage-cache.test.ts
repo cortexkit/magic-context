@@ -66,6 +66,7 @@ test.skipIf(!process.env.MC_RUST_STAGE_BASELINE)("old/new Rust adapters serve id
                 const client = sdk.createOpencodeClient({ baseUrl: h.opencode.url });
                 await refreshModelLimitsFromApi(client);
                 db = new Database(join(env.dataDir, "cortexkit/magic-context/context.db"));
+                db.exec("PRAGMA busy_timeout = 5000");
                 for (let index = 0; index < 100; index++) {
                     const content = `Memory ${index}: ${"stable constraint ".repeat(20)}`;
                     const memory = insertMemory(db, { projectPath: projectIdentity, category: "CONSTRAINTS", content });

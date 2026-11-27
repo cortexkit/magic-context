@@ -108,6 +108,7 @@ async function fixture(holdRecovery: boolean) {
 	openDatabase(dbPath);
 	closeDatabase();
 	const old = new Database(dbPath);
+	old.exec("PRAGMA busy_timeout = 5000");
 	old
 		.prepare("DELETE FROM schema_migrations WHERE version = ?")
 		.run(LATEST_SUPPORTED_VERSION);

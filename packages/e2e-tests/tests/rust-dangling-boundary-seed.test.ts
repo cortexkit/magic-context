@@ -41,6 +41,7 @@ async function seedParams(
 	dangling: boolean,
 ): Promise<Record<string, unknown>> {
 	const db = new Database(join(h.env.dataDir, "cortexkit", "magic-context", "context.db"));
+	db.exec("PRAGMA busy_timeout = 5000");
 	appendCompartments(db, sessionId, [
 		{
 			sequence: 0,

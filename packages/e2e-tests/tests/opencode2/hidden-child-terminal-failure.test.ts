@@ -27,6 +27,7 @@ async function eventually(check: () => boolean, timeoutMs = 20_000): Promise<voi
 function sessionStored(path: string, sessionID: string): boolean {
     const db = new Database(path, { readonly: true, fileMustExist: true });
     try {
+        db.exec("PRAGMA busy_timeout = 5000");
         const row = db.prepare("SELECT id FROM session_v2 WHERE id = ?").get(sessionID);
         return row !== null && row !== undefined;
     } finally {

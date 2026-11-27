@@ -47,6 +47,7 @@ test("a fork of an invisible fold renders inherited compartments without revivin
         await turn(session.id, "ordinary defer");
         await client.session.command({ sessionID: session.id, name: "ctx-wrapup", text: "2" });
         db = new Database(join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"), { readonly: true });
+        db.exec("PRAGMA busy_timeout = 5000");
         const count = (id: string) => (db!.prepare("SELECT COUNT(*) AS n FROM compartments WHERE session_id=?").get(id) as { n: number }).n;
         const deadline = Date.now() + 60000;
         while (Date.now() < deadline) {

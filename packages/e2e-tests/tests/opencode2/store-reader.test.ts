@@ -37,6 +37,7 @@ test("OpenCode 2 runner scopes retrospective probes to its root sessions", () =>
 	const fixture = isolation();
 	const db = new ContextDatabase(":memory:");
 	try {
+		db.exec("PRAGMA busy_timeout = 5000");
 		initializeDatabase(db);
 		runMigrations(db);
 		const project = "git:opencode2-retrospective-gate";

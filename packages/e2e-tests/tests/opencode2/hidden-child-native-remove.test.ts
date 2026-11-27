@@ -57,6 +57,7 @@ function withContextDb<T>(env: NodeJS.ProcessEnv, use: (db: Database) => T, writ
         fileMustExist: true,
     });
     try {
+        db.exec("PRAGMA busy_timeout = 5000");
         return use(db);
     } finally {
         db.close();

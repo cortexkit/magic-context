@@ -89,6 +89,7 @@ test("OpenCode 1 wrapup replaces covered raw history once on the next request", 
         const tag = Number(retained[1]);
         const writer = new Database(h.contextDbPath(), { fileMustExist: true });
         try {
+            writer.exec("PRAGMA busy_timeout = 5000");
             writer.prepare(
                 "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, ?, 'drop', ?, 'opencode')",
             ).run(sessionId, tag, Date.now());

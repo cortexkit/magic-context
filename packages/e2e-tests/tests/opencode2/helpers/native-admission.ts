@@ -11,6 +11,7 @@ export function expectNativeAdmission(h: OpenCode2TestHarness, sessionID: string
     const reader = new V2StoreReader(path);
     const db = new Database(path, { readonly: true });
     try {
+        db.exec("PRAGMA busy_timeout = 5000");
         const cut = reader.latestCompaction(sessionID);
         if (!cut) throw new Error("expected a completed host checkpoint");
         expect(cut.data.status).toBe("completed");

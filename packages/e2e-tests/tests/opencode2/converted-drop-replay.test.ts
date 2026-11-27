@@ -18,6 +18,7 @@ const MODEL = { providerID: SHARED_MOCK_PROVIDER_ID, modelID: SHARED_MOCK_MODEL_
 function toolTags(path: string, sessionId: string): Array<{ tag_number: number; status: string }> {
     const db = new Database(path, { readonly: true, fileMustExist: true });
     try {
+        db.exec("PRAGMA busy_timeout = 5000");
         return db.prepare("SELECT tag_number, status FROM tags WHERE session_id = ? AND type = 'tool' ORDER BY tag_number")
             .all(sessionId) as Array<{ tag_number: number; status: string }>;
     } finally { db.close(); }
@@ -26,6 +27,7 @@ function toolTags(path: string, sessionId: string): Array<{ tag_number: number; 
 function seedRecentConvertedArcs(path: string, sessionId: string): void {
     const db = new Database(path);
     try {
+        db.exec("PRAGMA busy_timeout = 5000");
         const rows = db.prepare("SELECT id,type,data FROM session_message WHERE session_id = ? ORDER BY seq")
             .all(sessionId) as Array<{ id: string; type: string; data: string }>;
         const user = rows.find((row) => row.type === "user");
@@ -138,6 +140,7 @@ test("converted tool drop lands on ordinary pass and remains valid on replay", a
         await client.session.prompt({ sessionID: sessionId, text: "reduce that converted tool result" });
         await client.session.wait({ sessionID: sessionId }, { signal: AbortSignal.timeout(60_000) });
         const pendingDb = new Database(fixture.contextDbPath, { readonly: true, fileMustExist: true });
+        pendingDb.exec("PRAGMA busy_timeout = 5000");
         const queued = pendingDb.prepare("SELECT COUNT(*) AS count FROM pending_ops WHERE session_id = ? AND tag_id = ?")
             .get(sessionId, tag.tag_number) as { count: number };
         pendingDb.close();
@@ -155,6 +158,7 @@ test("converted tool drop lands on ordinary pass and remains valid on replay", a
         await client.session.prompt({ sessionID: sessionId, text: "replay the dropped tool on the next request" });
         await until(() => toolTags(fixture.contextDbPath, sessionId).some((entry) => entry.tag_number === tag.tag_number && entry.status === "dropped"), "agent tool reduction");
         const verifyDb = new Database(fixture.contextDbPath, { readonly: true, fileMustExist: true });
+        verifyDb.exec("PRAGMA busy_timeout = 5000");
         const dropped = verifyDb.prepare("SELECT drop_mode AS mode FROM tags WHERE session_id = ? AND tag_number = ?").get(sessionId, tag.tag_number);
         verifyDb.close();
         expect(dropped).toEqual({ mode: "full" });

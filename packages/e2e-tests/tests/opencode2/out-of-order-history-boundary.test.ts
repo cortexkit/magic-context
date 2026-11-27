@@ -38,6 +38,7 @@ type Row = { id: string; type: string; seq: number };
 
 function rows(path: string, sessionId: string): Row[] {
     const db = new Database(path, { readonly: true });
+    db.exec("PRAGMA busy_timeout = 5000");
     try { return db.prepare("SELECT id, type, seq FROM session_message WHERE session_id=? ORDER BY seq").all(sessionId) as Row[]; }
     finally { db.close(); }
 }
@@ -79,6 +80,7 @@ for (const operation of ["session_move", "offline row deletion"] as const) {
             expect(boundary.type).toBe("assistant");
             await host.stopHost();
             const db = new Database(context);
+            db.exec("PRAGMA busy_timeout = 5000");
             try { appendCompartments(db, session.id, [{ sequence: 0, startMessage: 1, endMessage: raw.length,
                 startMessageId: raw[0]!.id, endMessageId: boundary.id, title: "Recorded history", content: "Three older turns recorded durable history." }]); }
             finally { db.close(); }
@@ -110,6 +112,7 @@ for (const operation of ["session_move", "offline row deletion"] as const) {
             await host.stopHost();
             if (operation === "offline row deletion") {
                 const db = new Database(store);
+                db.exec("PRAGMA busy_timeout = 5000");
                 try { db.prepare("DELETE FROM session_message WHERE session_id=? AND id=?").run(session.id, raw[1]!.id); }
                 finally { db.close(); }
                 const after = rows(store, session.id);
@@ -153,6 +156,7 @@ for (const operation of ["session_move", "offline row deletion"] as const) {
                 expect(new Set(instructions).size).toBe(1);
                 const db = new Database(store, { readonly: true });
                 try {
+                    db.exec("PRAGMA busy_timeout = 5000");
                     const updates = db.prepare("SELECT seq FROM session_message WHERE session_id=? AND type='system' AND data LIKE ?")
                         .all(session.id, "%UNSUMMARIZED-MOVED-INSTRUCTION%") as { seq: number }[];
                     expect(updates).toHaveLength(1);

@@ -160,6 +160,7 @@ test("OpenCode 2 tool-loop families execute scoped tools across steps and remove
 				{ readonly: true, fileMustExist: true },
 			);
 			try {
+				db.exec("PRAGMA busy_timeout = 5000");
 				const deadline = Date.now() + 12000;
 				while (
 					db.prepare("SELECT id FROM session_v2 WHERE id = ?").get(result.child)

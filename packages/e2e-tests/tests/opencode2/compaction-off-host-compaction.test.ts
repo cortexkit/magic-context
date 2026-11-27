@@ -76,6 +76,7 @@ test("with compaction off, the host's own compaction of a user session succeeds 
 				readonly: true,
 			});
 			try {
+				db.exec("PRAGMA busy_timeout = 5000");
 				return (
 					db
 						.prepare("SELECT type, data FROM session_message WHERE session_id = ? ORDER BY seq")
@@ -179,6 +180,7 @@ test("with compaction off, the host's checkpoint shrinks the next request and co
 				readonly: true,
 			});
 			try {
+				db.exec("PRAGMA busy_timeout = 5000");
 				return (
 					db
 						.prepare("SELECT data FROM session_message WHERE session_id = ? AND type = 'compaction' ORDER BY seq")

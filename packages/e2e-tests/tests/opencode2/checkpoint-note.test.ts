@@ -73,6 +73,7 @@ test("OpenCode 2 checkpoints store the note while every request stays byte-ident
     const checkpoints = (sessionID: string) => {
         const db = new Database(dbPath, { readonly: true });
         try {
+            db.exec("PRAGMA busy_timeout = 5000");
             return (
                 db
                     .prepare(

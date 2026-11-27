@@ -105,6 +105,7 @@ for (const { kind, reopen } of [
 				{ readonly: true, fileMustExist: true },
 			);
 			try {
+				db.exec("PRAGMA busy_timeout = 5000");
 				const count = () =>
 					(
 						db

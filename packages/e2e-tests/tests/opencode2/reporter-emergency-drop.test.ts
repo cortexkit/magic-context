@@ -17,6 +17,7 @@ const RESULT_TEXT = "payload ".repeat(2_300);
 
 function seedConvertedTail(path: string, sessionID: string): void {
     const db = new Database(path);
+    db.exec("PRAGMA busy_timeout = 5000");
     const reader = new V2StoreReader(path);
     try {
         const rows = db.prepare("SELECT id, type, data FROM session_message WHERE session_id = ? ORDER BY seq")
@@ -152,6 +153,7 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         seedConvertedTail(fixture.openCodeDbPath, sessionID);
         const contextDb = new Database(fixture.contextDbPath);
         try {
+            contextDb.exec("PRAGMA busy_timeout = 5000");
             const row = contextDb.prepare("SELECT cached_m0_upgrade_state AS upgrade FROM session_meta WHERE session_id = ?")
                 .get(sessionID) as { upgrade: string | null } | undefined;
             if (!row?.upgrade) throw new Error("warmup did not materialize m0 upgrade state");
@@ -168,6 +170,7 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         // restart, before the host starts again.
         const usageDb = new Database(fixture.contextDbPath, { readonly: true });
         try {
+            usageDb.exec("PRAGMA busy_timeout = 5000");
             const usage = usageDb.prepare(`SELECT last_input_tokens AS inputTokens,
                 last_usage_context_limit AS contextLimit, last_context_percentage AS percentage
                 FROM session_meta WHERE session_id = ?`).get(sessionID) as {
@@ -191,6 +194,7 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
             ? readFileSync(usageLogPath, "utf8").match(/v2 usage: inputTokens=820000/g) ?? []
             : []).length;
         const usageBeforeDb = new Database(fixture.contextDbPath, { readonly: true });
+        usageBeforeDb.exec("PRAGMA busy_timeout = 5000");
         let responseTimeBefore: number;
         try {
             const row = usageBeforeDb.prepare(
@@ -208,6 +212,7 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         while (!recordedFreshUsage && Date.now() < usageDeadline) {
             const usageDb = new Database(fixture.contextDbPath, { readonly: true });
             try {
+                usageDb.exec("PRAGMA busy_timeout = 5000");
                 const row = usageDb.prepare(`SELECT last_response_time AS responseTime,
                     last_input_tokens AS inputTokens, last_context_percentage AS percentage
                     FROM session_meta WHERE session_id = ?`).get(sessionID) as {
@@ -268,6 +273,7 @@ test("converted 750k session explicit flush exercises reporter emergency drop pa
         console.log("REPORTER_V2_USAGE", milestones.filter((line) => line.includes("v2 usage:")).join("\n"));
         const drained = new Database(fixture.contextDbPath, { readonly: true });
         try {
+            drained.exec("PRAGMA busy_timeout = 5000");
             expect(drained.prepare("SELECT tag_id FROM pending_ops WHERE session_id = ?").all(sessionID)).toHaveLength(0);
         } finally { drained.close(); }
         // The reporter pass is the first priced pass after the restart. Its

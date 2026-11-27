@@ -165,6 +165,7 @@ const cleanup: Array<() => Promise<void>> = [];
 function contextRows<T>(fixture: ConversionFixture, sql: string, ...params: unknown[]): T[] {
     const db = new Database(fixture.contextDbPath, { readonly: true, fileMustExist: true });
     try {
+        db.exec("PRAGMA busy_timeout = 5000");
         return db.prepare(sql).all(...params) as T[];
     } finally {
         db.close();
@@ -449,6 +450,7 @@ function v2Projection(fixture: ConversionFixture, sessionId: string) {
 function v1Projection(fixture: ConversionFixture, sessionId: string) {
     const db = new Database(fixture.openCodeDbPath, { readonly: true, fileMustExist: true });
     try {
+        db.exec("PRAGMA busy_timeout = 5000");
         return readRawSessionMessagesFromDb(db, sessionId).map((message) => ({
             id: message.id,
             ordinal: message.ordinal,
@@ -745,6 +747,7 @@ beforeAll(async () => {
     const syntheticParts = (() => {
         const db = new Database(fixture.openCodeDbPath, { readonly: true, fileMustExist: true });
         try {
+            db.exec("PRAGMA busy_timeout = 5000");
             return db
                 .prepare(
                     `SELECT DISTINCT message_id AS id FROM part
@@ -837,6 +840,7 @@ beforeAll(async () => {
     const markerEvidence = (() => {
         const db = new Database(fixture.openCodeDbPath, { readonly: true, fileMustExist: true });
         try {
+            db.exec("PRAGMA busy_timeout = 5000");
             const marker = db
                 .prepare(
                     `SELECT json_extract(data, '$.parentID') AS boundaryId,
@@ -926,6 +930,7 @@ beforeAll(async () => {
     const convertedMarkerCount = (() => {
         const db = new Database(fixture.openCodeDbPath, { readonly: true, fileMustExist: true });
         try {
+            db.exec("PRAGMA busy_timeout = 5000");
             const row = db
                 .prepare(
                     "SELECT COUNT(*) AS count FROM session_message WHERE id = ? AND type = 'compaction'",
@@ -964,6 +969,7 @@ beforeAll(async () => {
     const syntheticRowId = (() => {
         const db = new Database(fixture.openCodeDbPath, { readonly: true, fileMustExist: true });
         try {
+            db.exec("PRAGMA busy_timeout = 5000");
             const rows = db
                 .prepare(
                     "SELECT id FROM session_message WHERE session_id = ? AND type = 'synthetic' ORDER BY seq",

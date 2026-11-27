@@ -97,6 +97,7 @@ function compactionRows(
 ): Array<{ seq: number; status: string; summary: string; error: string }> {
     const db = new Database(dbPath, { readonly: true, fileMustExist: true });
     try {
+        db.exec("PRAGMA busy_timeout = 5000");
         return (
             db
                 .prepare(
@@ -126,6 +127,7 @@ function compactionRows(
 function failedTurns(dbPath: string, sessionId: string): number {
     const db = new Database(dbPath, { readonly: true, fileMustExist: true });
     try {
+        db.exec("PRAGMA busy_timeout = 5000");
         const row = db
             .prepare(
                 `SELECT COUNT(*) AS count FROM session_message

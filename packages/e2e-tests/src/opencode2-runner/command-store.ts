@@ -58,6 +58,7 @@ export async function commandStoreFixture(kind: CommandStoreKind) {
 		fileMustExist: true,
 	});
 	try {
+		db.exec("PRAGMA busy_timeout = 5000");
 		expect(
 			db
 				.prepare(
@@ -99,6 +100,7 @@ export function legacyStoreSnapshot(
 ): string {
 	const db = new Database(path, { readonly: true, fileMustExist: true });
 	try {
+		db.exec("PRAGMA busy_timeout = 5000");
 		const tables = db
 			.prepare(
 				"SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('message', 'part') ORDER BY name",

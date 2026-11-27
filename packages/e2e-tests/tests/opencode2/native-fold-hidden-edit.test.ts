@@ -46,6 +46,7 @@ test("a hidden row edited in place expires cold fold provenance and rebuilds onc
         await waitForPluginActive(client, fixture.cwd);
         sample();
         const source = new Database(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!));
+        source.exec("PRAGMA busy_timeout = 5000");
         let changed: { id: string; data: string };
         try {
             changed = source.prepare("SELECT id, data FROM session_message WHERE session_id=? AND type='user' ORDER BY seq LIMIT 1").get(session.id) as typeof changed;
@@ -112,8 +113,10 @@ test("a rebuild retires superseding instruction catalogs without dropping deltas
     const client = OpenCode.make({ baseUrl: host.url,
         headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
     const source = new Database(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!));
+    source.exec("PRAGMA busy_timeout = 5000");
     const db = new Database(join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
     try {
+        db.exec("PRAGMA busy_timeout = 5000");
         await waitForPluginActive(client, fixture.cwd);
         const session = await client.session.create({ location: { directory: fixture.cwd },
             model: { providerID: "openai", id: "mock-model" } });
@@ -244,6 +247,7 @@ test("MCP catalog replay keeps the newest restatement or the ordered deltas acro
     const location = { directory: fixture.cwd };
     const source = new Database(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!));
     try {
+        source.exec("PRAGMA busy_timeout = 5000");
         await waitForPluginActive(client, fixture.cwd);
         const status = async (name: string, want: string) => {
             const deadline = Date.now() + 30_000;
@@ -313,6 +317,7 @@ test("MCP catalog replay keeps the newest restatement or the ordered deltas acro
         for (;;) {
             const context = new Database(join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
             try {
+                context.exec("PRAGMA busy_timeout = 5000");
                 const { n } = context.prepare("SELECT COUNT(*) AS n FROM compartments WHERE session_id=?").get(session.id) as { n: number };
                 const { state } = context.prepare("SELECT wrapup_in_progress_state AS state FROM session_meta WHERE session_id=?").get(session.id) as { state: string | null };
                 if (n > 0 && !state) break;

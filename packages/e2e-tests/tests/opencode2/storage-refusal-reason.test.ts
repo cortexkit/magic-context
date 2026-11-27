@@ -46,6 +46,7 @@ test("OpenCode 2 names a migration refused by an older live host, then recovers 
 	openDatabase(dbPath);
 	closeDatabase();
 	const seeded = new ContextDatabase(dbPath);
+	seeded.exec("PRAGMA busy_timeout = 5000");
 	seeded
 		.prepare("DELETE FROM schema_migrations WHERE version = ?")
 		.run(LATEST_SUPPORTED_VERSION);
@@ -54,6 +55,7 @@ test("OpenCode 2 names a migration refused by an older live host, then recovers 
 	const persistedVersion = () => {
 		const db = new ContextDatabase(dbPath);
 		try {
+			db.exec("PRAGMA busy_timeout = 5000");
 			return getPersistedSchemaVersion(db);
 		} finally {
 			db.close();
@@ -282,6 +284,7 @@ test("OpenCode 2 names a migration refused by an older live host, then recovers 
 		const compartments = () => {
 			const db = new ContextDatabase(dbPath);
 			try {
+				db.exec("PRAGMA busy_timeout = 5000");
 				return (
 					db
 						.prepare(

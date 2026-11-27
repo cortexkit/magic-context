@@ -139,6 +139,7 @@ test("v2 measures tool definitions from the request draft without moving a serve
             "context.db",
         );
         const db = new Database(contextDb, { readonly: true, fileMustExist: true });
+        db.exec("PRAGMA busy_timeout = 5000");
         let meta: { hash: string | null; materializedAt: number | null };
         try {
             const row = db

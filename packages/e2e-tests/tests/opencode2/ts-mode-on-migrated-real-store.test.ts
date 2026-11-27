@@ -34,6 +34,7 @@ test.skipIf(!copy)(
 			if (existsSync(`${copy}${suffix}`))
 				renameSync(`${copy}${suffix}`, `${dbPath}${suffix}`);
 		const before = new Database(dbPath, { readonly: true });
+		before.exec("PRAGMA busy_timeout = 5000");
 		const sessionsBefore = (
 			before.prepare("SELECT COUNT(*) AS n FROM session_meta").get() as {
 				n: number;
@@ -104,6 +105,7 @@ test.skipIf(!copy)(
 		}
 		const after = new Database(dbPath, { readonly: true });
 		try {
+			after.exec("PRAGMA busy_timeout = 5000");
 			const sessionsAfter = (
 				after.prepare("SELECT COUNT(*) AS n FROM session_meta").get() as {
 					n: number;

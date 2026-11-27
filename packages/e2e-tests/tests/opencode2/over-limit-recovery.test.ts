@@ -45,6 +45,7 @@ const RESULT_TEXT = "payload ".repeat(2_300);
  */
 function seedLargeToolTail(path: string, sessionID: string): void {
 	const db = new Database(path);
+	db.exec("PRAGMA busy_timeout = 5000");
 	const reader = new V2StoreReader(path);
 	try {
 		const rows = db
@@ -231,6 +232,7 @@ test("a converted session over its usable window gets a reducing pass and reache
 		expect(log).toMatch(/emergency tiered drop: tiered drop: [1-9]\d* tags/);
 		const contextDb = new Database(fixture.contextDbPath);
 		try {
+			contextDb.exec("PRAGMA busy_timeout = 5000");
 			const row = contextDb
 				.prepare("SELECT COUNT(*) AS count FROM compartments WHERE session_id = ?")
 				.get(sessionID) as { count: number };

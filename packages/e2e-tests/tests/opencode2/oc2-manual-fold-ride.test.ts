@@ -43,8 +43,16 @@ async function manualFoldSession(partRows: boolean) {
     answer();
     const clientFor = () => OpenCode.make({ baseUrl: host.url, headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
     let client = clientFor();
-    const context = () => new Database(join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
-    const source = () => new Database(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!), { readonly: true });
+    const context = () => {
+        const db = new Database(join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"));
+        db.exec("PRAGMA busy_timeout = 5000");
+        return db;
+    };
+    const source = () => {
+        const db = new Database(join(fixture.env.XDG_DATA_HOME!, "opencode", fixture.env.OPENCODE_DB!), { readonly: true });
+        db.exec("PRAGMA busy_timeout = 5000");
+        return db;
+    };
     await waitForPluginActive(client, fixture.cwd);
     const session = await client.session.create({ location: { directory: fixture.cwd }, model: { providerID: "openai", id: "mock-model" } });
     const historian = (body: unknown) => /Messages (\d+)-(\d+):/.test(JSON.stringify(body));

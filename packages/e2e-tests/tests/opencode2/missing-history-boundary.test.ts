@@ -63,6 +63,7 @@ function hostDbPath(host: { env: NodeJS.ProcessEnv }): string {
 function readRows<T>(path: string, sql: string, ...params: unknown[]): T[] {
 	const db = new Database(path, { readonly: true, fileMustExist: true });
 	try {
+		db.exec("PRAGMA busy_timeout = 5000");
 		return db.prepare(sql).all(...params) as T[];
 	} finally {
 		db.close();
@@ -73,6 +74,7 @@ function writeRows(path: string, sql: string, ...params: unknown[]): number {
 	if (!existsSync(path)) throw new Error(`missing store ${path}`);
 	const db = new Database(path);
 	try {
+		db.exec("PRAGMA busy_timeout = 5000");
 		db.prepare(sql).run(...params);
 		// Count the target rows, not the history-version trigger's additional writes.
 		return (db.prepare("SELECT changes() AS changed").get() as { changed: number }).changed;

@@ -52,6 +52,7 @@ interface Row {
 function read<T>(path: string, sql: string, ...params: unknown[]): T[] {
     const db = new Database(path, { readonly: true, fileMustExist: true });
     try {
+        db.exec("PRAGMA busy_timeout = 5000");
         return db.prepare(sql).all(...params) as T[];
     } finally {
         db.close();
@@ -176,6 +177,7 @@ test("clearing kv.migration.v1-v2 deletes the rows OpenCode 2 added after the fi
         expect(postConversionIds(fixture.openCodeDbPath, idle)).toEqual([]);
 
         const doctorDb = new Database(fixture.openCodeDbPath, { readonly: true, fileMustExist: true });
+        doctorDb.exec("PRAGMA busy_timeout = 5000");
         let report: ReturnType<typeof checkOpenCodeCompactionMarkerConversion>;
         try {
             report = checkOpenCodeCompactionMarkerConversion(doctorDb);
@@ -190,6 +192,7 @@ test("clearing kv.migration.v1-v2 deletes the rows OpenCode 2 added after the fi
         // The recipe doctor 0.43.x printed.
         const writable = new Database(fixture.openCodeDbPath);
         try {
+            writable.exec("PRAGMA busy_timeout = 5000");
             writable.prepare("DELETE FROM kv WHERE key = 'migration.v1-v2'").run();
         } finally {
             writable.close();

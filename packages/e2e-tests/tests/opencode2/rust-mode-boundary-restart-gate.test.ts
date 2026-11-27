@@ -482,6 +482,7 @@ describe.skipIf(!prereqs.ok)(
 			const conversationalRows = (() => {
 				const store = new Database(dbPath, { readonly: true });
 				try {
+					store.exec("PRAGMA busy_timeout = 5000");
 					return (
 						store
 							.prepare(
