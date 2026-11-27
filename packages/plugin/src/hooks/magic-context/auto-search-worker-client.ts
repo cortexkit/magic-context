@@ -11,6 +11,7 @@ import {
     getMessageIndexEpoch,
     isMessageIndexSearchable,
 } from "../../features/magic-context/message-index-async";
+import { parseCacheTtl } from "../../features/magic-context/scheduler";
 import type {
     CapturedQueryEmbedding,
     MessageHistorySearchOutcome,
@@ -330,12 +331,54 @@ interface SearchWorkerSlot {
     detached?: boolean;
     disposed?: boolean;
     idleTimer?: ReturnType<typeof setTimeout>;
+    searchedSessions: Set<string>;
     dispose(): void;
 }
 const searchWorkers = new WeakMap<Database, Map<string, SearchWorkerSlot>>();
 const liveSearchWorkers = new Set<SearchWorkerSlot>();
 const MAX_IDLE_SEARCH_WORKERS = 4;
 const SEARCH_WORKER_IDLE_MS = 5 * 60_000;
+const MAX_SEARCH_WORKER_CACHE_TTL_MS = 60 * 60_000;
+
+function scheduleSearchWorkerExpiry(db: Database, slot: SearchWorkerSlot): void {
+    const arm = (delay: number) => {
+        slot.idleTimer = setTimeout(check, delay);
+        slot.idleTimer.unref?.();
+    };
+    const check = () => {
+        const now = Date.now();
+        let expires = now;
+        try {
+            // Every host saves the resolved per-model TTL and the scheduler's
+            // reply time here. Read after the idle grace, not on the prompt path:
+            // the reply to a turn normally arrives after its search has finished.
+            const read = db.prepare(
+                "SELECT cache_ttl, last_response_time FROM session_meta WHERE session_id = ?",
+            );
+            for (const session of slot.searchedSessions) {
+                const row = read.get(session) as {
+                    cache_ttl?: string;
+                    last_response_time?: number;
+                } | null;
+                if (!row?.cache_ttl || !row.last_response_time) continue;
+                let ttl: number;
+                try {
+                    ttl = Math.min(parseCacheTtl(row.cache_ttl), MAX_SEARCH_WORKER_CACHE_TTL_MS);
+                } catch {
+                    continue;
+                }
+                if (ttl <= SEARCH_WORKER_IDLE_MS) continue;
+                expires = Math.max(expires, Math.min(now, row.last_response_time) + ttl);
+            }
+        } catch {
+            // The owning database may have closed. Don't retain a worker for
+            // a cache lifetime we can no longer read.
+        }
+        if (expires > now) arm(expires - now);
+        else slot.dispose();
+    };
+    arm(SEARCH_WORKER_IDLE_MS);
+}
 /**
  * How long a search may keep running after its caller's deadline before its
  * worker is disposed anyway. A search that has not answered by then is still
@@ -417,6 +460,7 @@ async function acquireSearchWorker(
             );
             slot = {
                 worker,
+                searchedSessions: new Set(),
                 dispose() {
                     this.disposed = true;
                     clearTimeout(this.idleTimer);
@@ -620,8 +664,8 @@ async function executeAutoSearchWorker(
             worker.off("exit", onExit);
             if (dispose || !detachable) slot.dispose();
             else if (!slot.disposed) {
-                slot.idleTimer = setTimeout(() => slot.dispose(), SEARCH_WORKER_IDLE_MS);
-                slot.idleTimer.unref?.();
+                slot.searchedSessions.add(sessionId);
+                scheduleSearchWorkerExpiry(db, slot);
             }
             const free = slot.release;
             slot.busy = undefined;
