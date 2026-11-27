@@ -11,14 +11,20 @@ import {
     setRecompPartialRange,
 } from "../../features/magic-context/compartment-storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
 import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import * as historian from "./compartment-runner-historian";
 import { executeContextRecompWithResult } from "./compartment-runner";
+import * as historian from "./compartment-runner-historian";
 import type { HiddenCompletionExecutor } from "./compartment-runner-types";
 import * as validation from "./compartment-runner-validation";
 import * as fitting from "./historian-prompt-fit";
+import {
+    capturePrefixTrimSourceOrder,
+    injectM0M1,
+    prepareCachedM0M1Replay,
+} from "./inject-compartments";
 import { createLiveSessionState } from "./live-session-state";
 import * as rawSession from "./read-session-chunk";
 import {
@@ -222,6 +228,31 @@ function oldSummary(start: number, end: number, sequence: number) {
     };
 }
 
+function rebuildRequest(db: Database, sessionId: string, count: number, replay: boolean) {
+    const messages = Array.from({ length: count }, (_, i) => ({
+        info: { id: `m-${i + 1}`, role: "user", sessionID: sessionId },
+        parts: [{ type: "text", text: `Original raw message ${i + 1}` }],
+    }));
+    const result = injectM0M1({
+        db,
+        sessionId,
+        messages,
+        state: getOrCreateSessionMeta(db, sessionId),
+        injectDocs: false,
+        memoryEnabled: false,
+        preparedPrefix: replay ? prepareCachedM0M1Replay(db, sessionId) : undefined,
+        prefixTrimSourceOrder: capturePrefixTrimSourceOrder(messages),
+    });
+    expect(result.prefixTrimStatus).toBe("applied");
+    return {
+        bytes: JSON.stringify(messages),
+        raw: messages.flatMap(({ info }) => {
+            const match = info.id?.match(/^m-(\d+)$/);
+            return match ? [Number(match[1])] : [];
+        }),
+    };
+}
+
 describe("full recomp staging", () => {
     let db: Database;
     const sessionId = "ses-recomp-v2-staging";
@@ -242,10 +273,9 @@ describe("full recomp staging", () => {
             sessionId,
             Array.from({ length: 12 }, (_, i) => oldSummary(i * 4 + 1, Math.min(i * 4 + 4, 46), i)),
         );
-        db.prepare(`INSERT OR IGNORE INTO session_meta(session_id) VALUES (?)`).run(sessionId);
+        await withMessages(sessionId, 60, async () => rebuildRequest(db, sessionId, 60, false));
         db.prepare(
-            `UPDATE session_meta SET cached_m0_bytes = 'frozen m0', cached_m1_bytes = 'frozen m1',
-                cached_m0_last_baseline_end_message_id = 'm-46', needs_emergency_recovery = 1,
+            `UPDATE session_meta SET needs_emergency_recovery = 1,
                 pending_compaction_marker_state = '{"ordinal":46}' WHERE session_id = ?`,
         ).run(sessionId);
         const cache = () =>
@@ -256,15 +286,18 @@ describe("full recomp staging", () => {
                 )
                 .get(sessionId);
         const before = { rows: getCompartments(db, sessionId), cache: cache() };
+        const beforeWire = rebuildRequest(db, sessionId, 60, true);
+        expect(beforeWire.raw[0]).toBe(47);
         const executor = executorCoveringRequestedRange((start) => (start === 1 ? 18 : null));
         const ctx = context(db, executor);
         const message = await withMessages(sessionId, 60, () => runManagedRecomp(ctx, sessionId));
 
+        expect(executor.requestedStarts).toContain(19);
+        expect({ rows: getCompartments(db, sessionId), cache: cache() }).toEqual(before);
+        expect(rebuildRequest(db, sessionId, 60, true).bytes).toBe(beforeWire.bytes);
         expect(message).toBe(
             "## Magic Recomp — Paused\n\nRebuilt messages 1-18 of 60, then stopped. History compression could not be rebuilt. (MC-R01)\nYour current history is unchanged.\nRun /ctx-recomp again to continue from message 19.",
         );
-        expect(executor.requestedStarts).toContain(19);
-        expect({ rows: getCompartments(db, sessionId), cache: cache() }).toEqual(before);
         expect(ctx.liveSessionState.recompProgressBySession.get(sessionId)?.phase).toBe("failed");
         expect(ctx.liveSessionState.historyRefreshSessions.has(sessionId)).toBe(false);
         expect(getRecompStaging(db, sessionId)?.lastEndMessage).toBe(18);
@@ -283,7 +316,11 @@ describe("full recomp staging", () => {
             Array.from({ length: endMessage - startMessage + 1 }, (_, i) => startMessage + i),
         );
         expect(coverage.at(-1)).toBe(59);
-        expect([...coverage, 60, 61, 62, 63, 64]).toEqual(
+        const resumedWire = await withMessages(sessionId, 64, async () =>
+            rebuildRequest(db, sessionId, 64, false),
+        );
+        expect(resumedWire.bytes).toContain("Rebuilt 19-59.");
+        expect([...coverage, ...resumedWire.raw]).toEqual(
             Array.from({ length: 64 }, (_, i) => i + 1),
         );
 
@@ -334,6 +371,25 @@ describe("full recomp staging", () => {
             ["Rebuilt", 18],
         ]);
         expect(getRecompStaging(db, sessionId)).toBeNull();
+    });
+
+    it.each([
+        "m-46",
+        null,
+        "retired-id",
+    ])("compares the live end by raw ordinal or falls back to the stored boundary (%s)", async (endId) => {
+        appendCompartments(db, sessionId, [oldSummary(1, endId === "m-46" ? 12 : 46, 0)]);
+        db.prepare("UPDATE compartments SET end_message_id = ? WHERE session_id = ?").run(
+            endId,
+            sessionId,
+        );
+        const executor = executorCoveringRequestedRange((start) => (start === 1 ? 18 : null));
+        const result = await withMessages(sessionId, 60, () =>
+            executeContextRecompWithResult(buildRecompDeps(context(db, executor), sessionId)),
+        );
+        expect(result.message).toStartWith("## Magic Recomp — Paused");
+        expect(result.published).toBe(false);
+        expect(getRecompStaging(db, sessionId)?.lastEndMessage).toBe(18);
     });
 
     it.each([

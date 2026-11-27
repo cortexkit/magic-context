@@ -171,6 +171,14 @@
             "hosts": ["pi", "omp"]
         },
         {
+            "path": "tests/recomp-paused.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 1 and Pi keep the published summaries, cached history and marker when a recomp stops early. The next provider body matches a control byte for byte, and the following recomp resumes at the first unbuilt ordinal. Host PID lsof confirms throwaway-store containment.",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["opencode", "pi"]
+        },
+        {
             "path": "tests/opencode2/error-result-compaction.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
@@ -1160,6 +1168,14 @@
             "hosts": [
                 "opencode2"
             ]
+        },
+        {
+            "path": "tests/opencode2/recomp-paused.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 2 with a manual checkpoint keeps all user and assistant history exactly once when a recomp stops early. The next provider body matches a same-session control byte for byte with a cache hit, and the following recomp resumes from the staged boundary. Host PID lsof confirms throwaway-store containment.",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
         },
         {
             "path": "tests/opencode2/compartment-boundary-host-row.test.ts",
