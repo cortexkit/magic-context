@@ -8,7 +8,7 @@ import {
 import { spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
 import { providerSystemText } from "../../src/provider-system-text";
 import {
-    assertStoreIsolation, clientFor, expectExactlyOnce, expectUnchangedPrefix, HISTORIAN_SYSTEM,
+    assertStoreIsolation, clientFor, expectExactlyOnce, expectRestoredHistory, expectUnchangedPrefix, HISTORIAN_SYSTEM,
     IMPORTED_SUMMARY, probe, readRows, recomp, revert, type Session, state, summaries,
 } from "./stale-floor-fixture";
 
@@ -112,8 +112,11 @@ async function withConvertedSession(label: string, turns: number, scenario: (s: 
             await waitForPluginActive(client, fixture.cwd);
             assertStoreIsolation(host);
             expect(state(s).cut?.data.summary).toBe(IMPORTED_SUMMARY);
-            expectExactlyOnce(await probe(s, `${label}-before-first`));
-            expectExactlyOnce(await probe(s, `${label}-before-next`));
+            const first = await probe(s, `${label}-before-first`);
+            const next = await probe(s, `${label}-before-next`);
+            expectExactlyOnce(first);
+            expectExactlyOnce(next);
+            expectUnchangedPrefix(first, next);
             await scenario(s, value => { partial = value; });
         } finally {
             try { assertStoreIsolation(host); } finally { await host.stopHost(); }
@@ -135,8 +138,8 @@ test("a partial rebuild of converted history keeps rows below the imported check
         const [first, next] = await shrink(s, setPartial, "imported");
         const after = state(s);
         expect(after.seq.get(after.summaries.at(-1)!.endId)!).toBeLessThan(after.cut!.seq);
-        expectExactlyOnce(first);
-        expectExactlyOnce(next);
+        expectRestoredHistory(first);
+        expectRestoredHistory(next);
         expectUnchangedPrefix(first, next);
     });
 }, 600_000);
@@ -162,8 +165,8 @@ async function rebuildAndRevert(s: Session, setPartial: (value: boolean) => void
         expect(first.heads).toEqual([]);
         expect(next.heads).toEqual([]);
     }
-    expectExactlyOnce(first);
-    expectExactlyOnce(next);
+    expectRestoredHistory(first);
+    expectRestoredHistory(next);
     expect(state(s).summaries.map(summary => summary.endId)).toEqual(surviving.map(summary => summary.endId));
     expectUnchangedPrefix(first, next);
 }

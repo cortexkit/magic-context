@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
+import { getHiddenSeamPlaceholderIds, getStrippedPlaceholderIds } from "../../../plugin/src/features/magic-context/storage-meta-persisted";
 import { estimateTokens } from "../../../plugin/src/hooks/magic-context/read-session-formatting";
 import { Database } from "../../../plugin/src/shared/sqlite";
 import { V2StoreReader } from "../../../plugin/src/v2/store-reader";
@@ -163,6 +164,18 @@ export async function probe(s: Session, label: string) {
     const wire = wires.at(-1);
     const text = JSON.stringify(wire?.input ?? wire?.messages ?? []);
     const heads = [...text.matchAll(/History \d+-\d+/g)].map(match => match[0]);
+    const db = new Database(contextDbPath(s.host), { readonly: true, fileMustExist: true });
+    const { droppedTags, stripped, hiddenSeam } = (() => {
+        try {
+            return {
+                droppedTags: db.prepare("SELECT message_id AS id, tag_number AS tag FROM tags WHERE session_id=? AND type='message' AND status='dropped'").all(s.sessionId) as { id: string; tag: number }[],
+                stripped: getStrippedPlaceholderIds(db, s.sessionId),
+                hiddenSeam: getHiddenSeamPlaceholderIds(db, s.sessionId),
+            };
+        } finally {
+            db.close();
+        }
+    })();
     const accounted = before.conversation.map(row => {
         const raw = row.marker ? text.split(row.marker).length - 1 : 0;
         const summarized = before.summaries.filter(summary => {
@@ -170,14 +183,25 @@ export async function probe(s: Session, label: string) {
             const last = before.seq.get(summary.endId);
             return first !== undefined && last !== undefined && row.seq >= first && row.seq <= last;
         }).reduce((count, { title }) => count + heads.filter(head => head === title).length, 0);
-        return { seq: row.seq, marker: row.marker ?? row.id, raw, summarized,
+        const tags = droppedTags.filter(tag => tag.id.startsWith(`${row.id}:`));
+        const placeholders = tags.reduce((count, { tag }) => count + text.split(`[dropped §${tag}§]`).length - 1, 0);
+        const neutralized = row.type === "assistant" && !raw && !summarized && !placeholders && stripped.has(row.id)
+            ? hiddenSeam.has(row.id) ? "removed by frozen seam decision" : "neutralized by frozen placeholder decision"
+            : undefined;
+        return { id: row.id, seq: row.seq, marker: row.marker ?? row.id, raw, summarized, placeholders, neutralized,
+            droppedTagNumbers: tags.map(({ tag }) => tag), frozenPlaceholder: stripped.has(row.id), frozenSeam: hiddenSeam.has(row.id),
             category: raw && summarized ? "both" : raw ? "raw" : summarized ? "summary" : "lost" };
     });
     const missing = accounted.filter(row => row.category === "lost").map(row => [row.seq, row.marker]);
     const repeated = accounted.filter(row => row.raw + row.summarized > 1);
-    const events = log(s).slice(logOffset).split("\n").filter(line => /MC-S06|MC-H\d+|replay refused|history boundary (repair|unresolved)|cache_hit|cache_bust/.test(line));
+    const passLog = log(s).slice(logOffset);
+    const events = passLog.split("\n").filter(line => /MC-S06|MC-H\d+|replay refused|history boundary (repair|unresolved)|cache_hit|cache_bust|HARD fold decision|compartment trigger|stale-floor trigger|v2 restore: ignored/.test(line));
     console.log(`wire ${label}: ${JSON.stringify({ sent: wires.length, elapsedMs, sizes: wires.map(requestTokens), heads, stored: accounted.length, missing, repeated, historian: historian.length, events })}`);
-    return { marker, wire, heads, missing, repeated, sent: wires.length };
+    const ingress = passLog.match(/stale-floor ingress: (\[.*\])/);
+    return { marker, wire, heads, missing, repeated, sent: wires.length, accounted,
+        staleHeads: heads.filter(title => !before.summaries.some(summary => summary.title === title)),
+        ingress: ingress ? JSON.parse(ingress[1]!) as string[] : undefined,
+    };
 }
 
 export type Probe = Awaited<ReturnType<typeof probe>>;
@@ -186,6 +210,24 @@ export function expectExactlyOnce(result: Probe): void {
     expect(result.sent).toBe(1);
     expect(result.missing).toEqual([]);
     expect(result.repeated).toEqual([]);
+}
+
+export function expectRestoredHistory(result: Probe): void {
+    expect(result.sent).toBe(1);
+    expect(result.staleHeads).toEqual([]);
+    if (process.env.MC_E2E_REQUIRE_STALE_FLOOR_TRACE === "1") expect(result.ingress).toBeDefined();
+    const unrestored = [];
+    const decisions = [];
+    for (const row of result.accounted) {
+        const states = row.raw + row.summarized + row.placeholders + Number(!!row.neutralized);
+        if (states !== 1) unrestored.push(row);
+        const ingressCount = result.ingress?.filter(id => id === row.id).length;
+        if (row.summarized === 0 && ingressCount !== undefined && ingressCount !== 1)
+            unrestored.push({ seq: row.seq, ingressCount });
+        if (row.neutralized || row.placeholders) decisions.push([row.seq, row.neutralized ?? "tagged drop placeholder"]);
+    }
+    console.log(`recorded drop replay: ${JSON.stringify(decisions)}`);
+    expect(unrestored).toEqual([]);
 }
 
 export function expectUnchangedPrefix(first: Probe, next: Probe): void {

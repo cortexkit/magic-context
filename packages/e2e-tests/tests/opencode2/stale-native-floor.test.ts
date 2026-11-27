@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { estimateTokens } from "../../../plugin/src/hooks/magic-context/read-session-formatting";
 import { isolation, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
 import {
-    assertStoreIsolation, clientFor, expectExactlyOnce, expectUnchangedPrefix, probe,
+    assertStoreIsolation, clientFor, expectRestoredHistory, expectUnchangedPrefix, probe,
     recomp, requestTokens, revert, type Session, state, turn, waitFor,
 } from "./stale-floor-fixture";
 
@@ -102,8 +102,8 @@ test("a partial rebuild after manual compact keeps the unreached rows visible", 
         expect(after.summaries.at(-1)!.endMessage).toBeLessThan(before.summaries.at(-1)!.endMessage);
         const first = await probe(s, "native-partial-first");
         const next = await probe(s, "native-partial-next");
-        expectExactlyOnce(first);
-        expectExactlyOnce(next);
+        expectRestoredHistory(first);
+        expectRestoredHistory(next);
         expectUnchangedPrefix(first, next);
     });
 }, 600_000);
@@ -122,8 +122,8 @@ test("a committed revert after the early checkpoint restores the surviving rows 
         expect(before.summaries.every(summary => !after.seq.has(summary.endId))).toBe(true);
         const first = await probe(s, "native-revert-first");
         const next = await probe(s, "native-revert-next");
-        expectExactlyOnce(first);
-        expectExactlyOnce(next);
+        expectRestoredHistory(first);
+        expectRestoredHistory(next);
         expect(first.heads).toEqual([]);
         expect(next.heads).toEqual([]);
         expect(state(s).summaries).toEqual([]);

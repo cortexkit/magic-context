@@ -1194,12 +1194,12 @@
         },
         {
             "path": "tests/opencode2/stale-native-floor.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "Fix in progress: real manual checkpoints after a partial rebuild or a committed revert can hide stored history or refuse a turn.",
+            "rationale": "Real manual checkpoints after a partial history rebuild or a committed revert restore the surviving rows, preserving recorded reductions and the next request's prefix. Also measures pressure when the unreached raw range exceeds the model window.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1209,12 +1209,12 @@
         },
         {
             "path": "tests/opencode2/stale-imported-floor.test.ts",
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "Fix in progress: converted checkpoints can hide unreached history after a partial rebuild or serve stale summaries after a committed revert.",
+            "rationale": "Real sessions created on OpenCode 1 and converted by OpenCode 2 pin stable healthy replay, restoration after a partial rebuild, and summary retirement after a committed revert.",
             "contract_refs": [
                 "OC2-S1"
             ],
