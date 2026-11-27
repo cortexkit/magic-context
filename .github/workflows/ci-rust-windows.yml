@@ -34,6 +34,8 @@ jobs:
           toolchain: stable-${{ matrix.target }}
       - name: Build and test the Rust workspace natively
         shell: bash
+        # Leave time for the log upload if more than one command hits its limit.
+        timeout-minutes: 165
         env:
           MC_WINDOWS_TARGET: ${{ matrix.target }}
           RUSTUP_TOOLCHAIN: stable-${{ matrix.target }}
