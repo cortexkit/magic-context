@@ -74,9 +74,13 @@ export function withStorageFileMutex<T>(directory: string, work: () => T, timeou
             writeStorageFileSync(ownPath, encodedTicket(), { flag: "wx", forcePrivate: true });
             break;
         } catch (error) {
-            // Each release can remove the empty directory between mkdir and
-            // ticket creation. No ticket exists yet, so retry until the deadline.
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT" || performance.now() >= deadline)
+            // A peer can remove the empty directory before this process writes its ticket.
+            // On macOS, this race can also give EEXIST from mkdir or EINVAL from open.
+            const code = (error as NodeJS.ErrnoException).code;
+            if (
+                (code !== "ENOENT" && code !== "EEXIST" && code !== "EINVAL") ||
+                performance.now() >= deadline
+            )
                 throw error;
         }
     }
