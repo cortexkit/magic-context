@@ -3,8 +3,8 @@ import { deleteChunkEmbedBackoffForSession } from "../../features/magic-context/
 import { embedAndStoreCompartmentChunks } from "../../features/magic-context/compartment-embedding";
 import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment-lease";
 import {
-    clearRecompStaging,
     type Compartment,
+    clearRecompStaging,
     getCompartments,
     getRecompPartialRange,
     getRecompStaging,

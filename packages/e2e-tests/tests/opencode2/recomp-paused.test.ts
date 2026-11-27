@@ -425,7 +425,10 @@ test("a stopped recomp preserves the next request after a manual checkpoint, the
     }
 }, 600_000);
 
-test("carries an aligned noise tail without changing the full provider body", async () => {
+test.each([
+    "carry",
+    "discard",
+] as const)("keeps the full provider body after noise-tail %s", async (kind) => {
     const fixture = isolation();
     const logPath = join(fixture.root, "recomp-noise.log");
     fixture.env.MAGIC_CONTEXT_LOG_PATH = logPath;
@@ -455,7 +458,7 @@ test("carries an aligned noise tail without changing the full provider body", as
     const hostDb = hostDbPath(host);
     const context = contextDbPath(host);
     const marker = "RECOMP-NOISE-WIRE-PROBE";
-    const capture = async () => {
+    const assertIsolated = () => {
         if (!scenario.host.pid) throw new Error("host pid missing");
         const paths = [
             ...new Set(inspectOpenFiles(scenario.host.pid, scenario.host.root, scenario.host.env)),
@@ -464,6 +467,9 @@ test("carries an aligned noise tail without changing the full provider body", as
         expect(paths).toContain(context);
         expect(paths.every((path) => path.startsWith(`${fixture.root}/`))).toBe(true);
         console.log(`lsof -p ${scenario.host.pid}: ${JSON.stringify(paths)}`);
+    };
+    const capture = async () => {
+        assertIsolated();
         const from = host.mock.requests().length;
         await turn(scenario.client, session.id, marker);
         const requests = servedFor(scenario, marker, from).filter(
@@ -480,6 +486,7 @@ test("carries an aligned noise tail without changing the full provider body", as
             usage: { input_tokens: 100, output_tokens: 10 },
         });
         for (let i = 0; i < 5; i++) await turn(client, session.id, `Noise fixture ledger ${i}`);
+        assertIsolated();
         await scenario.host.stopHost();
         closeDatabase();
         const reader = new V2StoreReader(hostDb);
@@ -507,7 +514,8 @@ test("carries an aligned noise tail without changing the full provider body", as
         } finally {
             sqlite.close();
         }
-        const seed = stageNoiseTailFixture(context, session.id, rawIds, true);
+        const aligned = kind === "carry";
+        const seed = stageNoiseTailFixture(context, session.id, rawIds, true, aligned);
         const files = [hostDb, context];
         for (const path of files) {
             const db = new Database(path, { fileMustExist: true });
@@ -526,6 +534,25 @@ test("carries an aligned noise tail without changing the full provider body", as
             copyFileSync(`${path}.noise-control`, path);
         }
         await restart(scenario);
+        const snapshot = () => ({
+            compartments: readRows(
+                context,
+                "SELECT * FROM compartments WHERE session_id = ? ORDER BY sequence",
+                session.id,
+            ),
+            cache: readRows(
+                context,
+                `SELECT cached_m0_bytes, cached_m1_bytes, cached_m0_last_baseline_end_message_id,
+                pending_compaction_marker_state FROM session_meta WHERE session_id = ?`,
+                session.id,
+            ),
+            mutations: readRows(
+                context,
+                "SELECT * FROM m0_mutation_log WHERE session_id = ? ORDER BY id",
+                session.id,
+            ),
+        });
+        const before = snapshot();
         const from = host.mock.requests().length;
         await scenario.client.session.command({
             sessionID: session.id,
@@ -535,10 +562,32 @@ test("carries an aligned noise tail without changing the full provider body", as
         const log = await waitForLog(logPath, "recomp finished");
         const outcome = log.split("\n").find((line) => line.includes("recomp finished"));
         console.log(outcome);
-        expect(outcome).toContain("recomp finished (published=true): ## Magic Recomp — Complete");
-        expect(outcome).toContain(
-            `Kept 1 existing history block through message ${seed.tail.endMessage}.`,
-        );
+        if (aligned) {
+            expect(outcome).toContain(
+                "recomp finished (published=true): ## Magic Recomp — Complete",
+            );
+            expect(outcome).toContain(
+                `Kept 1 existing history block through message ${seed.tail.endMessage}.`,
+            );
+            expect(
+                readRows(
+                    context,
+                    "SELECT end_message_id AS endId, episode_type AS kind, legacy FROM compartments WHERE session_id = ? ORDER BY sequence",
+                    session.id,
+                ),
+            ).toEqual([
+                { endId: seed.prefix.endMessageId, kind: null, legacy: 0 },
+                { endId: seed.tail.endMessageId, kind: "filtered-noise", legacy: 0 },
+            ]);
+        } else {
+            expect(outcome).toContain(
+                "recomp finished (published=false): ## Magic Recomp — Failed",
+            );
+            expect(outcome).toContain(
+                "The unfinished rebuild was discarded. Your current history is unchanged.",
+            );
+            expect(snapshot()).toEqual(before);
+        }
         expect(
             host.mock
                 .requests()
@@ -546,15 +595,8 @@ test("carries an aligned noise tail without changing the full provider body", as
                 .filter((request) => request.body.model === HISTORIAN_MODEL.id),
         ).toEqual([]);
         expect(
-            readRows(
-                context,
-                "SELECT end_message_id AS endId, episode_type AS kind FROM compartments WHERE session_id = ? ORDER BY sequence",
-                session.id,
-            ),
-        ).toEqual([
-            { endId: seed.prefix.endMessageId, kind: null },
-            { endId: seed.tail.endMessageId, kind: "filtered-noise" },
-        ]);
+            readRows(context, "SELECT 1 FROM recomp_compartments WHERE session_id = ?", session.id),
+        ).toEqual([]);
         expect(await capture()).toBe(expected);
     } finally {
         await scenario.host.stop();

@@ -11,6 +11,7 @@ export function stageNoiseTailFixture(
     sessionId: string,
     rawIds: string[],
     staged: boolean,
+    aligned = true,
 ) {
     const first = rawIds[0];
     const end = rawIds.at(-2);
@@ -47,7 +48,10 @@ export function stageNoiseTailFixture(
     };
     const db = openTestDb(dbPath, { create: false });
     try {
-        appendCompartments(db as never, sessionId, [prefix, tail]);
+        const live = aligned
+            ? [prefix, tail]
+            : [{ ...prefix, endMessage: tail.endMessage, endMessageId: tail.endMessageId }];
+        appendCompartments(db as never, sessionId, live);
         clearCachedM0M1(db as never, sessionId);
         if (staged) saveRecompStagingPass(db as never, sessionId, 1, [prefix], []);
     } finally {
