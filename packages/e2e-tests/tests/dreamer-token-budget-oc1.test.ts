@@ -120,6 +120,10 @@ test.skipIf(process.env.MC_E2E_OC1_BUDGET_PROBE !== "1")(
         process.env.PATH = `${join(liveHome, ".opencode", "bin")}:${original.PATH ?? ""}`;
         process.env.MC_E2E_PLUGIN_ENTRY = resolve(import.meta.dir, "../../plugin/src/index.ts");
         let h: TestHarness | undefined;
+        let releaseReplies!: () => void;
+        const until = new Promise<void>((resolve) => {
+            releaseReplies = resolve;
+        });
         try {
             const hostVersion = spawnSync("opencode", ["--version"], {
                 env: process.env,
@@ -175,13 +179,13 @@ test.skipIf(process.env.MC_E2E_OC1_BUDGET_PROBE !== "1")(
                         usage: LOW_USAGE,
                     };
                 }
-                // Keep the generation busy long enough for the real polling loop
-                // to see the previous persisted assistant usage and abort it.
+                // Only the budget monitor should end these generations. If a
+                // reply finishes first, the monitor may never see a busy child.
                 if (!finalize && payload.includes("tool_result")) {
-                    return { text: "investigating", usage: LOW_USAGE, delayMs: 3_000 };
+                    return { text: "investigating", usage: LOW_USAGE, until };
                 }
                 if (mode === "hard" && finalize && refusalCount >= 2) {
-                    return { text: "waiting", usage: LOW_USAGE, delayMs: 3_000 };
+                    return { text: "waiting", usage: LOW_USAGE, until };
                 }
                 return {
                     content: [{
@@ -249,6 +253,7 @@ test.skipIf(process.env.MC_E2E_OC1_BUDGET_PROBE !== "1")(
             assertNoLiveStores(h, liveHome);
             console.log(`[oc1-hard] refused=${refusalCount} record=${JSON.stringify(failed)}`);
         } finally {
+            releaseReplies();
             await h?.dispose();
             for (const [key, value] of Object.entries(original)) {
                 if (value === undefined) delete process.env[key];
