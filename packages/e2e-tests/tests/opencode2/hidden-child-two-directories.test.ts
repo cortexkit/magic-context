@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { writeJsonAtomically } from "../../src/write-json-atomically";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
@@ -55,7 +56,7 @@ test("OpenCode 2 dispatches each worktree's hidden run to its own hook", async (
                 title: "user session", location: { directory },
                 model: { providerID: "openai", id: "mock-model-user" },
             });
-            writeFileSync(join(directory, "hidden-child-command.json"), JSON.stringify({ seq, parentSessionID: user.id }));
+            writeJsonAtomically(join(directory, "hidden-child-command.json"), { seq, parentSessionID: user.id });
             const resultPath = join(directory, `hidden-child-result-${seq}.json`);
             await waitForFile(resultPath);
             results.push(JSON.parse(readFileSync(resultPath, "utf8")));

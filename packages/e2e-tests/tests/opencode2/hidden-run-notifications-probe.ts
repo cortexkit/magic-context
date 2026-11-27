@@ -19,6 +19,7 @@ import {
 	gaDatabasePath,
 	V2StoreReader,
 } from "../../../plugin/src/v2/store-reader";
+import { writeJsonAtomically } from "../../src/write-json-atomically";
 
 interface Command {
 	seq: number;
@@ -71,10 +72,7 @@ export default {
 				...context.session,
 				createHolder: async (input) => {
 					if (race && input.id.endsWith("_2")) {
-						writeFileSync(
-							file("at-second-candidate"),
-							JSON.stringify(input.id),
-						);
+						writeJsonAtomically(file("at-second-candidate"), input.id);
 						while (!existsSync(join(directory, "release-holder-race")))
 							await Bun.sleep(20);
 					}
@@ -98,10 +96,7 @@ export default {
 					),
 			},
 		);
-		writeFileSync(
-			file("ready"),
-			JSON.stringify({ version: context.app?.version }),
-		);
+		writeJsonAtomically(file("ready"), { version: context.app?.version });
 		void (async () => {
 			for (;;) {
 				await Bun.sleep(20);
@@ -131,10 +126,7 @@ export default {
 					);
 					const session = await context.session.get({ sessionID: handle.id });
 					parentID = session.parentID;
-					writeFileSync(
-						file(`opened-${command.seq}`),
-						JSON.stringify({ id: handle.id, parentID }),
-					);
+					writeJsonAtomically(file(`opened-${command.seq}`), { id: handle.id, parentID });
 					await executor.attempt(handle, {
 						path: { id: handle.id },
 						body: {

@@ -18,6 +18,7 @@ import {
 	waitForPluginActive,
 } from "../../src/opencode2-runner/spawn";
 import { providerSystemText } from "../../src/provider-system-text";
+import { writeJsonAtomically } from "../../src/write-json-atomically";
 
 const hasProbeSystem = (body: Record<string, unknown>, agent: string) =>
 	providerSystemText(body).split("\n").includes(`DREAM_LOOP_${agent}`);
@@ -115,9 +116,9 @@ test("OpenCode 2 tool-loop families execute scoped tools across steps and remove
 			if (name === "read")
 				writeFileSync(join(host.cwd, "fixture.txt"), "read-tool-result");
 			const resultFile = join(host.cwd, `dream-loop-result-${seq}.json`);
-			writeFileSync(
+			writeJsonAtomically(
 				join(host.cwd, "dream-loop-command.json"),
-				JSON.stringify({ parent: user.id, seq, agent: family.agent }),
+				{ parent: user.id, seq, agent: family.agent },
 			);
 			await waitFile(resultFile);
 			const result = JSON.parse(readFileSync(resultFile, "utf8"));
@@ -206,9 +207,9 @@ test("OpenCode 2 tool-loop families execute scoped tools across steps and remove
 					};
 		});
 		const mapFile = join(host.cwd, `dream-loop-result-${seq + 1}.json`);
-		writeFileSync(
+		writeJsonAtomically(
 			join(host.cwd, "dream-loop-command.json"),
-			JSON.stringify({ parent: user.id, seq: seq + 1, agent: "map-runner" }),
+			{ parent: user.id, seq: seq + 1, agent: "map-runner" },
 		);
 		await waitFile(mapFile);
 		const mapped = JSON.parse(readFileSync(mapFile, "utf8"));
@@ -247,9 +248,9 @@ test("OpenCode 2 tool-loop families execute scoped tools across steps and remove
 					};
 		});
 		const deniedResultFile = join(host.cwd, `dream-loop-result-${seq}.json`);
-		writeFileSync(
+		writeJsonAtomically(
 			join(host.cwd, "dream-loop-command.json"),
-			JSON.stringify({ parent: user.id, seq, agent: "dreamer-docs" }),
+			{ parent: user.id, seq, agent: "dreamer-docs" },
 		);
 		await waitFile(deniedResultFile);
 		const denied = JSON.parse(readFileSync(deniedResultFile, "utf8"));

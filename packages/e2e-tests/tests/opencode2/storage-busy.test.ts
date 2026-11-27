@@ -244,6 +244,7 @@ test("OpenCode 2 background contention releases the server after one busy timeou
     const dbPath = join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!,"context.db");
     writeFileSync(join(probe,"server.js"), `
         import { Database } from ${JSON.stringify(new URL("../../../plugin/src/shared/sqlite.ts", import.meta.url).pathname)};
+        import { writeJsonAtomically } from ${JSON.stringify(new URL("../../src/write-json-atomically.ts", import.meta.url).pathname)};
         import { existsSync, writeFileSync } from 'node:fs';
         export default { id:'background-contention-probe', async setup() {
             const db = new Database(${JSON.stringify(dbPath)});
@@ -255,7 +256,7 @@ test("OpenCode 2 background contention releases the server after one busy timeou
                 writeFileSync(${JSON.stringify(started)}, String(Date.now()));
                 let calls = 0;
                 try { db.transaction(() => { calls++; db.exec('INSERT INTO scope_background_probe VALUES (1)'); }).immediate(); }
-                catch (error) { writeFileSync(${JSON.stringify(result)}, JSON.stringify({elapsed:performance.now()-begin, calls, code:error.code, name:error.name})); }
+                catch (error) { writeJsonAtomically(${JSON.stringify(result)}, {elapsed:performance.now()-begin, calls, code:error.code, name:error.name}); }
                 finally { db.close(); }
             }, 20);
         }};

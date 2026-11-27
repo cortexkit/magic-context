@@ -36,6 +36,7 @@ import {
 	applyRetrospectiveLearnings,
 	parseRetrospectiveLearnings,
 } from "../../../plugin/src/features/magic-context/dreamer/retrospective-learnings";
+import { writeJsonAtomically } from "../../src/write-json-atomically";
 
 export default {
 	id: "mc-dream-loop-probe",
@@ -140,14 +141,14 @@ export default {
                         if (!acquireLease(db, args.holderId, args.leaseKey)) throw new Error("No verify lease");
                         const outcome = await runVerify(args);
                         const banked = ids.filter((id) => (getMemoryVerifications(db, ids).get(id)?.verifiedAt ?? 0) > 1000);
-                        writeFileSync(join(root, `dream-loop-result-${command.seq}.json`), JSON.stringify({ outcome, banked }));
+                        writeJsonAtomically(join(root, `dream-loop-result-${command.seq}.json`), { outcome, banked });
                         continue;
                     }
                     if (command.agent === "step-cap-runner") {
                         insertMemory(db, { projectPath: root, category: "ARCHITECTURE", content: "A fixture memory to curate." });
                         const execute = createDreamTaskExecutor({ sessionDirectory: root, parentSessionId: command.parent, hiddenCompletionExecutor: executor, openOpenCodeDb: () => null });
                         const result = await execute({ task: "curate", schedule: "0 4 * * 0", model: "openai/mock-model", timeoutMinutes: 5 }, { db, projectIdentity: root, holderId: "step-cap-proof", leaseKey: leaseKeyFor("curate", root) });
-                        writeFileSync(join(root, `dream-loop-result-${command.seq}.json`), JSON.stringify({ result, runs: getDreamRuns(db, root) }));
+                        writeJsonAtomically(join(root, `dream-loop-result-${command.seq}.json`), { result, runs: getDreamRuns(db, root) });
                         continue;
                     }
 					if (command.agent === "map-runner") {
@@ -171,14 +172,14 @@ export default {
 							deadline: Date.now() + MAP_BATCH_FLOOR_MS + 60000,
 							model: "openai/mock-model",
 						});
-						writeFileSync(
+						writeJsonAtomically(
 							join(root, `dream-loop-result-${command.seq}.json`),
-							JSON.stringify({
+							{
 								ok: true,
 								memoryID: memory.id,
 								outcome,
 								mapping: getMemoryVerifications(db, [memory.id]).get(memory.id),
-							}),
+							},
 						);
 						continue;
 					}
@@ -212,18 +213,18 @@ export default {
 									userMemoryCollectionEnabled: false,
 								})
 							: undefined;
-					writeFileSync(
+					writeJsonAtomically(
 						join(root, `dream-loop-result-${command.seq}.json`),
-						JSON.stringify({ ok: true, child: handle.id, completion, applied }),
+						{ ok: true, child: handle.id, completion, applied },
 					);
 				} catch (error) {
-					writeFileSync(
+					writeJsonAtomically(
 						join(root, `dream-loop-result-${command.seq}.json`),
-						JSON.stringify({
+						{
 							ok: false,
 							child: handle?.id,
 							error: String(error),
-						}),
+						},
 					);
 				} finally {
 					await executor.close(handle, {

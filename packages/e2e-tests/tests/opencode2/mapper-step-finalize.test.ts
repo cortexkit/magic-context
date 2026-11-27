@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { writeJsonAtomically } from "../../src/write-json-atomically";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
@@ -45,7 +46,7 @@ test.skipIf(process.env.MC_E2E_MAPPER_STEP_PROBE !== "1")("real OpenCode 2 verif
             calls++;
             return { openaiOutput: [{ type: "function_call", id: `fc_lookup_${calls}`, call_id: `lookup_${calls}`, name: "read", arguments: JSON.stringify({ filePath: "fact.txt" }) }], usage: { input_tokens: 10, output_tokens: 10 } };
         });
-        writeFileSync(join(host.cwd, "dream-loop-command.json"), JSON.stringify({ parent: parent.id, seq: 1, agent: "verify-step-runner" }));
+        writeJsonAtomically(join(host.cwd, "dream-loop-command.json"), { parent: parent.id, seq: 1, agent: "verify-step-runner" });
         const resultPath = join(host.cwd, "dream-loop-result-1.json");
         const deadline = Date.now() + 90000;
         while (!existsSync(resultPath)) {

@@ -1,4 +1,5 @@
 import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { writeJsonAtomically } from "../../src/write-json-atomically";
 import { join } from "node:path";
 import { openDatabase } from "../../../plugin/src/features/magic-context/storage";
 import { getDataDir } from "../../../plugin/src/shared/data-path";
@@ -125,9 +126,9 @@ export default {
                 const command = JSON.parse(readFileSync(commandPath, "utf8")) as Command;
                 unlinkSync(commandPath);
                 const result = await run(command);
-                writeFileSync(
+                writeJsonAtomically(
                     join(dir, `hidden-child-result-${command.seq}.json`),
-                    JSON.stringify({ ...result, finishedAt: Date.now() }),
+                    { ...result, finishedAt: Date.now() },
                 );
             }
         })();

@@ -43,7 +43,8 @@ check e2e-harness-tests bash -c 'cd packages/e2e-tests && bun test \
     src/rust-pass-observation.test.ts \
     src/rust-runner/executable-staging.test.ts \
     src/rust-runner/hermetic-subc.test.ts \
-    src/temp-dir.test.ts'
+    src/temp-dir.test.ts \
+    src/write-json-atomically.test.ts'
 check slow-unit-inventory bash -c 'cd packages/e2e-tests && bun scripts/run-slow-unit-tests.ts --dry-run'
 # doctor --issue keeps a log line's wording only when the line matches a template
 # generated from source, so a new or edited plugin/Pi log call must regenerate

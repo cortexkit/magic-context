@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { writeJsonAtomically } from "../../src/write-json-atomically";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
@@ -55,7 +56,7 @@ test("OpenCode 2 ordinary and hidden historian omit caps; a provider default exh
             };
             return { text: "successful historian", usage: { input_tokens: 101, output_tokens: 21 } };
         });
-        writeFileSync(join(host.cwd, "hidden-child-command.json"), JSON.stringify({ seq: 1, parentSessionID: user.id }));
+        writeJsonAtomically(join(host.cwd, "hidden-child-command.json"), { seq: 1, parentSessionID: user.id });
         await waitFile(join(host.cwd, "hidden-child-result-1.json"));
         const hidden = host.mock.requests().find((request) => JSON.stringify(request.body).includes("EXACT_HISTORIAN_CHUNK_1"));
         expect(hidden).toBeDefined();
@@ -69,7 +70,7 @@ test("OpenCode 2 ordinary and hidden historian omit caps; a provider default exh
         expect(diagnostic).toContain("ran out of output budget while reasoning");
         expect(diagnostic).toContain("historian.maxTokens");
         expect(diagnostic).not.toContain("no assistant output");
-        writeFileSync(join(host.cwd, "hidden-child-command.json"), JSON.stringify({ seq: 2, parentSessionID: user.id, maxOutputTokens: 4096 }));
+        writeJsonAtomically(join(host.cwd, "hidden-child-command.json"), { seq: 2, parentSessionID: user.id, maxOutputTokens: 4096 });
         await waitFile(join(host.cwd, "hidden-child-result-2.json"));
         const second = JSON.parse(readFileSync(join(host.cwd, "hidden-child-result-2.json"), "utf8"));
         expect(second.completion).toMatchObject({ text: "successful historian", lengthCapped: false });

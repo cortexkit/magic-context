@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { assertOpenPaths, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
 import { providerSystemText } from "../../src/provider-system-text";
+import { writeJsonAtomically } from "../../src/write-json-atomically";
 
 async function waitFile(path: string) {
     const deadline = Date.now() + 90_000;
@@ -51,7 +52,7 @@ test("OpenCode 2 dreamer tool loop reaching its cap records step_limit, not prov
             return { openaiOutput: [{ type: "function_call", id: `fc_cap_${calls}`, call_id: `call_cap_${calls}`, name: "ctx_memory", arguments: JSON.stringify({ action: "list", value: "fixture" }) }], usage: { input_tokens: 100, output_tokens: 10 } };
         });
         const resultPath = join(host.cwd, "dream-loop-result-550.json");
-        writeFileSync(join(host.cwd, "dream-loop-command.json"), JSON.stringify({ parent: user.id, seq: 550, agent: "step-cap-runner" }));
+        writeJsonAtomically(join(host.cwd, "dream-loop-command.json"), { parent: user.id, seq: 550, agent: "step-cap-runner" });
         await waitFile(resultPath);
         const result = JSON.parse(readFileSync(resultPath, "utf8"));
         expect(calls).toBeGreaterThanOrEqual(150);

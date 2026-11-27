@@ -3667,6 +3667,15 @@
             "rationale": "Verifies e2e infrastructure without launching a real host.",
             "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
             "hosts": []
+        },
+        {
+            "path": "src/write-json-atomically.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
         }
     ]
 }

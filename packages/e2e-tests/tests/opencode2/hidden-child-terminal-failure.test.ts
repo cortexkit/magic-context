@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { Database } from "../../../plugin/src/shared/sqlite";
 import { gaDatabasePath } from "../../../plugin/src/v2/store-reader";
 import { spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
+import { writeJsonAtomically } from "../../src/write-json-atomically";
 
 async function waitForFile(path: string, timeoutMs = 60_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
@@ -118,9 +119,9 @@ test("OpenCode 2 hidden historian survives a retried and a terminal provider fai
         });
         const command = async (seq: number): Promise<RunResult> => {
             const resultPath = join(host.cwd, `hidden-child-result-${seq}.json`);
-            writeFileSync(
+            writeJsonAtomically(
                 join(host.cwd, "hidden-child-command.json"),
-                JSON.stringify({ seq, parentSessionID: user.id }),
+                { seq, parentSessionID: user.id },
             );
             await waitForFile(resultPath);
             return JSON.parse(readFileSync(resultPath, "utf8")) as RunResult;

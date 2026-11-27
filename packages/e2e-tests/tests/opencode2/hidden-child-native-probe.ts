@@ -1,5 +1,6 @@
-import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { writeJsonAtomically } from "../../src/write-json-atomically";
 
 /**
  * Loaded next to Magic Context. It reports two things the host-level test cannot see from outside:
@@ -38,9 +39,9 @@ export default {
         } catch (error) {
             metadataForward = `error: ${String(error)}`;
         }
-        writeFileSync(
+        writeJsonAtomically(
             join(directory, "native-probe-capability.json"),
-            JSON.stringify({ remove: typeof context.session.remove, metadataForward, metadataSemantics }),
+            { remove: typeof context.session.remove, metadataForward, metadataSemantics },
         );
         if (typeof context.session.remove === "function" && !existsSync(join(directory, "native-remove-done.json"))) {
             void (async () => {
@@ -52,8 +53,8 @@ export default {
                 let missingError = "";
                 try { await context.session.remove({ sessionID: child.id }); }
                 catch (error) { missingError = String(error); }
-                writeFileSync(join(directory, "native-remove-done.json"), JSON.stringify({ id: child.id, missingError }));
-            })().catch((error) => writeFileSync(join(directory, "native-remove-done.json"), JSON.stringify({ error: String(error) })));
+                writeJsonAtomically(join(directory, "native-remove-done.json"), { id: child.id, missingError });
+            })().catch((error) => writeJsonAtomically(join(directory, "native-remove-done.json"), { error: String(error) }));
         }
         const seen = new Set<string>();
         await context.session.hook("context", async (draft: { sessionID: string }) => {
