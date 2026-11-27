@@ -442,6 +442,25 @@ pub(crate) mod tests {
     use super::*;
     use std::collections::VecDeque;
 
+    // Windows needs a drive prefix even for an absolute fixture that only
+    // labels a mock publication and never touches the filesystem.
+    macro_rules! fixture_workdir {
+        ($path:literal) => {{
+            #[cfg(windows)]
+            let path = concat!("C:", $path);
+            #[cfg(not(windows))]
+            let path = $path;
+            path
+        }};
+    }
+    const WORK_A: &str = fixture_workdir!("/work/a");
+    const WORK_B: &str = fixture_workdir!("/work/b");
+    const WORK_LAB: &str = fixture_workdir!("/work/lab");
+    const WORK_LAST: &str = fixture_workdir!("/work/last");
+    pub(crate) const WORK_NEW: &str = fixture_workdir!("/work/new");
+    pub(crate) const WORK_OLD: &str = fixture_workdir!("/work/old");
+    pub(crate) const WORK_ORDINARY: &str = fixture_workdir!("/work/ordinary");
+
     #[derive(Default)]
     pub(crate) struct Recorder {
         pub(crate) syncs: Mutex<Vec<(u64, Vec<ScopeRecord>)>>,
@@ -496,9 +515,9 @@ pub(crate) mod tests {
         let scopes = ChildScopes::new("magic-context");
         let recorder = Arc::new(Recorder::default());
         scopes.set_publisher(recorder.clone());
-        let first = scopes.for_child("/work/a").await.unwrap();
-        assert_eq!(scopes.for_child("/work/a").await.unwrap(), first);
-        scopes.for_child("/work/b").await.unwrap();
+        let first = scopes.for_child(WORK_A).await.unwrap();
+        assert_eq!(scopes.for_child(WORK_A).await.unwrap(), first);
+        scopes.for_child(WORK_B).await.unwrap();
         let syncs = recorder.syncs.lock().unwrap().clone();
         assert_eq!(syncs.len(), 2, "a known project does not sync again");
         let (generation, records) = &syncs[1];
@@ -507,13 +526,13 @@ pub(crate) mod tests {
             .iter()
             .map(|record| record.workdir.clone().unwrap())
             .collect();
-        assert_eq!(folders, ["/work/a", "/work/b"]);
+        assert_eq!(folders, [WORK_A, WORK_B]);
         assert_eq!(records[0].carriers.len(), 2);
         assert!(records
             .iter()
             .all(|record| record.kind == ScopeKind::Ephemeral && record.project_id.is_none()));
         scopes.forget_sync().await;
-        scopes.for_child("/work/a").await.unwrap();
+        scopes.for_child(WORK_A).await.unwrap();
         assert_eq!(
             recorder.syncs.lock().unwrap().len(),
             3,
@@ -526,7 +545,7 @@ pub(crate) mod tests {
         let scopes = ChildScopes::new("magic-context");
         let recorder = Arc::new(Recorder::default());
         scopes.set_publisher(recorder.clone());
-        let root = "/work/lab";
+        let root = WORK_LAB;
         let plain = scopes.for_child(root).await.unwrap();
         let first = for_worker(
             &scopes,
@@ -569,18 +588,18 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn refused_worker_publication_leaves_ordinary_scopes_usable() {
         let (scopes, recorder) = setup();
-        scopes.for_child("/work/old").await.unwrap();
+        scopes.for_child(WORK_OLD).await.unwrap();
         recorder.reject_workers.store(true, Ordering::Relaxed);
-        let worker = WorkerScope::new("/work/lab", "project", "run").unwrap();
+        let worker = WorkerScope::new(WORK_LAB, "project", "run").unwrap();
         let error = for_worker(&scopes, &worker).await.unwrap_err();
         assert_eq!(error, refusal("worker_refused"));
-        scopes.for_child("/work/new").await.unwrap();
+        scopes.for_child(WORK_NEW).await.unwrap();
 
         let syncs = recorder.syncs.lock().unwrap();
         assert_eq!(syncs.len(), 4);
         assert_eq!(syncs[1].1[0].kind, ScopeKind::Worker);
         assert_eq!(syncs[2], (3, syncs[0].1.clone()));
-        assert_eq!(ordinary_folders(&syncs[3].1), ["/work/new", "/work/old"]);
+        assert_eq!(ordinary_folders(&syncs[3].1), [WORK_NEW, WORK_OLD]);
     }
 
     #[tokio::test]
@@ -591,22 +610,22 @@ pub(crate) mod tests {
             .lock()
             .unwrap()
             .push_back(refusal("ordinary_refused"));
-        let error = scopes.for_child("/work/old").await.unwrap_err();
+        let error = scopes.for_child(WORK_OLD).await.unwrap_err();
         assert_eq!(error, refusal("ordinary_refused"));
-        scopes.for_child("/work/new").await.unwrap();
+        scopes.for_child(WORK_NEW).await.unwrap();
 
         let syncs = recorder.syncs.lock().unwrap();
         assert_eq!(syncs.len(), 2);
-        assert_eq!(ordinary_folders(&syncs[1].1), ["/work/new", "/work/old"]);
+        assert_eq!(ordinary_folders(&syncs[1].1), [WORK_NEW, WORK_OLD]);
     }
 
     #[tokio::test]
     async fn ordinary_sync_evicts_a_worker_that_can_no_longer_be_published() {
         let (scopes, recorder) = setup();
-        let worker = WorkerScope::new("/work/lab", "project", "run").unwrap();
+        let worker = WorkerScope::new(WORK_LAB, "project", "run").unwrap();
         for_worker(&scopes, &worker).await.unwrap();
         recorder.reject_workers.store(true, Ordering::Relaxed);
-        scopes.for_child("/work/new").await.unwrap();
+        scopes.for_child(WORK_NEW).await.unwrap();
         let error = for_worker(&scopes, &worker).await.unwrap_err();
         assert_eq!(error.code, "worker_scope_evicted");
         assert!(error.message.contains("worker_refused"), "{error}");
@@ -617,14 +636,14 @@ pub(crate) mod tests {
             3,
             "an evicted Worker does not get a new publication"
         );
-        assert_eq!(ordinary_folders(&syncs[2].1), ["/work/new"]);
+        assert_eq!(ordinary_folders(&syncs[2].1), [WORK_NEW]);
     }
 
     #[tokio::test]
     async fn ordinary_records_stay_when_retrying_without_workers_also_fails() {
         let (scopes, recorder) = setup();
-        scopes.for_child("/work/old").await.unwrap();
-        let worker = WorkerScope::new("/work/lab", "project", "run").unwrap();
+        scopes.for_child(WORK_OLD).await.unwrap();
+        let worker = WorkerScope::new(WORK_LAB, "project", "run").unwrap();
         for_worker(&scopes, &worker).await.unwrap();
         recorder
             .errors
@@ -632,19 +651,19 @@ pub(crate) mod tests {
             .unwrap()
             .extend([refusal("first_error"), refusal("retry_error")]);
         assert_eq!(
-            scopes.for_child("/work/new").await.unwrap_err(),
+            scopes.for_child(WORK_NEW).await.unwrap_err(),
             refusal("first_error")
         );
         let error = for_worker(&scopes, &worker).await.unwrap_err();
         assert_eq!(error.code, "worker_scope_evicted");
-        scopes.for_child("/work/last").await.unwrap();
+        scopes.for_child(WORK_LAST).await.unwrap();
 
         let syncs = recorder.syncs.lock().unwrap();
         assert_eq!(syncs.len(), 5);
-        assert_eq!(ordinary_folders(&syncs[3].1), ["/work/new", "/work/old"]);
+        assert_eq!(ordinary_folders(&syncs[3].1), [WORK_NEW, WORK_OLD]);
         assert_eq!(
             ordinary_folders(&syncs[4].1),
-            ["/work/last", "/work/new", "/work/old"]
+            [WORK_LAST, WORK_NEW, WORK_OLD]
         );
     }
 
@@ -663,7 +682,7 @@ pub(crate) mod tests {
         let scopes = ChildScopes::new("magic-context");
         let error = scopes.for_child("work/a").await.unwrap_err();
         assert_eq!(error.code, "child_scope_invalid_workdir");
-        let error = scopes.for_child("/work/a").await.unwrap_err();
+        let error = scopes.for_child(WORK_A).await.unwrap_err();
         assert_eq!(error.code, "child_scope_owner_unavailable");
     }
 }

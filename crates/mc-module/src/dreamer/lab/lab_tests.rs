@@ -6,6 +6,7 @@ use cortexkit_role_tool_provider::catalog::{CatalogAnswer, CatalogTool};
 use rusqlite::params;
 
 use super::*;
+use crate::child_scopes::tests::{WORK_NEW, WORK_OLD, WORK_ORDINARY};
 use crate::context_db::ContextDb;
 use crate::dreamer::run::tests::{Client, Ends};
 
@@ -52,7 +53,13 @@ impl Fixture {
         let out = root.join("out");
         let spec = root.join("spec.json");
         let live = temp.path().join("live-context.db");
-        let frozen = temp.path().join("frozen ?#%.db");
+        // Exercise URI escaping with characters the host filesystem permits.
+        let frozen_name = if cfg!(windows) {
+            "frozen #%.db"
+        } else {
+            "frozen ?#%.db"
+        };
+        let frozen = temp.path().join(frozen_name);
         fs::create_dir_all(&persona).unwrap();
         fs::create_dir_all(&checkout).unwrap();
         fs::write(persona.join("PERSONA.md"), SYSTEM).unwrap();
@@ -694,7 +701,7 @@ async fn panicking_sidekick_lab_is_omitted_from_the_next_scope_sync() {
     let scopes = Arc::new(ChildScopes::new(crate::MODULE_ID));
     let publisher = Arc::new(Recorder::default());
     scopes.set_publisher(publisher.clone());
-    scopes.for_child("/work/old").await.unwrap();
+    scopes.for_child(WORK_OLD).await.unwrap();
     let mut spec = fixture.spec_value();
     spec["tools"] = json!(["sidekick"]);
     let start = fixture.start(&spec).await.unwrap();
@@ -715,7 +722,7 @@ async fn panicking_sidekick_lab_is_omitted_from_the_next_scope_sync() {
             .iter()
             .any(|record| record.kind == ScopeKind::Worker));
     }
-    scopes.for_child("/work/new").await.unwrap();
+    scopes.for_child(WORK_NEW).await.unwrap();
     let syncs = publisher.syncs.lock().unwrap();
     assert_eq!(syncs.len(), 3);
     let remaining = &syncs[2].1;
@@ -727,7 +734,7 @@ async fn panicking_sidekick_lab_is_omitted_from_the_next_scope_sync() {
             .iter()
             .map(|record| record.workdir.as_deref().unwrap())
             .collect::<Vec<_>>(),
-        ["/work/new", "/work/old"]
+        [WORK_NEW, WORK_OLD]
     );
 }
 
@@ -740,7 +747,7 @@ async fn sidekick_lab_deadline_republishes_without_the_unacknowledged_worker() {
     let scopes = Arc::new(ChildScopes::new(crate::MODULE_ID));
     let recorder = Arc::new(Recorder::default());
     scopes.set_publisher(recorder.clone());
-    scopes.for_child("/work/ordinary").await.unwrap();
+    scopes.for_child(WORK_ORDINARY).await.unwrap();
     recorder.stall_workers.store(true, Ordering::Relaxed);
     let mut spec = fixture.spec_value();
     spec["tools"] = json!(["sidekick"]);
