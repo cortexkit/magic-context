@@ -19,27 +19,38 @@ trap cleanup EXIT
 
 logs=target/windows-rust-logs
 mkdir -p "$logs"
-printf 'command\texit\tseconds\n' > "$logs/results.tsv"
+printf 'command\texit\tseconds\toutcome\n' > "$logs/results.tsv"
 status=0
 
 record() {
-    local label=$1 output start rc
+    local label=$1 output start rc outcome
     shift
     output=$logs/$label.log
     start=$SECONDS
     printf '+ %s\n' "$*" > "$output"
     rc=0
     "$@" >> "$output" 2>&1 || rc=$?
-    printf '%s\t%s\t%s\n' "$label" "$rc" "$((SECONDS - start))" >> "$logs/results.tsv"
-    printf '%s: exit %s in %ss (%s)\n' "$label" "$rc" "$((SECONDS - start))" "$output"
+    outcome=passed
+    if (( rc != 0 )); then outcome=failed; fi
+    # A command killed for another reason can also exit 137. Check timeout's
+    # signal diagnostic before counting it as a timeout.
+    if (( rc == 124 )) || { (( rc == 137 )) && grep -Fq 'timeout: sending signal ' "$output"; }; then
+        outcome=timeout
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$label" "$rc" "$((SECONDS - start))" "$outcome" >> "$logs/results.tsv"
+    printf '%s: %s (exit %s in %ss; %s)\n' "$label" "$outcome" "$rc" "$((SECONDS - start))" "$output"
     if (( rc != 0 )); then status=1; fi
+}
+
+bounded() {
+    LC_ALL=C timeout --verbose --kill-after=30s "$@"
 }
 
 toolchain() {
     local version
-    version=$(rustc -vV) || return
+    version=$(bounded 2m rustc -vV) || return
     printf '%s\n' "$version"
-    cargo -Vv || return
+    bounded 2m cargo -Vv || return
     if ! grep -Fxq "host: $MC_WINDOWS_TARGET" <<< "${version//$'\r'/}"; then
         printf 'Expected native Rust host: %s\n' "$MC_WINDOWS_TARGET" >&2
         return 1
@@ -62,17 +73,17 @@ export LOCALAPPDATA=$HOME/local APPDATA=$HOME/roaming
 mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$LOCALAPPDATA" "$APPDATA"
 
 live=(--features "agent-data,managed-settings,memory-replica")
-record module-default-build cargo build --locked -p mc-module
-record module-live-build cargo build --locked -p mc-module "${live[@]}"
-record module-default-test-compile cargo test --locked -p mc-module --no-run
-record module-live-test-compile cargo test --locked -p mc-module "${live[@]}" --no-run
-record module-default-test cargo test --locked -p mc-module --no-fail-fast
-record module-live-test cargo test --locked -p mc-module "${live[@]}" --no-fail-fast
+record module-default-build bounded 18m cargo build --locked -p mc-module
+record module-live-build bounded 18m cargo build --locked -p mc-module "${live[@]}"
+record module-default-test-compile bounded 20m cargo test --locked -p mc-module --no-run
+record module-live-test-compile bounded 20m cargo test --locked -p mc-module "${live[@]}" --no-run
+record module-default-test bounded 45m cargo test --locked -p mc-module --no-fail-fast
+record module-live-test bounded 45m cargo test --locked -p mc-module "${live[@]}" --no-fail-fast
 
 for package in mc-mock-runner mc-tokenizer; do
-    record "$package-build" cargo build --locked -p "$package"
-    record "$package-test-compile" cargo test --locked -p "$package" --no-run
-    record "$package-test" cargo test --locked -p "$package" --no-fail-fast
+    record "$package-build" bounded 8m cargo build --locked -p "$package"
+    record "$package-test-compile" bounded 4m cargo test --locked -p "$package" --no-run
+    record "$package-test" bounded 5m cargo test --locked -p "$package" --no-fail-fast
 done
 
 finished=1
