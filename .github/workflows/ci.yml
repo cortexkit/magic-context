@@ -464,6 +464,13 @@ jobs:
           MC_E2E_MODE: ts
           MC_E2E_HOST: opencode
         run: bash scripts/ci/e2e-host-opencode-cache-analysis-oracle.sh
+      - name: Run pinned source-only degraded-pass regressions
+        if: ${{ !cancelled() && matrix.shard == 0 && steps.dists.outcome == 'success' }}
+        env:
+          NODE_ENV: ""
+          MC_E2E_MODE: ts
+          MC_E2E_HOST: opencode
+        run: bash scripts/ci/e2e-host-opencode-run-pinned-degraded-pass.sh
 
   e2e-host-pi:
     name: E2E (Pi, host behavior)
@@ -492,6 +499,7 @@ jobs:
         run: bash scripts/ci/e2e-host-pi-verify-opencode-on-path.sh
 
       - uses: ./.github/actions/restore-ci-dists
+        id: dists
 
       # Per-test timeout bumped to 300s for the same cold-start reason as
       # the OpenCode host job. Pi historian publish path also crosses an
@@ -503,6 +511,13 @@ jobs:
           MC_E2E_MODE: ts
           MC_E2E_HOST: pi
         run: bash scripts/ci/e2e-host-pi-run-host-e2e-suite-pi-tests-from-mode-manifest.sh
+      - name: Run Pi mapper step-cap regression in a private home
+        if: ${{ !cancelled() && steps.dists.outcome == 'success' }}
+        env:
+          NODE_ENV: ""
+          MC_E2E_MODE: ts
+          MC_E2E_HOST: pi
+        run: bash scripts/ci/e2e-host-pi-run-mapper-step-cap.sh
   e2e-host-opencode2:
     name: E2E (OpenCode ${{ matrix.version }}, host behavior ${{ matrix.shard }}/2)
     runs-on: ubuntu-latest

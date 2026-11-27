@@ -1478,13 +1478,12 @@
         },
         {
             "path": "tests/opencode2/dreamer-s2-carrier.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
+            "tier": "ts-only",
             "invocation": {
-                "ts": false,
+                "ts": true,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: the three Dreamer tasks that need no tool loop (review-user-memories, evaluate-smart-notes, promote-primers) run on the pinned GA host against the mock provider; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "rationale": "Real OpenCode 2 executes reclassified Dreamer tasks through the hidden carrier.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1879,10 +1878,9 @@
         },
         {
             "path": "tests/opencode2/output-cap.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
-            "tier": "excluded",
-            "invocation": { "ts": false, "rust": false },
-            "rationale": "Real OpenCode 2 output-cap wire comparison and reasoning-only provider default regression; runs in the dedicated v2 lane",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 2 ordinary and hidden historian requests omit synthetic output caps; an explicit limit lets a reasoning-only provider answer after its default is exhausted.",
             "contract_refs": ["R44"],
             "hosts": ["opencode2"]
         },
@@ -3275,10 +3273,10 @@
         },
         {
             "path": "tests/degraded-pass-lock.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
+            "runs_in": "scripts/ci/e2e-host-opencode-run-pinned-degraded-pass.sh",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
-            "rationale": "manual regression probe on OpenCode 1.18.30: a context.db writer lock held across the tagging step replays the last good request instead of sending the conversation without its persisted drops; opt-in TMPDIR root with host and locker PID lsof containment",
+            "rationale": "Real OpenCode 1.18.30 keeps managed requests on a degraded pass or refuses visibly without sending raw history; the source writer-lock probe verifies isolated stores.",
             "contract_refs": ["FOLD-UNDER-PRESSURE"],
             "hosts": ["opencode"]
         },
@@ -3309,10 +3307,10 @@
         },
         {
             "path": "tests/dreamer-mapper-step-cap-pi.test.ts",
-            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
+            "runs_in": "scripts/ci/e2e-host-pi-run-mapper-step-cap.sh",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
-            "rationale": "manual regression probe on a real Pi host (MC_E2E_MAPPER_STEP_PROBE=1): a 20-memory verify-broad batch that needs more than 60 mapper calls finalizes before the step cap and keeps a partial manifest instead of failing MC-D10; throwaway root with host PID lsof containment",
+            "rationale": "Real Pi refuses both reads from the step-reserve trigger reply, sees the finalize instruction, banks two of five verdicts and resumes the rest; host PID lsof verifies isolated stores.",
             "contract_refs": ["FOLD-UNDER-PRESSURE"],
             "hosts": ["pi"]
         },

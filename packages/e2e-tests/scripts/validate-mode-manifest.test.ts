@@ -57,7 +57,7 @@ describe("mode manifest validator", () => {
         expect(ts).toContain("tests/reasoning-token-budget.test.ts");
         expect(rust).not.toContain("tests/reasoning-token-budget.test.ts");
         expect(filesForMode(validation, "ts", "pi")).toHaveLength(37);
-        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(96);
+        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(98);
         // These OpenCode 2 files are ts-only with hosts ["opencode2"], so only the
         // OpenCode 2 host lane runs them; the other host lanes never select them.
         for (const path of [
@@ -122,7 +122,6 @@ describe("mode manifest validator", () => {
             "tests/opencode2/compaction-off-host-compaction.test.ts",
             "tests/opencode2/context-s2-lanes.test.ts",
             "tests/opencode2/converted-store-overwindow.test.ts",
-            "tests/opencode2/dreamer-s2-carrier.test.ts",
             "tests/opencode2/emergency-refusal-visible.test.ts",
             "tests/opencode2/fold-s3-owner.test.ts",
             "tests/opencode2/fork-inheritance.test.ts",
@@ -130,7 +129,6 @@ describe("mode manifest validator", () => {
             "tests/opencode2/mapper-step-finalize.test.ts",
             "tests/opencode2/marker-s3-runtime.test.ts",
             "tests/opencode2/missing-history-boundary.test.ts",
-            "tests/opencode2/output-cap.test.ts",
             "tests/opencode2/rust-mode-boundary-restart-gate.test.ts",
             "tests/opencode2/session-api-cutover.test.ts",
             "tests/opencode2/sidebar-component.test.ts",
