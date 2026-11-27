@@ -1,4 +1,4 @@
-import type { Database } from "../../../shared/sqlite";
+import type { Database, Statement } from "../../../shared/sqlite";
 import { loadAllEmbeddings, type StoredMemoryEmbedding } from "./storage-memory-embeddings";
 
 interface ProjectEmbeddingCacheEntry {
@@ -11,6 +11,70 @@ const DEFAULT_EMBEDDING_CACHE_TTL_MS = 60_000;
 const projectEmbeddingCache = new Map<string, ProjectEmbeddingCacheEntry>();
 
 let embeddingCacheTtlMs = DEFAULT_EMBEDDING_CACHE_TTL_MS;
+
+interface KeptWorkerEmbeddingEntry {
+    projectPath: string;
+    modelId: string;
+    version: number;
+    loadedAt: number;
+    embeddings: Map<number, StoredMemoryEmbedding>;
+}
+interface KeptWorkerEmbeddingCache {
+    entries: Map<string, KeptWorkerEmbeddingEntry>;
+    version?: Statement;
+    lastBackgroundReloadAt: number;
+}
+const keptWorkerCaches = new WeakMap<Database, KeptWorkerEmbeddingCache>();
+
+/** Only kept search workers have a private, read-only connection to refresh. */
+export function keepWorkerMemoryEmbeddings(db: Database): void {
+    keptWorkerCaches.set(db, {
+        entries: new Map(),
+        lastBackgroundReloadAt: -Infinity,
+    });
+}
+
+function readDataVersion(db: Database, cache: KeptWorkerEmbeddingCache): number {
+    cache.version ??= db.prepare("PRAGMA data_version");
+    return Number((cache.version.get() as { data_version: number }).data_version);
+}
+
+function loadKeptWorkerEntry(
+    db: Database,
+    cache: KeptWorkerEmbeddingCache,
+    projectPath: string,
+    modelId: string,
+    version: number,
+    loadedAt: number,
+): Map<number, StoredMemoryEmbedding> {
+    const embeddings = loadAllEmbeddings(db, projectPath, modelId);
+    // Capture the revision before the read, so a concurrent commit cannot be
+    // recorded as part of a snapshot that might not contain it.
+    cache.entries.set(cacheKey(projectPath, modelId), {
+        projectPath,
+        modelId,
+        version,
+        loadedAt,
+        embeddings,
+    });
+    return embeddings;
+}
+
+export function maintainKeptWorkerMemoryEmbeddings(db: Database): void {
+    const cache = keptWorkerCaches.get(db);
+    const now = Date.now();
+    if (!cache?.entries.size || now - cache.lastBackgroundReloadAt < DEFAULT_EMBEDDING_CACHE_TTL_MS)
+        return;
+    const version = readDataVersion(db, cache);
+    for (const entry of cache.entries.values()) {
+        if (entry.version === version || now - entry.loadedAt < DEFAULT_EMBEDDING_CACHE_TTL_MS)
+            continue;
+        // A commit to any table moves data_version. Bound background reloads
+        // even when unrelated sessions keep writing to the same database.
+        cache.lastBackgroundReloadAt = now;
+        loadKeptWorkerEntry(db, cache, entry.projectPath, entry.modelId, version, now);
+    }
+}
 
 function cacheKey(projectPath: string, modelId: string): string {
     return `${projectPath}\0${modelId}`;
@@ -38,6 +102,15 @@ export function getProjectEmbeddings(
     projectPath: string,
     modelId: string,
 ): Map<number, StoredMemoryEmbedding> {
+    const kept = keptWorkerCaches.get(db);
+    if (kept) {
+        const now = Date.now();
+        const entry = kept.entries.get(cacheKey(projectPath, modelId));
+        if (entry && now - entry.loadedAt < DEFAULT_EMBEDDING_CACHE_TTL_MS) return entry.embeddings;
+        const version = readDataVersion(db, kept);
+        if (entry?.version === version) return entry.embeddings;
+        return loadKeptWorkerEntry(db, kept, projectPath, modelId, version, now);
+    }
     const cached = getValidCacheEntry(projectPath, modelId);
     if (cached) {
         return cached.embeddings;

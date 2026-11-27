@@ -22,7 +22,7 @@ serveWorkerJobs<AutoSearchWorkerInput>(async (initial, port) => {
     }
     const [
         { ensureMemoryEmbeddings },
-        { getProjectEmbeddings },
+        { getProjectEmbeddings, keepWorkerMemoryEmbeddings, maintainKeptWorkerMemoryEmbeddings },
         { getMemoriesByProject },
         { installProjectEmbeddingSearchBridge },
         { searchMessageHistory, unifiedSearch },
@@ -79,6 +79,7 @@ serveWorkerJobs<AutoSearchWorkerInput>(async (initial, port) => {
     // embedding snapshot and reset its query dimensions before running search.
     db = new Database(input.path, input.job === "backfill" ? undefined : { readonly: true });
     db.exec("PRAGMA busy_timeout = 250");
+    if (persistent && input.job === "search") keepWorkerMemoryEmbeddings(db);
     // The owner disposes this worker by asking it to close: the connection must be
     // closed here, before the thread ends, or Bun 1.4.4's teardown blocks the
     // owner's next write (see worker-shutdown.ts).
@@ -99,6 +100,11 @@ serveWorkerJobs<AutoSearchWorkerInput>(async (initial, port) => {
     function maintainChunkPools(): void {
         if (maintaining) return;
         maintaining = true;
+        try {
+            maintainKeptWorkerMemoryEmbeddings(db);
+        } catch {
+            // A failed background refresh must not disturb history upkeep or the next search.
+        }
         void maintainCompartmentChunkSearchPools(db)
             .catch(() => {})
             .finally(() => {

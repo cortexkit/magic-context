@@ -1825,7 +1825,12 @@ async function searchCompartmentChunks(args: {
         // anyway, so a later turn whose vector does arrive finds it ready.
         if (args.warmOnly) {
             if (args.deferWarmup)
-                trackCompartmentChunkSearchPool(args.db, args.sessionId, args.projectPath, args.modelId);
+                trackCompartmentChunkSearchPool(
+                    args.db,
+                    args.sessionId,
+                    args.projectPath,
+                    args.modelId,
+                );
             else
                 void warmCompartmentChunkSearchPool(
                     args.db,
