@@ -479,8 +479,10 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
 
             // Check the live boundary under the same transaction and lease as publication:
             // the normal historian could have added summaries while this rebuild was paused.
-            // Staging does not distinguish a crash from an earlier empty, unsafe or
-            // nonadvancing chunk. Even the first such stop after a crash can discard
+            // Staging does not record why the last run stopped, so a crash looks the
+            // same as a stop that a retry cannot change: a chunk with nothing to
+            // summarize, a chunk that fails `validateChunkCoverage`, or a result that
+            // did not advance. Even the first such stop after a crash can discard
             // staged model work; it never discards the user's published history.
             const promoted = promoteRecompStaging(db, sessionId, leaseHolderId, {
                 allowCarry: heading === "Complete",
