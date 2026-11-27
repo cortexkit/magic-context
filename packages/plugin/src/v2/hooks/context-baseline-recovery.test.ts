@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { getCompartments } from "../../features/magic-context/compartment-storage";
 import { clearCachedM0M1 } from "../../features/magic-context/storage-meta-shared";
 import { getSlot } from "../../hooks/magic-context/lkg-slot";
 import * as renderOptions from "../../hooks/magic-context/render-options";
@@ -407,6 +408,66 @@ test("an archived newest summary serves the same requests from the anchor or the
     };
     const anchored = await serve(false);
     expect(await serve(true)).toEqual(anchored);
+});
+
+test("a recovered null cached boundary logs one removal of covered instructions", async () => {
+    const f = await oc2ContextFixture(64100, options);
+    try {
+        const old = f.rows[5]!;
+        const newest = f.rows[13]!;
+        f.compartment(5);
+        await f.pass();
+        const cut = await f.nativeFold(3, 2, "", "manual");
+        f.compartment(13);
+        deleteRow(f, old.id);
+        clearCachedM0M1(f.db, f.session);
+        f.db
+            .prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?")
+            .run(Buffer.from("frozen baseline"), f.session);
+        await f.restart();
+
+        const first = await f.pass();
+        const raw = rawIDs(first.draft);
+        const rows = storeIDs(f, -1);
+        expect(rows).toHaveLength(24);
+        expect(raw).toEqual(storeIDs(f, newest.seq));
+        const summaries = getCompartments(f.db, f.session);
+        expect(summaries.map(({ title }) => title)).toEqual([
+            "Review history 0",
+            "Review history 1",
+        ]);
+        for (const summary of summaries) expect(first.bytes.split(summary.title)).toHaveLength(2);
+        const position = (id: string | null) => f.rows.find(({ id: rowId }) => rowId === id)?.seq;
+        for (const id of rows) {
+            const seq = position(id);
+            expect(seq).toBeDefined();
+            const coverage = summaries.filter(({ startMessageId, endMessageId }) => {
+                const start = position(startMessageId);
+                const end = position(endMessageId);
+                return start !== undefined && end !== undefined && seq! >= start && seq! <= end;
+            });
+            expect(raw.filter((rawID) => rawID === id).length + coverage.length).toBe(1);
+        }
+        expect(cached(f)).toEqual({ id: newest.id, hasBytes: 1 });
+        expect(first.logs.join("\n")).not.toContain("was re-admitted");
+
+        const next = await f.pass();
+        expect(next.bytes).toBe(withoutCoveredInstructions(f, first.draft, newest.seq));
+        expect(next.bytes).not.toBe(first.bytes);
+        expect(next.draft.tools).toEqual(first.draft.tools);
+        expect(next.logs.filter((line) => line.includes("was re-admitted"))).toEqual([
+            expect.stringContaining(
+                `the native record for checkpoint ${cut} was re-admitted; 1 covered instruction row is no longer sent, changing the cached prefix once`,
+            ),
+        ]);
+        await f.restart();
+        const third = await f.pass();
+        expect(third.bytes).toBe(next.bytes);
+        expect(third.draft.tools).toEqual(next.draft.tools);
+        expect(third.logs.join("\n")).not.toContain("was re-admitted");
+    } finally {
+        await f.cleanup();
+    }
 });
 
 test("a repair above the old native floor changes only covered instructions: managed, native, native; logging is independent", async () => {

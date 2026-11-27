@@ -2648,7 +2648,7 @@ export async function registerContext(context: V2Context) {
         const nativeFloor = await nativeFoldReplay?.restorationFloor(draft.sessionID, cut, reader, {
             allowMissingFloor: newStart !== undefined,
         });
-        if (newStart && nativeFloor === undefined) {
+        if (newStart !== undefined && nativeFloor === undefined) {
             const pass = contextPass.getStore();
             if (pass) pass.recoveredCheckpointID = cut.id;
         }
@@ -3664,11 +3664,44 @@ export async function registerContext(context: V2Context) {
                     (previousRecovery &&
                         pass.nativeReplayCheckpointID === previousRecovery.checkpointID))
             ) {
+                // A first-row recovery restores instructions as raw rows. If
+                // the transform rendered summaries, use its new boundary to
+                // identify which of those instructions the next pass can drop.
+                let coveredAfterRestore: Set<string> | undefined;
+                if (pass.recoveredCheckpointID && restoredFirstRow) {
+                    try {
+                        const end = db
+                            .prepare(
+                                "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id=?",
+                            )
+                            .get(draft.sessionID) as { id: string | null } | undefined;
+                        if (end?.id) {
+                            const source = openStoreReader();
+                            try {
+                                const seq = source.sequenceForId(draft.sessionID, end.id);
+                                if (seq !== undefined)
+                                    coveredAfterRestore = new Set(
+                                        source
+                                            .instructionRowsThrough(draft.sessionID, seq)
+                                            .map(({ id }) => id),
+                                    );
+                            } finally {
+                                source.close();
+                            }
+                        }
+                    } catch {
+                        // This diagnostic must not stop a prepared request.
+                    }
+                }
                 pass.servedInstructionIDs = new Set(
                     mapped.messages.flatMap(({ info, parts }) => {
+                        const id = hostInstructionRowID(info);
                         if (
+                            !id ||
                             info.role !== "system" ||
-                            (pass.recoveredCheckpointID && !isCoveredInstructionRow(info)) ||
+                            (pass.recoveredCheckpointID &&
+                                !isCoveredInstructionRow(info) &&
+                                !coveredAfterRestore?.has(id)) ||
                             !parts.some((value) => {
                                 const part = value as { type?: string; text?: unknown } | null;
                                 return (
@@ -3679,8 +3712,7 @@ export async function registerContext(context: V2Context) {
                             })
                         )
                             return [];
-                        const id = hostInstructionRowID(info);
-                        return id ? [id] : [];
+                        return [id];
                     }),
                 );
             }
