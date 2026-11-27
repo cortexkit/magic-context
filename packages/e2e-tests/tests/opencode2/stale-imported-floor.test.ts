@@ -100,7 +100,8 @@ async function withConvertedSession(label: string, turns: number, scenario: (s: 
             usage = 1_000;
             for (let index = turns + 1; index <= turns + 3; index++) await prompt(`Turn ${index}: after the marker. ${ballast(600)}`);
         } finally {
-            // The conversion harness checks open paths and private DB inode on stop.
+            // Stopping the OpenCode 1 host also runs its launcher's own checks on the
+            // paths it had open and on its private database file.
             await old.stop();
         }
         const logPath = fixture.logPath("v2");

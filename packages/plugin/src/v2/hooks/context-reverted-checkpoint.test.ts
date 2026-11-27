@@ -147,7 +147,8 @@ test("a rebuilt summary recovers an older checkpoint even though the reverted re
 test("an older checkpoint restores from the first stored row after every summary is retired", async () => {
     const { f, pass, receiptsUnchanged, stored } = await revertedCheckpoint();
     try {
-        // The committed-revert cleanup has removed all summaries and their cache.
+        // Put the store in the state a completed revert leaves: no summaries and
+        // no cached history block.
         f.db.prepare("DELETE FROM compartments WHERE session_id = ?").run(f.session);
         clearCachedM0M1(f.db, f.session);
         await receiptsUnchanged();

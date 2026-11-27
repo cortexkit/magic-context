@@ -706,10 +706,11 @@ function noteCheckpointWithoutTail(
 ): void {
     const pass = contextPass.getStore();
     if (pass?.sessionID !== sessionID) return;
-    // For a receipt at this exact cut, the inclusive checkpoint floor leaves
-    // no rows for the shared transform to turn into a replacement head. A
-    // legacy checkpoint may carry its own summary or transcript; the fixed
-    // checkpoint note does not contain any history.
+    // For a checkpoint record at exactly this cut, replay starts at the
+    // checkpoint row itself and no stored row follows it, so the transform
+    // shared with OpenCode 1 has no rows to build the history block from. A
+    // checkpoint from an older version may carry its own summary or
+    // transcript; our fixed checkpoint note carries no history.
     pass.checkpointWithoutTail =
         cut && incoming && messageCount === 1 && !isCheckpointNote(cut.data.summary)
             ? cut.id
@@ -1172,8 +1173,10 @@ export async function registerContext(context: V2Context) {
                   const pass = contextPass.getStore();
                   if (pass?.sessionID === sessionID && pass.loggedUncoveredFloor) return;
                   if (floor.kind === "checkpoint") {
-                      // The OpenCode 1 marker still points at the same row
-                      // after we save the lower OpenCode 2 replay floor.
+                      // A checkpoint imported from an OpenCode 1 session keeps
+                      // pointing at the same row after we save the lower replay
+                      // start, so this would fire on every request. Log it once
+                      // per session and checkpoint.
                       const key = JSON.stringify([sessionID, floor.id]);
                       if (loggedUncoveredCheckpoints.get(key)) return;
                       loggedUncoveredCheckpoints.set(key, true);

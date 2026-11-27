@@ -140,7 +140,8 @@ test("pressure after a partial rebuild leaves an unreached range larger than the
         const first = after.seq.get(after.summaries.at(-1)!.endId)!;
         const last = before.seq.get(before.summaries.at(-1)!.endId)!;
         const unreached = after.conversation.filter(row => row.seq > first && row.seq <= last && row.type === "user");
-        // Only count the known ballast, not system, tools, replies or tags.
+        // Count only the long user-turn text, not system text, tools, replies or
+        // tags, so the figure is a lower bound.
         const gapTokens = estimateTokens(TURN_TEXT) * unreached.length;
         console.log(`over-window gap: ${unreached.length} long user rows, at least ${gapTokens} estimated tokens (window ${WINDOW})`);
         expect(gapTokens).toBeGreaterThan(WINDOW);

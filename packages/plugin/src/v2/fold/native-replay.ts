@@ -1330,8 +1330,9 @@ export class NativeFoldReplay {
                     replay = await this.floorState(draft.sessionID, reader, boundary, draft);
                     if (!replay && restoredFirstRow) {
                         const first = reader.page(draft.sessionID, { limit: 1 }).rows[0];
-                        // The managed restore already handed the transform every
-                        // stored row. Recheck that the source still starts there.
+                        // This pass already restored the session from its first
+                        // stored row and gave the transform every stored row.
+                        // Recheck that the store still starts at that row.
                         if (first?.id === restoredFirstRow)
                             replay = { floor: floorFor(first, "start"), controls: [] };
                     }
