@@ -398,3 +398,283 @@ fn the_body_fits_its_budget_or_is_empty_for_generated_sessions() {
         }
     }
 }
+
+const LATIN: [&str; 24] = [
+    "the", "reader", "parser", "kept", "diagnostics", "stable", "while", "summary_due",
+    "crates/mc-module/src/session.rs", "traced", "notice", "through", "regression", "test",
+    "cargo", "fold", "baseline", "budget", "cache", "prefix", "rebuild", "memory", "and", "of",
+];
+const CJK: [&str; 24] = [
+    "解析器", "读取了文件", "并保持诊断稳定", "缓存前缀", "重建", "の設定を確認した",
+    "テストを追加", "メモリ", "🚀", "✅", "🔧📦", "历史记录", "折叠", "基线", "ストア", "和", "の",
+    "在", "😀😀", "检查", "修复", "👍", "変更", "确认",
+];
+const CODE: [&str; 24] = [
+    "```rust\nfn render_history_with_line(rows: &[Row]) -> RenderedHistory {\n    todo!()\n}\n```",
+    "HISTORY_BUDGET_WHEN_WINDOW_UNKNOWN", "crate::summary::line::CountedCosts::new",
+    "`render_decayed_with_items`", "0x9E37_79B9_7F4A_7C15", "{\"tier\":5,\"tokens\":20}",
+    "SELECT message_id, at_ms FROM app_read_message_index", "->", "=>", "&&", "||",
+    "/Users/someone/Work/Projects/CortexKit/magic-context/crates/mc-module/src/summary/head.rs:430",
+    "assert_eq!(plan.total, 4991);", "Vec<Vec<usize>>", "fn", "let", "impl", "the", "and",
+    "a3f9c0d2e1b4", "--features memory-replica", "cargo test --locked", "§12§", "x<y&z",
+];
+
+/// A generated summary written in `vocabulary`, its forms sized like real
+/// ones (about 250, 115, 50 and 40 words), 25 summaries a day.
+pub(super) fn scripted_row(
+    random: &mut Random,
+    index: usize,
+    vocabulary: &[&str; 24],
+) -> DecayRenderCompartment {
+    let text = |random: &mut Random, words: u64| {
+        (0..random.between(words * 6 / 10, words * 14 / 10))
+            .map(|_| vocabulary[random.between(0, 23) as usize])
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let start = index as i64 * 12 + 1;
+    let day = index / 25;
+    let date = format!("2026-{:02}-{:02}", 1 + day / 28 % 12, 1 + day % 28);
+    DecayRenderCompartment {
+        start_message: start,
+        end_message: start + 11,
+        title: text(random, 18),
+        content: String::new(),
+        start_date: Some(date.clone()),
+        end_date: Some(date),
+        p1: Some(text(random, 250)),
+        p2: Some(text(random, 115)),
+        p3: Some(text(random, 50)),
+        p4: Some(text(random, 40)),
+        importance: Some(if random.between(1, 100) <= 8 {
+            random.between(90, 100) as i32
+        } else {
+            random.between(15, 89) as i32
+        }),
+        legacy: Some(0),
+    }
+}
+
+/// The scripts the fold-time and budget measurements use, by name: which
+/// vocabulary summary `index` of `count` is written in.
+pub(super) fn script(name: &str, index: usize, count: usize) -> &'static [&'static str; 24] {
+    match name {
+        "latin" => &LATIN,
+        "cjk" => &CJK,
+        "newest 400 cjk" if index + 400 >= count => &CJK,
+        "newest 400 cjk" => &LATIN,
+        "oldest cjk, newest 800 code" if index + 800 >= count => &CODE,
+        "oldest cjk, newest 800 code" => &CJK,
+        // The 64 rows spread evenly over the session in Latin, the rest in
+        // CJK and emoji: the rows the earlier estimate measured its ratio on.
+        "sample rows latin"
+            if (0..64.min(count)).any(|k| k * (count - 1) / 63.min(count - 1).max(1) == index) =>
+        {
+            &LATIN
+        }
+        "sample rows latin" => &CJK,
+        other => panic!("no script {other}"),
+    }
+}
+
+pub(super) fn scripted_session(name: &str, count: usize, seed: u64) -> Vec<DecayRenderCompartment> {
+    let mut random = Random::new(seed);
+    (0..count)
+        .map(|index| scripted_row(&mut random, index, script(name, index, count)))
+        .collect()
+}
+
+/// Each piece counted for real with `counter`, once.
+struct Counted<'r> {
+    rows: Vec<&'r DecayRenderCompartment>,
+    counter: crate::count::Counter,
+    pieces: std::collections::HashMap<(usize, u8), u64>,
+    joint: f64,
+}
+
+impl super::line::Costs for Counted<'_> {
+    fn piece(&mut self, index: usize, form: u8) -> u64 {
+        let (rows, counter) = (&self.rows, self.counter);
+        *self.pieces.entry((index, form)).or_insert_with(|| {
+            counter.count(&render_compartment_at_tier(
+                rows[index],
+                rendered_tier(rows[index], form),
+            ))
+        })
+    }
+    fn group_line(&mut self, index: usize) -> u64 {
+        let (rows, counter) = (&self.rows, self.counter);
+        *self
+            .pieces
+            .entry((index, 0))
+            .or_insert_with(|| counter.count(&group_line(rows[index])))
+    }
+    fn group_header(&mut self, members: &[usize]) -> u64 {
+        self.counter.count(&group_header(&self.rows, members))
+    }
+    fn joint(&mut self) -> f64 {
+        self.joint
+    }
+}
+
+/// A session written mostly in one script and, at its newest end, in
+/// another chooses what a search on real counts alone chooses: no estimate
+/// from a sample of the session's text leaves budget unused.
+#[test]
+fn a_mixed_script_session_uses_its_budget_as_real_counts_choose() {
+    let counter = claude();
+    let rows = scripted_session("oldest cjk, newest 800 code", 3_800, 77);
+    let refs: Vec<&DecayRenderCompartment> = rows.iter().collect();
+    let summaries: Vec<super::line::Summary> = rows
+        .iter()
+        .map(|c| super::line::Summary {
+            score: f64::from(c.importance.unwrap().clamp(1, 100)),
+            scored: true,
+            day: c.start_date.as_deref(),
+        })
+        .collect();
+    // The joint as the render measures it: on the newest 16 heading pairs.
+    let added: i64 = (rows.len() - 17..rows.len() - 1)
+        .map(|i| {
+            let (a, b) = (
+                compartment_heading(&rows[i]),
+                compartment_heading(&rows[i + 1]),
+            );
+            counter.count(&format!("{a}\n\n{b}")) as i64
+                - counter.count(&a) as i64
+                - counter.count(&b) as i64
+        })
+        .sum();
+    let mut real = Counted {
+        rows: refs,
+        counter,
+        pieces: Default::default(),
+        joint: (added as f64 / 16.0).max(0.0),
+    };
+    for budget in [30_000.0, 60_000.0, 98_000.0] {
+        let rendered = render_history(&rows, budget, |text: &str| counter.count(text) as usize);
+        let expected = super::line::plan(
+            &summaries,
+            budget,
+            &mut real,
+            super::line::Options::default(),
+        );
+        assert_eq!(rendered.body_tokens.len(), 1, "at {budget}");
+        assert_eq!(
+            (rendered.plan.stretch, rendered.plan.total),
+            (expected.stretch, expected.total),
+            "at {budget}"
+        );
+        assert_eq!(rendered.plan.forms, expected.forms, "at {budget}");
+    }
+}
+
+/// A fold counts each piece once for the session: a later fold of the same
+/// summaries counts none of them again and renders the same bytes.
+#[test]
+fn a_later_render_counts_only_what_no_earlier_one_counted() {
+    let comps = session(1_200, 25, mixed_score);
+    // Counts of texts that are one summary's piece: not joined text (the
+    // body, or a heading pair the joint is measured on) and not a day
+    // heading, which are counted each render.
+    let pieces = std::cell::Cell::new(0usize);
+    let count = |text: &str| {
+        if !text.contains("\n\n") && !(text.starts_with("## ") && text.ends_with(" summaries")) {
+            pieces.set(pieces.get() + 1);
+        }
+        chars(text)
+    };
+    let mut known = vec![super::line::PieceCounts::default(); comps.len()];
+    let first = render_history_counted(&comps, 30_000.0, count, &mut known);
+    let cold = pieces.replace(0);
+    let second = render_history_counted(&comps, 30_000.0, count, &mut known);
+    let warm = pieces.get();
+    assert_eq!((first.text, first.items), (second.text, second.items));
+    assert!(cold > comps.len(), "{cold} counts");
+    // Only the 16 heading pairs the joint is measured on, each heading on
+    // its own.
+    assert!(warm <= 32, "{warm} counts");
+}
+
+/// The session keeps counts by summary and counter: another counter starts
+/// over, a summary whose heading would change is counted again, and a
+/// summary the session no longer has is forgotten.
+#[test]
+fn kept_counts_follow_the_summary_and_the_counter() {
+    use crate::context_db::StoredCompartment;
+    let summary = |sequence: i64, start: i64| StoredCompartment {
+        sequence,
+        start_message: start,
+        end_message: start + 9,
+        title: format!("Work {sequence}"),
+        p1: Some("full".into()),
+        start_date: Some("2026-01-01".into()),
+        end_date: Some("2026-01-01".into()),
+        ..Default::default()
+    };
+    let rows = vec![summary(1, 1), summary(2, 11), summary(3, 21)];
+    let exact = claude();
+    let estimator = crate::count::Counter::estimated_for_model(Some("anthropic/claude-opus-5-5"));
+    let counted = super::line::PieceCounts {
+        forms: [Some(7), None, None, None, Some(3)],
+        line: Some(2),
+    };
+    let counts = HistoryCounts::default();
+    assert_eq!(counts.known(exact, &rows), vec![Default::default(); 3]);
+    counts.keep(exact, &rows, vec![counted; 3]);
+    assert_eq!(counts.known(exact, &rows), vec![counted; 3]);
+    // A summary that would render another heading is counted again.
+    let mut dated = rows.clone();
+    dated[0].start_date = Some("2025-12-31".into());
+    assert_eq!(counts.known(exact, &dated)[0], Default::default());
+    // After a revert, another summary at sequence 3 is not the counted one.
+    let mut reverted = rows.clone();
+    reverted[2] = summary(3, 25);
+    assert_eq!(counts.known(exact, &reverted)[2], Default::default());
+    counts.retain(|sequence| sequence <= 2);
+    assert_eq!(counts.len(), 2);
+    assert_eq!(counts.known(exact, &rows)[2], Default::default());
+    // Another counter counts differently: everything is counted again.
+    assert_eq!(counts.known(estimator, &rows), vec![Default::default(); 3]);
+    assert_eq!(counts.known(exact, &rows), vec![Default::default(); 3]);
+    assert_eq!(counts.len(), 0);
+}
+
+/// A revert that removes summaries removes their counts with them.
+#[test]
+fn a_revert_forgets_the_counts_of_the_summaries_it_removed() {
+    use crate::context_db::StoredCompartment;
+    let mut summaries = super::index::Summaries::default();
+    summaries.replace(
+        (0..4)
+            .map(|sequence| StoredCompartment {
+                sequence,
+                start_message: sequence * 10 + 1,
+                end_message: sequence * 10 + 10,
+                title: format!("Work {sequence}"),
+                ..Default::default()
+            })
+            .collect(),
+    );
+    let rows: Vec<StoredCompartment> = (0..4)
+        .map(|sequence| StoredCompartment {
+            sequence,
+            start_message: sequence * 10 + 1,
+            end_message: sequence * 10 + 10,
+            ..Default::default()
+        })
+        .collect();
+    let counted = super::line::PieceCounts {
+        forms: [Some(7); 5],
+        line: Some(2),
+    };
+    summaries.counts().known(claude(), &rows);
+    summaries.counts().keep(claude(), &rows, vec![counted; 4]);
+    assert_eq!(summaries.counts().len(), 4);
+    summaries.truncate(2);
+    assert_eq!(summaries.counts().len(), 2);
+    // A clone shares the counts: they describe the summaries, not the list.
+    let clone = summaries.clone();
+    clone.counts().retain(|_| false);
+    assert_eq!(summaries.counts().len(), 0);
+}

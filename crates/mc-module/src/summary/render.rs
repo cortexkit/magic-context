@@ -13,7 +13,11 @@
 //! goldens in `testdata/` check that. Same summaries and budget always give
 //! the same bytes.
 
-use super::line::{self, Costs, CountedCosts, Options, Piece, Summary, NOT_SHOWN, TITLE};
+use std::collections::HashMap;
+
+use super::line::{
+    self, Costs, CountedCosts, Options, Piece, PieceCounts, Summary, NOT_SHOWN, TITLE,
+};
 use crate::context_db::StoredCompartment;
 
 /// Default history budget when a caller doesn't supply one.
@@ -129,7 +133,7 @@ fn sanitize_compartment_title(title: &str) -> String {
     escape_xml_content(&single_line)
 }
 
-fn compartment_heading(c: &DecayRenderCompartment) -> String {
+pub(super) fn compartment_heading(c: &DecayRenderCompartment) -> String {
     let date_range = format_date_range(c.start_date.as_deref(), c.end_date.as_deref());
     let date_segment = if date_range.is_empty() {
         String::new()
@@ -284,7 +288,7 @@ fn summary_day(c: &DecayRenderCompartment) -> Option<&str> {
 /// The heading over a run of titles of one day. Its range runs from the first
 /// summary's first message to the last one's last message, so it still reads
 /// as one `## start-end` stretch of history.
-fn group_header(rows: &[&DecayRenderCompartment], members: &[usize]) -> String {
+pub(super) fn group_header(rows: &[&DecayRenderCompartment], members: &[usize]) -> String {
     let first = rows[members[0]];
     let last = rows[members[members.len() - 1]];
     format!(
@@ -298,12 +302,111 @@ fn group_header(rows: &[&DecayRenderCompartment], members: &[usize]) -> String {
 
 /// One title under a day heading, with the message it starts at. Its stretch
 /// ends before the next line's start, or at the heading's end.
-fn group_line(c: &DecayRenderCompartment) -> String {
+pub(super) fn group_line(c: &DecayRenderCompartment) -> String {
     format!(
         "- {}: {}",
         c.start_message,
         sanitize_compartment_title(&c.title)
     )
+}
+
+/// How a summary's pieces looked when they were counted: their heading
+/// shows the summary's range and days, and a summary removed by a revert
+/// can come back under the same sequence with other messages.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CountedAs {
+    start_message: i64,
+    end_message: i64,
+    created_at: i64,
+    start_date: Option<String>,
+    end_date: Option<String>,
+}
+
+impl From<&StoredCompartment> for CountedAs {
+    fn from(summary: &StoredCompartment) -> Self {
+        Self {
+            start_message: summary.start_message,
+            end_message: summary.end_message,
+            created_at: summary.created_at,
+            start_date: summary.start_date.clone(),
+            end_date: summary.end_date.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct CountsBySummary {
+    /// The counter the counts are in: another model family counts
+    /// differently, so a fold with it starts over.
+    family: Option<Option<cortexkit_tokens::Family>>,
+    entries: HashMap<i64, (CountedAs, PieceCounts)>,
+}
+
+/// The token counts of every history piece a session's folds have counted,
+/// by summary sequence, kept in memory for the session. A fold counts only
+/// the pieces no earlier fold counted: a summary never changes once stored.
+/// A summary whose heading would render differently (its days, or another
+/// summary at the same sequence after a revert) is counted again.
+#[derive(Debug, Default)]
+pub(crate) struct HistoryCounts(std::sync::Mutex<CountsBySummary>);
+
+impl HistoryCounts {
+    fn lock(&self) -> std::sync::MutexGuard<'_, CountsBySummary> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// What is known of each of `summaries`' pieces in `counter`'s tokens.
+    pub(crate) fn known(
+        &self,
+        counter: crate::count::Counter,
+        summaries: &[StoredCompartment],
+    ) -> Vec<PieceCounts> {
+        let mut counts = self.lock();
+        if counts.family != Some(counter.family()) {
+            counts.entries.clear();
+            counts.family = Some(counter.family());
+        }
+        summaries
+            .iter()
+            .map(|summary| match counts.entries.get(&summary.sequence) {
+                Some((counted_as, known)) if *counted_as == CountedAs::from(summary) => *known,
+                _ => PieceCounts::default(),
+            })
+            .collect()
+    }
+
+    /// Keep what a fold in `counter`'s tokens counted of `summaries`.
+    pub(crate) fn keep(
+        &self,
+        counter: crate::count::Counter,
+        summaries: &[StoredCompartment],
+        known: Vec<PieceCounts>,
+    ) {
+        let mut counts = self.lock();
+        if counts.family != Some(counter.family()) {
+            return;
+        }
+        for (summary, known) in summaries.iter().zip(known) {
+            if known != PieceCounts::default() {
+                counts
+                    .entries
+                    .insert(summary.sequence, (CountedAs::from(summary), known));
+            }
+        }
+    }
+
+    /// Forget every summary `keep` says no: the session no longer has it.
+    pub(crate) fn retain(&self, keep: impl Fn(i64) -> bool) {
+        self.lock().entries.retain(|sequence, _| keep(*sequence));
+    }
+
+    /// How many summaries have counts.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.lock().entries.len()
+    }
 }
 
 /// A rendered history block, with what it shows of each summary.
@@ -340,6 +443,23 @@ pub(crate) fn render_history(
     history_budget_tokens: f64,
     estimate_tokens: impl Fn(&str) -> usize,
 ) -> RenderedHistory {
+    let mut known = vec![PieceCounts::default(); compartments.len()];
+    render_history_counted(
+        compartments,
+        history_budget_tokens,
+        estimate_tokens,
+        &mut known,
+    )
+}
+
+/// [`render_history`], with the counts of the pieces already counted in
+/// `known` (one entry per compartment), which it fills in as it counts more.
+pub(crate) fn render_history_counted(
+    compartments: &[DecayRenderCompartment],
+    history_budget_tokens: f64,
+    estimate_tokens: impl Fn(&str) -> usize,
+    known: &mut [PieceCounts],
+) -> RenderedHistory {
     let indices: Vec<usize> = compartments
         .iter()
         .enumerate()
@@ -347,6 +467,23 @@ pub(crate) fn render_history(
         .map(|(i, _)| i)
         .collect();
     let rows: Vec<&DecayRenderCompartment> = indices.iter().map(|&i| &compartments[i]).collect();
+    let mut counts: Vec<PieceCounts> = indices.iter().map(|&i| known[i]).collect();
+    let rendered = render_rows(&rows, &indices, history_budget_tokens, estimate_tokens, &mut counts);
+    for (&i, counted) in indices.iter().zip(counts) {
+        known[i] = counted;
+    }
+    rendered
+}
+
+/// [`render_history_counted`] over the summaries with content (`rows`, at
+/// `indices` among the compartments).
+fn render_rows(
+    rows: &[&DecayRenderCompartment],
+    indices: &[usize],
+    history_budget_tokens: f64,
+    estimate_tokens: impl Fn(&str) -> usize,
+    known: &mut [PieceCounts],
+) -> RenderedHistory {
     let summaries: Vec<Summary> = rows
         .iter()
         .map(|c| Summary {
@@ -356,15 +493,12 @@ pub(crate) fn render_history(
         })
         .collect();
     let count = |text: &str| estimate_tokens(text) as u64;
-    let rows_ref = &rows;
     let mut costs = CountedCosts::new(
-        rows.len(),
+        known,
         |piece: Piece| match piece {
-            Piece::Form(i, form) => {
-                render_one_compartment(rows_ref[i], rendered_tier(rows_ref[i], form))
-            }
-            Piece::Line(i) => group_line(rows_ref[i]),
-            Piece::Header(members) => group_header(rows_ref, members),
+            Piece::Form(i, form) => render_one_compartment(rows[i], rendered_tier(rows[i], form)),
+            Piece::Line(i) => group_line(rows[i]),
+            Piece::Header(members) => group_header(rows, members),
         },
         count,
     );
@@ -389,7 +523,7 @@ pub(crate) fn render_history(
     let mut body_tokens = Vec::new();
     loop {
         let mut plan = line::plan(&summaries, target, &mut costs, Options::default());
-        let (mut text, mut items) = join_plan(&plan, &rows, &indices, &mut costs);
+        let (mut text, mut items) = join_plan(&plan, rows, indices, &mut costs);
         let tokens = count(&text);
         body_tokens.push(tokens);
         let over = tokens as f64 - budget;
@@ -476,17 +610,6 @@ pub fn render_decayed_compartments(
     estimate_tokens: impl Fn(&str) -> usize,
 ) -> String {
     render_history(compartments, history_budget_tokens, estimate_tokens).text
-}
-
-/// The history body and, for each shown summary, its input index, tier and
-/// tokens ([`RenderedHistory::items`]).
-pub(crate) fn render_decayed_with_items(
-    compartments: &[DecayRenderCompartment],
-    history_budget_tokens: f64,
-    estimate_tokens: impl Fn(&str) -> usize,
-) -> (String, Vec<(usize, u8, u64)>) {
-    let rendered = render_history(compartments, history_budget_tokens, estimate_tokens);
-    (rendered.text, rendered.items)
 }
 
 /// Extract a top-level m0 block slice (e.g. "session-history") for budget measurement

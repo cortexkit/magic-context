@@ -21,7 +21,7 @@ use cortexkit_role_compaction::view::{EditOp, InsertAt, InsertedImage, InsertedM
 use serde::{Deserialize, Serialize};
 
 use super::render::{
-    render_compartment_at_tier, render_decayed_with_items, DecayRenderCompartment,
+    render_compartment_at_tier, render_history_counted, DecayRenderCompartment, HistoryCounts,
 };
 use crate::context_db::StoredCompartment;
 use crate::head_memories::{self, Row};
@@ -461,6 +461,17 @@ pub fn fold(inputs: &Inputs, mural: Option<&str>) -> Baseline {
 /// [`fold`], given the memories it shows ([`shown_at_fold`] of the same
 /// inputs), which the session also needs to draw the mural.
 pub fn fold_with(inputs: &Inputs, shown: &HashSet<i64>, mural: Option<&str>) -> Baseline {
+    fold_with_counts(inputs, shown, mural, &HistoryCounts::default())
+}
+
+/// [`fold_with`], counting only the history pieces `counts` does not yet
+/// know and keeping what it counted there for the session's next fold.
+pub(crate) fn fold_with_counts(
+    inputs: &Inputs,
+    shown: &HashSet<i64>,
+    mural: Option<&str>,
+    counts: &HistoryCounts,
+) -> Baseline {
     let _timing = crate::notice_cost_timing::span("head.fold");
     let estimate = |text: &str| inputs.counter.count(text) as usize;
     let summaries: Vec<_> = inputs
@@ -468,16 +479,19 @@ pub fn fold_with(inputs: &Inputs, shown: &HashSet<i64>, mural: Option<&str>) -> 
         .iter()
         .map(DecayRenderCompartment::from)
         .collect();
+    let known = std::cell::RefCell::new(counts.known(inputs.counter, inputs.summaries));
     let rendered_items = std::cell::RefCell::new(Vec::new());
     let history = fit_history(
         inputs.history_local_budget_tokens as f64,
         |budget| {
-            let (text, items) = render_decayed_with_items(&summaries, budget, estimate);
-            *rendered_items.borrow_mut() = items;
-            text
+            let rendered =
+                render_history_counted(&summaries, budget, estimate, &mut known.borrow_mut());
+            *rendered_items.borrow_mut() = rendered.items;
+            rendered.text
         },
         estimate,
     );
+    counts.keep(inputs.counter, inputs.summaries, known.into_inner());
     let blocks = head_memories::render(inputs.rows, shown);
     let mut sections = Vec::new();
     if !inputs.docs.is_empty() {

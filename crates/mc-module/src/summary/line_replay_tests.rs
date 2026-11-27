@@ -538,17 +538,47 @@ fn realistic_in(count: usize, seed: u64, vocabulary: &[&str; 24]) -> Vec<StoredC
         .collect()
 }
 
-/// What a fold costs with the line against the curve, on 3,800 summaries
-/// with the exact Claude counter and with the estimator; how large history
-/// gets with no budget; and how much budget the widest line leaves unused
-/// just past the point where everything fits in full.
+/// Stored summaries from rendered rows, numbered from 0, for a fold.
+fn stored(rows: &[DecayRenderCompartment]) -> Vec<StoredCompartment> {
+    rows.iter()
+        .zip(0..)
+        .map(|(row, sequence)| StoredCompartment {
+            sequence,
+            start_message: row.start_message,
+            end_message: row.end_message,
+            start_message_id: format!("m{}", row.start_message),
+            end_message_id: format!("m{}", row.end_message),
+            start_date: row.start_date.clone(),
+            end_date: row.end_date.clone(),
+            title: row.title.clone(),
+            content: row.content.as_str().into(),
+            p1: row.p1.as_deref().map(Into::into),
+            p2: row.p2.clone(),
+            p3: row.p3.clone(),
+            p4: row.p4.clone(),
+            importance: row.importance.unwrap_or(50),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// What a fold costs on 3,800 summaries, with the exact Claude counter and
+/// with the estimator: the first fold of a session after a start, which
+/// counts every piece the search looks at, and a later fold, which finds
+/// those counts kept; against the curve's history render. Also how large
+/// history gets with no budget, and how much budget the widest line leaves
+/// unused just past the point where everything fits in full.
 #[test]
 #[ignore = "a measurement; run with --release --ignored --nocapture"]
 fn line_fold_time() {
-    let summaries = realistic(3_800, 1127);
-    let rows: Vec<DecayRenderCompartment> =
-        summaries.iter().map(DecayRenderCompartment::from).collect();
+    use super::render::HistoryCounts;
     let classes = HashMap::new();
+    let best_of_3 = |run: &mut dyn FnMut() -> f64| (0..3).map(|_| run()).fold(f64::MAX, f64::min);
+    let timed = |run: &mut dyn FnMut()| {
+        let started = std::time::Instant::now();
+        run();
+        started.elapsed().as_secs_f64() * 1000.0
+    };
     for (name, counter) in [
         ("exact Claude", Counter::for_model(Some(DEFAULT_MODEL))),
         (
@@ -556,41 +586,64 @@ fn line_fold_time() {
             Counter::estimated_for_model(Some(DEFAULT_MODEL)),
         ),
     ] {
-        let inputs = super::head::Inputs {
-            counter,
-            summaries: &summaries,
-            docs: "",
-            rows: &[],
-            classes: &classes,
-            now_ms: 0,
-            gone: &[],
-            history_budget_tokens: 98_000,
-            history_local_budget_tokens: 98_000,
-            memory_budget_tokens: 0,
-            profile_budget_tokens: 0,
+        let fold = |summaries: &[StoredCompartment], budget: u64, counts: &HistoryCounts| {
+            let inputs = super::head::Inputs {
+                counter,
+                summaries,
+                docs: "",
+                rows: &[],
+                classes: &classes,
+                now_ms: 0,
+                gone: &[],
+                history_budget_tokens: budget,
+                history_local_budget_tokens: budget,
+                memory_budget_tokens: 0,
+                profile_budget_tokens: 0,
+            };
+            super::head::fold_with_counts(&inputs, &Default::default(), None, counts)
         };
-        let time = |run: &dyn Fn()| {
-            let mut best = f64::MAX;
-            for _ in 0..3 {
-                let started = std::time::Instant::now();
-                run();
-                best = best.min(started.elapsed().as_secs_f64() * 1000.0);
+        for script in ["latin", "cjk", "newest 400 cjk", "sample rows latin"] {
+            let rows = super::render_line_tests::scripted_session(script, 3_800, 1127);
+            let summaries = stored(&rows);
+            for budget in [30_000u64, 98_000] {
+                let first = best_of_3(&mut || {
+                    let counts = HistoryCounts::default();
+                    timed(&mut || {
+                        fold(&summaries, budget, &counts);
+                    })
+                });
+                let counts = HistoryCounts::default();
+                let cold = fold(&summaries, budget, &counts);
+                let warm = best_of_3(&mut || {
+                    timed(&mut || {
+                        let again = fold(&summaries, budget, &counts);
+                        assert_eq!(again.m0, cold.m0);
+                    })
+                });
+                let curve = best_of_3(&mut || {
+                    timed(&mut || {
+                        fold_history(&rows, budget as f64, counter, false);
+                    })
+                });
+                println!(
+                    "FOLD_TIME {name}, {script}, 3800 at {budget}: first fold {first:.0} ms, later fold {warm:.0} ms; the curve's history alone {curve:.0} ms"
+                );
             }
-            best
-        };
-        let curve = time(&|| {
-            fold_history(&rows, 98_000.0, counter, false);
-        });
-        let line = time(&|| {
-            fold_history(&rows, 98_000.0, counter, true);
-        });
-        let fold = time(&|| {
-            super::head::fold_with(&inputs, &Default::default(), None);
-        });
-        println!(
-            "FOLD_TIME {name}: history with the curve {curve:.0} ms, with the line {line:.0} ms; whole fold with the line {fold:.0} ms, so {:.0} ms with the curve",
-            fold - line + curve
-        );
+        }
+        for count in [500, 3_800] {
+            let summaries = stored(&super::render_line_tests::scripted_session(
+                "latin", count, 1127,
+            ));
+            for budget in [30_000u64, 98_000] {
+                let first = best_of_3(&mut || {
+                    let counts = HistoryCounts::default();
+                    timed(&mut || {
+                        fold(&summaries, budget, &counts);
+                    })
+                });
+                println!("FIRST_FOLD {name}, latin, {count} at {budget}: {first:.0} ms");
+            }
+        }
     }
 
     let counter = Counter::for_model(Some(DEFAULT_MODEL));
@@ -659,12 +712,11 @@ fn counting(
     calls.get()
 }
 
-/// The forms the search picks on estimates are counted for real, and a
-/// pick over the budget is searched again on real counts: on long Chinese,
-/// Japanese and Russian text, where a token holds the fewest characters,
-/// each of those six budgets ends within it, with either counter.
+/// On long Chinese, Japanese and Russian text, where a token holds the
+/// fewest characters, each of those six budgets ends within it, with either
+/// counter.
 #[test]
-fn the_estimated_search_ends_within_the_budget_on_non_latin_text() {
+fn the_search_ends_within_the_budget_on_non_latin_text() {
     let rows: Vec<DecayRenderCompartment> = realistic_in(1_200, 3, &NON_LATIN)
         .iter()
         .map(DecayRenderCompartment::from)
@@ -676,7 +728,6 @@ fn the_estimated_search_ends_within_the_budget_on_non_latin_text() {
         let estimate = |text: &str| counter.count(text) as usize;
         for budget in LAB_BUDGETS {
             let rendered = render_history(&rows, budget, estimate);
-            assert!(rendered.plan.estimated_pick_total.is_some());
             assert!(
                 rendered.plan.total as f64 <= budget,
                 "{} at {budget}",
@@ -726,12 +777,12 @@ fn two_folds_of_the_same_store_give_the_same_bytes() {
     assert_eq!(first.summary_items, second.summary_items);
 }
 
-/// Where the estimates leave the search, for each of those six budgets, on the
-/// realistic session and on long non-Latin text: the real total of the pick
-/// against the budget before the check, after it, and the wrapped block.
+/// How much of each of those six budgets a fold uses, on the realistic
+/// session and on long non-Latin text: the pieces' total, the joined body
+/// and the wrapped block against the budget.
 #[test]
 #[ignore = "a measurement; run with --release --ignored --nocapture"]
-fn line_estimate_overshoot() {
+fn line_budget_use() {
     for (text, vocabulary) in [("Latin", &LATIN), ("non-Latin", &NON_LATIN)] {
         let rows: Vec<DecayRenderCompartment> = realistic_in(3_800, 1127, vocabulary)
             .iter()
@@ -750,8 +801,7 @@ fn line_estimate_overshoot() {
                 let plan = &rendered.plan;
                 let block = fold_history(&rows, budget, counter, true).block;
                 println!(
-                    "OVERSHOOT {text} {name} at {budget:.0}: pieces of the first pick before the check {:+}, after {:+}; body first {:+}, final {:+} after {} replans; wrapped block {:+}",
-                    plan.estimated_pick_total.unwrap() as i64 - plan.budget as i64,
+                    "BUDGET_USE {text} {name} at {budget:.0}: pieces {:+}; body first {:+}, final {:+} after {} replans; wrapped block {:+}",
                     plan.total as i64 - plan.budget as i64,
                     rendered.body_tokens[0] as i64 - budget as i64,
                     *rendered.body_tokens.last().unwrap() as i64 - budget as i64,

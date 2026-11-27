@@ -206,10 +206,11 @@ impl Session {
                     &chosen.left_out(inputs.rows),
                 )
             });
-            let mut base = head::fold_with(
+            let mut base = head::fold_with_counts(
                 &inputs,
                 &chosen.shown,
                 mural.as_ref().map(|mural| mural.content_hash.as_str()),
+                self.summaries.counts(),
             );
             base.shape = Some(shape.clone());
             base

@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::context_db::{ContextDb, StoredCompartment};
+use crate::summary::render::HistoryCounts;
 
 /// What the session keeps of every summary: where it sits in the transcript
 /// and what decisions about it read, without its text.
@@ -68,11 +69,19 @@ pub struct Summaries {
     index: Arc<Vec<SummaryIndex>>,
     held: BTreeMap<i64, Arc<StoredCompartment>>,
     revision: u64,
+    /// The token counts of the history pieces the session's folds counted,
+    /// shared with every clone: they describe summaries, not one list.
+    counts: Arc<HistoryCounts>,
 }
 
 impl Summaries {
     pub(crate) fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// What the session's folds have counted of the history pieces.
+    pub(crate) fn counts(&self) -> &HistoryCounts {
+        &self.counts
     }
 
     /// Every summary's row, all held until [`Summaries::release_through`].
@@ -82,6 +91,12 @@ impl Summaries {
             .into_iter()
             .map(|row| (row.sequence, Arc::new(row)))
             .collect();
+        let index = &self.index;
+        self.counts.retain(|sequence| {
+            index
+                .binary_search_by_key(&sequence, |entry| entry.sequence)
+                .is_ok()
+        });
         self.revision += 1;
     }
 
@@ -91,6 +106,10 @@ impl Summaries {
                 self.held.remove(&removed.sequence);
             }
             Arc::make_mut(&mut self.index).truncate(len);
+            // A revert removed these summaries; a later one may take the
+            // same sequence.
+            let kept = self.index.last().map_or(i64::MIN, |entry| entry.sequence);
+            self.counts.retain(|sequence| sequence <= kept);
         }
         self.revision += 1;
     }

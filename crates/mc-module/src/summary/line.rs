@@ -99,12 +99,6 @@ pub(crate) trait Costs {
     fn group_line(&mut self, index: usize) -> u64;
     /// The day heading over the titles `members`.
     fn group_header(&mut self, members: &[usize]) -> u64;
-    /// Switch to estimated costs (`true`) or back to real ones. Returns
-    /// whether estimates are available; costs that have none stay real.
-    fn estimating(&mut self, on: bool) -> bool {
-        let _ = on;
-        false
-    }
     /// What joining two pieces into the block adds to its count, per joint.
     fn joint(&mut self) -> f64 {
         0.0
@@ -159,10 +153,6 @@ pub(crate) struct Plan {
     pub budget: f64,
     /// The scores the line compared, after the reference scale.
     pub scores: Vec<f64>,
-    /// When the search used estimates: the real total of the forms it
-    /// picked, before the check that runs the search again on real counts
-    /// when that total is over the budget.
-    pub estimated_pick_total: Option<u64>,
 }
 
 /// The budget a fold works with: `budget`, or the fallback when there is none.
@@ -238,22 +228,15 @@ pub(crate) fn line_scores(summaries: &[Summary], reference_scale: bool) -> Vec<f
         .collect()
 }
 
-/// How far an estimated total may be from the budget before the search
-/// counts it exactly. Estimates come from character lengths and are
-/// typically within a few percent of the real count.
-const ESTIMATE_MARGIN: f64 = 0.1;
-
 /// Choose every summary's form for `budget` tokens.
 ///
 /// The search takes the largest stretch factor whose total fits, by halving
-/// the range [`STRETCH_MIN`, `STRETCH_MAX`] [`STRETCH_STEPS`] times. Counting
-/// every form the search looks at with an exact tokenizer would take far
-/// longer than the rest of a fold, so when `costs` can estimate
-/// ([`Costs::estimating`]), each step first estimates its total and counts it
-/// for real only when the estimate is within [`ESTIMATE_MARGIN`] of the
-/// budget, which in practice are the last steps. The chosen forms are always
-/// counted for real; should they not fit (an estimate far off), the search
-/// runs again on real counts alone.
+/// the range [`STRETCH_MIN`, `STRETCH_MAX`] [`STRETCH_STEPS`] times, on the
+/// real token count of every piece it looks at. A fold's costs remember
+/// those counts for the session ([`PieceCounts`]), so a fold counts only the
+/// pieces no earlier fold counted. When even the smallest stretch is over
+/// the budget, the shown summaries step down from the oldest end
+/// ([`step_down`]), so the total always fits.
 pub(crate) fn plan(
     summaries: &[Summary],
     budget: f64,
@@ -262,15 +245,9 @@ pub(crate) fn plan(
 ) -> Plan {
     let budget = effective_budget(budget);
     let scores = line_scores(summaries, options.reference_scale);
-    let estimates = costs.estimating(true);
-    costs.estimating(false);
-    let mut chosen = search(summaries, &scores, budget, costs, options, estimates);
-    let estimated_pick_total = estimates.then_some(chosen.2);
-    if estimates && chosen.2 as f64 > budget {
-        chosen = search(summaries, &scores, budget, costs, options, false);
-    }
-    // On real counts the search ends over the budget only when nothing fits
-    // at any stretch, so at the smallest.
+    let mut chosen = search(summaries, &scores, budget, costs, options);
+    // The search ends over the budget only when nothing fits at any
+    // stretch, so at the smallest.
     if chosen.2 as f64 > budget {
         let (forms, groups, total) = step_down(summaries, chosen.1, budget, costs, options);
         chosen = (chosen.0, forms, total, groups);
@@ -285,50 +262,25 @@ pub(crate) fn plan(
         joints,
         budget,
         scores,
-        estimated_pick_total,
     }
 }
 
 /// The stretch factor the search settles on (`None` when everything fits in
-/// full), with its forms, total and day groups counted for real.
+/// full), with its forms, total and day groups.
 fn search(
     summaries: &[Summary],
     scores: &[f64],
     budget: f64,
     costs: &mut impl Costs,
     options: Options,
-    estimates: bool,
 ) -> (Option<f64>, Vec<u8>, u64, Vec<Vec<usize>>) {
     let count = summaries.len();
     let joints = (costs.joint() * count.saturating_sub(1) as f64).ceil() as u64;
-    let all_full =
-        |costs: &mut dyn FnMut(usize) -> u64| (0..count).map(costs).sum::<u64>() + joints;
-    // Whether everything fits in full; an estimate far over the budget
-    // spares counting every full form.
-    let over_in_full = estimates && {
-        costs.estimating(true);
-        let estimated = all_full(&mut |index| costs.piece(index, FULL));
-        costs.estimating(false);
-        estimated as f64 > budget * (1.0 + ESTIMATE_MARGIN)
-    };
-    if !over_in_full {
-        let full = all_full(&mut |index| costs.piece(index, FULL));
-        if full as f64 <= budget {
-            return (None, vec![FULL; count], full, Vec::new());
-        }
+    let full = (0..count).map(|index| costs.piece(index, FULL)).sum::<u64>() + joints;
+    if full as f64 <= budget {
+        return (None, vec![FULL; count], full, Vec::new());
     }
     let mut fits = |stretch: f64| {
-        if estimates {
-            costs.estimating(true);
-            let estimated = forms_at(summaries, scores, stretch, budget, costs, options).2 as f64;
-            costs.estimating(false);
-            if estimated < budget * (1.0 - ESTIMATE_MARGIN) {
-                return true;
-            }
-            if estimated > budget * (1.0 + ESTIMATE_MARGIN) {
-                return false;
-            }
-        }
         forms_at(summaries, scores, stretch, budget, costs, options).2 as f64 <= budget
     };
     let stretch = if fits(STRETCH_MAX) {
@@ -503,45 +455,40 @@ pub(crate) enum Piece<'a> {
     Header(&'a [usize]),
 }
 
-/// How many summaries the ratio of tokens to characters is measured on, for
-/// each form.
-const RATIO_SAMPLE: usize = 64;
+/// The token counts of one summary's pieces: its five forms on its own and
+/// its line under a day heading, each counted when first needed. A summary
+/// never changes once stored, so a count stays right for as long as the
+/// summary renders the same heading with the same counter; the session keeps
+/// them across folds ([`super::render::HistoryCounts`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PieceCounts {
+    pub forms: [Option<u64>; 5],
+    pub line: Option<u64>,
+}
 
-/// The costs of a session's pieces with its own token counter, each counted
-/// once per fold: the search looks at the same pieces at many stretch
-/// factors. Estimates multiply a piece's characters by the ratio of tokens to
-/// characters measured on a sample of the session's own pieces of the same
-/// form.
-pub(crate) struct CountedCosts<R, C> {
+/// The costs of a session's pieces with its own token counter. Each piece is
+/// counted once, into `known`: the search looks at the same pieces at many
+/// stretch factors, and later folds of the session at the same ones again.
+pub(crate) struct CountedCosts<'k, R, C> {
     render: R,
     count: C,
-    pieces: Vec<[Option<u64>; 5]>,
-    lines: Vec<Option<u64>>,
+    known: &'k mut [PieceCounts],
     headers: HashMap<(usize, usize, usize), u64>,
-    piece_chars: Vec<[Option<u32>; 5]>,
-    line_chars: Vec<Option<u32>>,
-    /// Tokens per character for each form, measured on first use.
-    ratios: Option<[f64; 5]>,
-    estimating: bool,
     joint: f64,
 }
 
-impl<R, C> CountedCosts<R, C>
+impl<'k, R, C> CountedCosts<'k, R, C>
 where
     R: Fn(Piece) -> String,
     C: Fn(&str) -> u64,
 {
-    pub(crate) fn new(summaries: usize, render: R, count: C) -> Self {
+    /// Costs over `known`, one entry per summary given to [`plan`].
+    pub(crate) fn new(known: &'k mut [PieceCounts], render: R, count: C) -> Self {
         Self {
             render,
             count,
-            pieces: vec![[None; 5]; summaries],
-            lines: vec![None; summaries],
+            known,
             headers: HashMap::new(),
-            piece_chars: vec![[None; 5]; summaries],
-            line_chars: vec![None; summaries],
-            ratios: None,
-            estimating: false,
             joint: 0.0,
         }
     }
@@ -551,70 +498,24 @@ where
     pub(crate) fn set_joint(&mut self, joint: f64) {
         self.joint = joint;
     }
-
-    fn real_piece(&mut self, index: usize, form: u8) -> u64 {
-        let (render, count) = (&self.render, &self.count);
-        *self.pieces[index][usize::from(form - 1)]
-            .get_or_insert_with(|| count(&render(Piece::Form(index, form))))
-    }
-
-    fn chars(&mut self, piece: Piece) -> u32 {
-        let render = &self.render;
-        let slot = match piece {
-            Piece::Form(index, form) => &mut self.piece_chars[index][usize::from(form - 1)],
-            Piece::Line(index) => &mut self.line_chars[index],
-            Piece::Header(_) => unreachable!("headings are counted for real"),
-        };
-        *slot.get_or_insert_with(|| render(piece).chars().count() as u32)
-    }
-
-    fn ratios(&mut self) -> [f64; 5] {
-        if let Some(ratios) = self.ratios {
-            return ratios;
-        }
-        let summaries = self.pieces.len();
-        let sample = summaries.min(RATIO_SAMPLE);
-        let mut ratios = [0.25; 5];
-        for (slot, form) in ratios.iter_mut().zip(1u8..) {
-            let (mut tokens, mut chars) = (0u64, 0u64);
-            for n in 0..sample {
-                let index = if sample > 1 {
-                    n * (summaries - 1) / (sample - 1)
-                } else {
-                    0
-                };
-                tokens += self.real_piece(index, form);
-                chars += u64::from(self.chars(Piece::Form(index, form)));
-            }
-            if chars > 0 {
-                *slot = tokens as f64 / chars as f64;
-            }
-        }
-        self.ratios = Some(ratios);
-        ratios
-    }
 }
 
-impl<R, C> Costs for CountedCosts<R, C>
+impl<R, C> Costs for CountedCosts<'_, R, C>
 where
     R: Fn(Piece) -> String,
     C: Fn(&str) -> u64,
 {
     fn piece(&mut self, index: usize, form: u8) -> u64 {
-        if self.estimating {
-            let ratio = self.ratios()[usize::from(form - 1)];
-            return (f64::from(self.chars(Piece::Form(index, form))) * ratio).ceil() as u64;
-        }
-        self.real_piece(index, form)
+        let (render, count) = (&self.render, &self.count);
+        *self.known[index].forms[usize::from(form - 1)]
+            .get_or_insert_with(|| count(&render(Piece::Form(index, form))))
     }
 
     fn group_line(&mut self, index: usize) -> u64 {
-        if self.estimating {
-            let ratio = self.ratios()[usize::from(TITLE - 1)];
-            return (f64::from(self.chars(Piece::Line(index))) * ratio).ceil() as u64;
-        }
         let (render, count) = (&self.render, &self.count);
-        *self.lines[index].get_or_insert_with(|| count(&render(Piece::Line(index))))
+        *self.known[index]
+            .line
+            .get_or_insert_with(|| count(&render(Piece::Line(index))))
     }
 
     fn group_header(&mut self, members: &[usize]) -> u64 {
@@ -624,11 +525,6 @@ where
             .headers
             .entry(key)
             .or_insert_with(|| count(&render(Piece::Header(members))))
-    }
-
-    fn estimating(&mut self, on: bool) -> bool {
-        self.estimating = on;
-        true
     }
 
     fn joint(&mut self) -> f64 {
