@@ -200,6 +200,38 @@ function messageId(message: unknown): string | null {
     return typeof id === "string" ? id : null;
 }
 
+function inFlightAtAbort(messages: unknown[], initialBaseline: Set<string>): Set<string> {
+    // OpenCode finishes a reply's tool batch before starting the next reply.
+    // Cleanup can mark the cancelled reply's outstanding parts as errors even
+    // though their callbacks may still reach the hook. Exempt each of those
+    // call IDs once at most: even with reused IDs, the stop takes no more than
+    // this many post-submission refusals plus the two counted refusals.
+    const reply = messages
+        .slice()
+        .reverse()
+        .find((message) => {
+            const id = messageId(message);
+            return id !== null && !initialBaseline.has(id) && infoOf(message).role === "assistant";
+        });
+    const parts = (reply as { parts?: unknown } | undefined)?.parts;
+    const ids = new Set<string>();
+    if (Array.isArray(parts)) {
+        for (const part of parts) {
+            if (part?.type !== "tool" || typeof part.callID !== "string") continue;
+            const state = part.state;
+            if (
+                state?.status === "pending" ||
+                state?.status === "running" ||
+                (state?.status === "error" &&
+                    state.error === "Tool execution aborted" &&
+                    state.metadata?.interrupted === true)
+            )
+                ids.add(part.callID);
+        }
+    }
+    return ids;
+}
+
 function recordedAssistantError(message: unknown): unknown {
     const info = infoOf(message);
     if (info.error != null) return info.error;
@@ -520,7 +552,7 @@ export async function promptAsyncAndWaitForIdle(
                             budget.snapshot(),
                         );
                         budgetAbortedSessions.add(sessionId);
-                        registerBudgetFinalizeChild(sessionId, budget);
+                        const countRefusals = registerBudgetFinalizeChild(sessionId, budget);
                         if (!session.abort)
                             throw new DreamTokenBudgetExceeded(sessionId, budget.snapshot().spent);
                         await session.abort({ path: { id: sessionId } });
@@ -535,12 +567,19 @@ export async function promptAsyncAndWaitForIdle(
                         if ((await readStatus(session, sessionId, dir, signal)) !== "idle") {
                             throw new DreamTokenBudgetExceeded(sessionId, budget.snapshot().spent);
                         }
+                        const cancelled = await readMessages(session, sessionId, dir, signal).catch(
+                            (error: unknown) => {
+                                if (signal?.aborted) throw error;
+                                return [];
+                            },
+                        );
                         // An aborted assistant is not the answer to the new user turn.
                         completionBaseline = new Set(
-                            (await readMessages(session, sessionId, dir, signal))
+                            (cancelled.length ? cancelled : messages)
                                 .map(messageId)
                                 .filter((value): value is string => value !== null),
                         );
+                        countRefusals(inFlightAtAbort(cancelled, initialBaseline));
                         const finalizeResponse = await session.promptAsync?.({
                             ...request,
                             body: {

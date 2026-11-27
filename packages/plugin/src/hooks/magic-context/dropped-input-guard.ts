@@ -253,7 +253,7 @@ export function assertExecutableToolInput(guard: DroppedInputGuard, call: Droppe
 export function createDroppedInputToolExecuteBeforeHook() {
     const guard = createDroppedInputGuard();
     return async (input: unknown, output: unknown): Promise<void> => {
-        const call = isRecord(input) ? (input as { tool?: unknown; sessionID?: unknown }) : {};
+        const call = isRecord(input) ? input : {};
         const args = isRecord(output) ? (output as { args?: unknown }).args : undefined;
         if (typeof call.sessionID === "string") {
             const disabled = blockedReadSessionRefusal(call.sessionID);
@@ -261,12 +261,20 @@ export function createDroppedInputToolExecuteBeforeHook() {
                 sessionLog(call.sessionID, disabled, { tool: call.tool });
                 throw new Error(disabled);
             }
-            const refusal = refuseBudgetedToolCall(call.sessionID);
+            const callId = typeof call.callID === "string" ? call.callID : undefined;
+            const refusal = refuseBudgetedToolCall(call.sessionID, callId);
             if (refusal) {
-                sessionLog(call.sessionID, "dreamer token budget: tool call refused", {
-                    tool: call.tool,
-                    hardStopped: refusal.hardStopped,
-                });
+                if (refusal.spared) {
+                    sessionLog(call.sessionID, "dreamer token budget: refusal did not count", {
+                        callId,
+                        reason: refusal.spared,
+                    });
+                } else {
+                    sessionLog(call.sessionID, "dreamer token budget: tool call refused", {
+                        tool: call.tool,
+                        hardStopped: refusal.hardStopped,
+                    });
+                }
                 throw new Error(refusal.message);
             }
         }

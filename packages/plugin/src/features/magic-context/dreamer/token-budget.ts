@@ -24,14 +24,25 @@ export interface DreamTokenBudgetState {
     readonly hardStopped: boolean;
 }
 
-const finalizingChildren = new Map<string, ReturnType<typeof createDreamTokenBudget>>();
+interface FinalizingChild {
+    budget: ReturnType<typeof createDreamTokenBudget>;
+    refusedBeforeSubmission: Set<string>;
+    inFlightAtAbort?: Set<string>;
+}
 
-/** The tool hook runs in the OpenCode plugin process, alongside child polling. */
+const finalizingChildren = new Map<string, FinalizingChild>();
+
+/** The OpenCode 1 hook refuses immediately; the poller counts refusals from finalize submission. */
 export function registerBudgetFinalizeChild(
     sessionId: string,
-    guard: ReturnType<typeof createDreamTokenBudget>,
-): void {
-    finalizingChildren.set(sessionId, guard);
+    budget: ReturnType<typeof createDreamTokenBudget>,
+): (inFlightAtAbort: Set<string>) => void {
+    const child: FinalizingChild = { budget, refusedBeforeSubmission: new Set() };
+    finalizingChildren.set(sessionId, child);
+    return (inFlightAtAbort) => {
+        for (const id of child.refusedBeforeSubmission) inFlightAtAbort.delete(id);
+        child.inFlightAtAbort = inFlightAtAbort;
+    };
 }
 
 export function releaseBudgetFinalizeChild(sessionId: string): void {
@@ -40,8 +51,27 @@ export function releaseBudgetFinalizeChild(sessionId: string): void {
 
 export function refuseBudgetedToolCall(
     sessionId: string,
-): { message: string; hardStopped: boolean } | null {
-    return finalizingChildren.get(sessionId)?.refuseTool() ?? null;
+    callId?: string,
+): { message: string; hardStopped: boolean; spared?: "before-submission" | "in-flight" } | null {
+    const child = finalizingChildren.get(sessionId);
+    if (!child) return null;
+    const inFlight = child.inFlightAtAbort;
+    if (inFlight === undefined) {
+        if (callId) child.refusedBeforeSubmission.add(callId);
+        return {
+            message: TOKEN_BUDGET_TOOL_REFUSAL,
+            hardStopped: child.budget.snapshot().hardStopped,
+            spared: "before-submission",
+        };
+    }
+    if (callId && inFlight.delete(callId)) {
+        return {
+            message: TOKEN_BUDGET_TOOL_REFUSAL,
+            hardStopped: child.budget.snapshot().hardStopped,
+            spared: "in-flight",
+        };
+    }
+    return child.budget.refuseTool();
 }
 
 export function createDreamTokenBudget(budget: number) {
@@ -93,6 +123,7 @@ export function createDreamTokenBudget(budget: number) {
         },
         refuseTool(): { message: string; hardStopped: boolean } | null {
             if (!finalizeFired && !snapshot().hardStopped) return null;
+            // Only refusals counted toward the stop belong in the budget state.
             refusedCalls += 1;
             return { message: TOKEN_BUDGET_TOOL_REFUSAL, hardStopped: snapshot().hardStopped };
         },

@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, jest, mock, test } from "bun:test";
-import { refuseBudgetedToolCall } from "../features/magic-context/dreamer/token-budget";
+import {
+    createDreamTokenBudget,
+    refuseBudgetedToolCall,
+} from "../features/magic-context/dreamer/token-budget";
 import { createDroppedInputToolExecuteBeforeHook } from "../hooks/magic-context/dropped-input-guard";
 import { promptSyncWithValidatedOutputRetry } from "./model-suggestion-retry";
 import {
@@ -606,6 +609,184 @@ describe("dreamer budget on an async child", () => {
             (prompts[1] as { body: { parts: Array<{ text: string }> } }).body.parts[0]?.text,
         ).toContain("no more tool calls");
         expect(refuseBudgetedToolCall("ses-child")).toBeNull();
+    });
+});
+
+describe("tool refusals at finalize submission", () => {
+    const toolPart = (callID: string, status = "running", interrupted = false) => ({
+        type: "tool",
+        callID,
+        state: {
+            status,
+            ...(interrupted
+                ? { error: "Tool execution aborted", metadata: { interrupted: true } }
+                : {}),
+        },
+    });
+    const interruptedPart = (id: string) => toolPart(id, "error", true);
+
+    interface RefusalScript {
+        beforeAbort?: ReturnType<typeof toolPart>[];
+        afterAbort?: ReturnType<typeof toolPart>[] | null;
+        duringAbort?: string[];
+        afterSubmission?: (string | undefined)[];
+        counts: number[];
+        answer?: boolean;
+    }
+
+    async function runScript(script: RefusalScript) {
+        const before = createDroppedInputToolExecuteBeforeHook();
+        const budget = createDreamTokenBudget(100);
+        const counts: number[] = [];
+        const answer = { type: "text", text: "<mappings/>" };
+        const replies = (parts: ReturnType<typeof toolPart>[]) => [
+            {
+                info: {
+                    id: "meter",
+                    role: "assistant",
+                    tokens: { input: 81 },
+                    finish: "tool-calls",
+                },
+            },
+            { info: { id: "pending", role: "assistant" }, parts },
+        ];
+        let submissions = 0;
+        let latest: unknown;
+        const refuse = async (id: string | undefined) => {
+            let reason: unknown;
+            try {
+                await before({ tool: "read", sessionID: "ses-child", callID: id }, { args: {} });
+            } catch (error) {
+                reason = error;
+            }
+            counts.push(budget.snapshot().refusedCalls);
+            expect(reason).toBeInstanceOf(Error);
+            expect((reason as Error).message).toContain("Out of token budget");
+        };
+        const abort = mock(async () => {
+            if (submissions === 1) {
+                for (const id of script.duringAbort ?? []) await refuse(id);
+            }
+        });
+        const client = {
+            session: {
+                promptAsync: async () => {
+                    submissions++;
+                    if (submissions === 1) {
+                        await before(
+                            { tool: "read", sessionID: "ses-child", callID: "a" },
+                            { args: {} },
+                        );
+                        expect(refuseBudgetedToolCall("ses-child")).toBeNull();
+                    }
+                    if (submissions === 2) {
+                        await before(
+                            { tool: "read", sessionID: "other-child", callID: "a" },
+                            { args: {} },
+                        );
+                        for (const id of script.afterSubmission ?? []) await refuse(id);
+                        if (script.answer) {
+                            latest = {
+                                info: {
+                                    id: "final",
+                                    role: "assistant",
+                                    finish: "stop",
+                                    time: { completed: 1 },
+                                },
+                                parts: [answer],
+                            };
+                        }
+                    }
+                    return { data: undefined };
+                },
+                abort,
+                status: async () => ({
+                    data:
+                        submissions === 1 && abort.mock.calls.length === 0
+                            ? { "ses-child": { type: "busy" } }
+                            : {},
+                }),
+                messages: async () => {
+                    if (!submissions) return { data: [] };
+                    if (abort.mock.calls.length === 0)
+                        return { data: replies(script.beforeAbort ?? []) };
+                    if (submissions === 1 && script.afterAbort === null)
+                        return { error: "unavailable" };
+                    const rows: unknown[] = replies(script.afterAbort ?? script.beforeAbort ?? []);
+                    if (submissions === 2) rows.push({ info: { id: "finalize", role: "user" } });
+                    if (latest) rows.push(latest);
+                    return { data: rows };
+                },
+            },
+        } as never;
+        const result = await promptAsyncAndWaitForIdle(client, request(), {
+            pollIntervalMs: 1,
+            startGraceMs: 30,
+            budgetGuard: budget,
+        }).catch((error: unknown) => error);
+        expect(counts).toEqual(script.counts);
+        expect(submissions).toBe(2);
+        if (script.answer) {
+            expect(result).toBeUndefined();
+            expect(latest).toMatchObject({ parts: [answer] });
+            expect(abort).toHaveBeenCalledTimes(1);
+        } else {
+            expect(result).toBeInstanceOf(Error);
+            expect((result as Error).message).toContain("token_budget");
+            expect(abort).toHaveBeenCalledTimes(2);
+        }
+        expect(refuseBudgetedToolCall("ses-child")).toBeNull();
+    }
+
+    test("keeps the answer after two old calls are refused before submission", () =>
+        runScript({ duringAbort: ["a", "b"], counts: [0, 0], answer: true }));
+
+    test("keeps the answer when two cancelled tools reach the guard after submission", () =>
+        runScript({
+            beforeAbort: [toolPart("a")],
+            afterAbort: [interruptedPart("a"), interruptedPart("b")],
+            afterSubmission: ["b", "a"],
+            counts: [0, 0],
+            answer: true,
+        }));
+
+    test("spares an early refusal but counts a reuse and a second new call", () =>
+        runScript({
+            beforeAbort: [toolPart("a")],
+            duringAbort: ["a"],
+            afterSubmission: ["a", "b"],
+            counts: [0, 1, 2],
+        }));
+
+    test("stops on exactly two new calls issued after submission", () =>
+        runScript({ afterSubmission: ["a", "b"], counts: [1, 2] }));
+
+    test("spares each in-flight id only once when ids are reused after submission", () =>
+        runScript({
+            afterAbort: [interruptedPart("a"), toolPart("b", "pending")],
+            afterSubmission: ["a", "b", "a", "b"],
+            counts: [0, 0, 1, 2],
+        }));
+
+    test("counts both refusals when the cancellation snapshot is unreadable", () =>
+        runScript({
+            beforeAbort: [toolPart("a"), toolPart("b")],
+            afterAbort: null,
+            afterSubmission: ["a", "b"],
+            counts: [1, 2],
+        }));
+
+    test("counts missing ids and ids of completed tools after submission", () =>
+        runScript({
+            beforeAbort: [toolPart("a"), toolPart("b")],
+            afterAbort: [toolPart("a", "completed"), toolPart("b", "running")],
+            afterSubmission: ["a", undefined],
+            counts: [1, 2],
+        }));
+
+    test("does not carry an unspent exemption into a fresh run on the same child", async () => {
+        await runScript({ afterAbort: [interruptedPart("a")], counts: [], answer: true });
+        await runScript({ afterSubmission: ["a", "b"], counts: [1, 2] });
     });
 });
 
