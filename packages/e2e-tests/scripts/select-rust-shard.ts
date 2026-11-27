@@ -1,13 +1,9 @@
 #!/usr/bin/env bun
 
 import { filesForMode, validateModeManifest } from "./validate-mode-manifest";
-import durations from "./shard-durations.json";
-import { selectWeightedShard } from "./select-weighted-shard";
+import { selectRustShard } from "./mode-selection";
 
-/** The validated manifest owns membership; historical timings only affect assignment. */
-export function selectRustShard(files: string[], spec: string): string[] {
-    return selectWeightedShard(files, spec, durations.seconds.rust);
-}
+export { selectRustShard } from "./mode-selection";
 
 if (import.meta.main) {
     try {

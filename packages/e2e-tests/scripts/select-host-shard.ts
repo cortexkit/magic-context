@@ -1,13 +1,12 @@
 #!/usr/bin/env bun
 
-import durations from "./shard-durations.json";
-import { selectWeightedShard } from "./select-weighted-shard";
-import { filesForMode, validateModeManifest, type ValidationResult } from "./validate-mode-manifest";
+import { selectHostFiles, type ShardedHost } from "./mode-selection";
+import { validateModeManifest, type ValidationResult } from "./validate-mode-manifest";
 
-export type ShardedHost = "opencode" | "opencode2";
+export type { ShardedHost } from "./mode-selection";
 
 export function selectHostShard(host: ShardedHost, spec: string, validation: ValidationResult = validateModeManifest()): string[] {
-    return selectWeightedShard(filesForMode(validation, "ts", host), spec, durations.seconds[host]);
+    return selectHostFiles(validation, host, spec);
 }
 
 export function selectOpenCode2KnownFailures(validation: ValidationResult, files: readonly string[], version: string) {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import type { CiSources } from "./ci-mode-coverage";
 import {
     filesForMode,
     validateManifestDocument,
@@ -10,7 +11,7 @@ const validation = validateModeManifest();
 
 function manifestWith(entries: ModeManifest["entries"]): ModeManifest {
     return {
-        schema: 1,
+        schema: 2,
         header: "test manifest",
         entries,
     };
@@ -18,10 +19,7 @@ function manifestWith(entries: ModeManifest["entries"]): ModeManifest {
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        // Bump this with the manifest whenever a tests/**/*.test.ts file is added or
-        // removed. Moving a file between excluded and ts-only changes the invocation
-        // counts and excluded list below, but not the total number of files.
-        expect(validation.files.length).toBe(222);
+        expect(validation.files.length).toBe(262);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -94,7 +92,8 @@ describe("mode manifest validator", () => {
         expect(filesForMode(validation, "ts", "omp")).toHaveLength(28);
         expect(filesForMode(validation, "ts", "omp")).toContain("tests/omp-compaction-marker.test.ts");
         expect(filesForMode(validation, "ts", "pi")).not.toContain("tests/omp-compaction-marker.test.ts");
-        const excluded = validation.manifest.entries
+        const behaviorFiles = validation.manifest.entries.filter((entry) => entry.path.startsWith("tests/"));
+        const excluded = behaviorFiles
             .filter((entry) => entry.tier === "excluded")
             .map((entry) => entry.path);
         expect([...excluded].sort()).toEqual([
@@ -152,7 +151,7 @@ describe("mode manifest validator", () => {
             "tests/system-prompt-change-order.test.ts",
             "tests/zen-primary-surface.test.ts",
         ]);
-        expect(new Set([...ts, ...rust]).size).toBe(validation.files.length - excluded.length);
+        expect(new Set([...ts, ...rust]).size).toBe(behaviorFiles.length - excluded.length);
     });
 
     it("rejects a missing, duplicated, or dead manifest path", () => {
@@ -168,7 +167,7 @@ describe("mode manifest validator", () => {
                 manifestWith([
                     ...entries.slice(0, -1),
                     {
-                        ...entries.at(-1)!,
+                        ...entries[0]!,
                         path: "tests/not-live.test.ts",
                     },
                 ]),
@@ -181,7 +180,8 @@ describe("mode manifest validator", () => {
         const smoke = validation.manifest.entries.find((entry) => entry.path === "tests/smoke.test.ts");
         const ordinary = validation.manifest.entries.find((entry) => entry.path === "tests/cache-invariants.test.ts");
         const opencode2 = validation.manifest.entries.find((entry) => entry.path === "tests/opencode2/runner.test.ts");
-        expect(validation.manifest.entries.every((entry) => entry.hosts.length > 0)).toBe(true);
+        expect(validation.manifest.entries.filter((entry) => entry.path.startsWith("tests/"))
+            .every((entry) => entry.hosts.length > 0)).toBe(true);
         expect(smoke?.hosts).toEqual(["opencode", "opencode2", "pi", "omp"]);
         expect(ordinary?.hosts).toEqual(["opencode", "opencode2", "pi", "omp"]);
         expect(opencode2?.hosts).toEqual(["opencode2"]);
@@ -256,5 +256,111 @@ describe("mode manifest validator", () => {
                 validation.files,
             ),
         ).toThrow(/invocation disagrees with both-modes/);
+    });
+});
+
+const directPath = "src/temp-dir.test.ts";
+const directScript = "scripts/ci/harness-tests.sh";
+const workflow = ".github/workflows/ci.yml";
+const now = Date.parse("2026-11-27T23:59:59Z");
+const manual = {
+    path: directPath,
+    tier: "excluded",
+    invocation: { ts: false, rust: false },
+    hosts: [],
+    rationale: "Fixture for CI registration checks.",
+    contract_refs: ["mode-manifest.json"],
+} satisfies ModeManifest["entries"][number];
+
+function oneStep(run: string): string {
+    return `jobs:\n  test:\n    steps:\n      - run: ${JSON.stringify(run)}\n`;
+}
+
+function fixtureCi(files: Record<string, string> = {}, run?: string): CiSources {
+    return { workflows: new Map(run ? [[workflow, oneStep(run)]] : []), read: (path) => files[path] };
+}
+
+function checkEntry(entry: ModeManifest["entries"][number], ci = fixtureCi()) {
+    return validateManifestDocument(manifestWith([entry]), [entry.path], { now, ci });
+}
+
+describe("CI reachability guard", () => {
+    it("rejects an on-disk harness test missing from the manifest inventory", () => {
+        const entries = validation.manifest.entries.filter((entry) => entry.path !== directPath);
+        expect(() => validateManifestDocument(manifestWith(entries))).toThrow(/missing manifest entries: src\/temp-dir\.test\.ts/);
+    });
+
+    it("rejects an unscheduled test with only a prose rationale", () => {
+        expect(() => checkEntry(manual)).toThrow(/src\/temp-dir\.test\.ts: not selected by any CI lane/);
+    });
+
+    it("rejects a declared mode whose CI selector is absent", () => {
+        const entry = validation.manifest.entries.find((item) => item.path === "tests/opencode2/bounded-raw-reads.test.ts")!;
+        expect(() => checkEntry(entry)).toThrow(/declares an invocation but no CI lane selects it/);
+    });
+
+    it("rejects a host matrix that omits a shard still used by the runner", () => {
+        const entry = validation.manifest.entries.find((item) => item.path === "tests/opencode2/bounded-raw-reads.test.ts")!;
+        const runner = "scripts/ci/e2e-host-opencode2-run-host-e2e-suite-opencode-2-tests-from-mode-manifest.sh";
+        const yaml = `jobs:\n  e2e-host-opencode2:\n    strategy:\n      matrix:\n        shard: [0]\n    steps:\n      - run: bash ${runner}\n`;
+        const ci: CiSources = {
+            workflows: new Map([[workflow, yaml]]),
+            read: (path) => path === runner ? 'bun scripts/select-host-shard.ts opencode2 "$1/2"' : undefined,
+        };
+        expect(() => checkEntry(entry, ci)).toThrow(/host wrapper and CI shard count disagree/);
+    });
+
+    it("rejects unrecognized exclusions and triage without a real UTC date", () => {
+        const unknown = { ...manual, exclusion: { reason: "some-other-reason" } };
+        expect(() => checkEntry(unknown as ModeManifest["entries"][number])).toThrow(/invalid exclusion/);
+        for (const since of [undefined, "2026-02-29", "Nov 27", "2026-11-27T00:00:00Z"]) {
+            expect(() => checkEntry({ ...manual, exclusion: { reason: "triage-pending", since } }))
+                .toThrow(/requires a valid UTC date/);
+        }
+    });
+
+    it("accepts a 30-day-old triage and rejects older or future dates", () => {
+        const pending = (since: string) => ({ ...manual, exclusion: { reason: "triage-pending" as const, since } });
+        expect(checkEntry(pending("2026-10-28")).manifest.entries).toHaveLength(1);
+        expect(() => checkEntry(pending("2026-10-27"))).toThrow(/older than 30 days/);
+        expect(() => checkEntry(pending("2026-11-28"))).toThrow(/since date is in the future/);
+    });
+
+    it("accepts direct CI coverage independently of the tier", () => {
+        const command = `bun test ./${directPath}`;
+        const declared = { ...manual, runs_in: directScript };
+        expect(checkEntry(declared, fixtureCi({ [directScript]: command }, `bash ${directScript}`)).manifest.entries)
+            .toHaveLength(1);
+        expect(checkEntry(declared, fixtureCi({ [directScript]: command, "scripts/gate.sh": `bash ${directScript}` })).manifest.entries)
+            .toHaveLength(1);
+        expect(checkEntry({ ...manual, runs_in: workflow }, fixtureCi({}, `bun test packages/e2e-tests/${directPath}`))
+            .manifest.entries).toHaveLength(1);
+    });
+
+    it("rejects a missing runs_in source", () => {
+        expect(() => checkEntry({ ...manual, runs_in: directScript }, fixtureCi({}, `bash ${directScript}`)))
+            .toThrow(/runs_in script does not exist/);
+        expect(() => checkEntry({ ...manual, runs_in: workflow })).toThrow(/runs_in workflow does not exist/);
+    });
+
+    it("rejects a direct script no longer referenced by CI", () => {
+        expect(() => checkEntry({ ...manual, runs_in: directScript }, fixtureCi({ [directScript]: `bun test ${directPath}` }, "bash scripts/ci/renamed.sh")))
+            .toThrow(/runs_in script is not referenced/);
+    });
+
+    it("rejects a removed literal test path in a script or workflow", () => {
+        const declared = { ...manual, runs_in: directScript };
+        for (const command of ["bun test src/other.test.ts", "bun test src/*.test.ts", `bun test ${directPath}.bak`, `# bun test ${directPath}`]) {
+            expect(() => checkEntry(declared, fixtureCi({ [directScript]: command }, `bash ${directScript}`)))
+                .toThrow(/runs_in script does not name the test/);
+        }
+        expect(() => checkEntry({ ...manual, runs_in: workflow }, fixtureCi({}, "bun test src/other.test.ts")))
+            .toThrow(/runs_in workflow does not name the test/);
+    });
+
+    it("rejects an exclusion on a test already run by CI", () => {
+        const declared = { ...manual, runs_in: workflow, exclusion: { reason: "manual-long-running" as const } };
+        expect(() => checkEntry(declared, fixtureCi({}, `bun test ${directPath}`)))
+            .toThrow(/selected by CI but declares an exclusion/);
     });
 });

@@ -4,11 +4,22 @@ import { Glob } from "bun";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import versions from "../opencode2-versions.json";
+import { ciModeCoverage, readCiSources, type CiSources } from "./ci-mode-coverage";
+import { filesForMode } from "./mode-selection";
 import { validateKnownOpenCode2Failures, type KnownOpenCode2Failure } from "./validate-known-oc2-failures";
+
+export { filesForMode } from "./mode-selection";
 
 export const E2E_ROOT = resolve(import.meta.dir, "..");
 export const MANIFEST_PATH = resolve(E2E_ROOT, "mode-manifest.json");
-const TEST_GLOB = "tests/**/*.test.ts";
+const TEST_GLOB = "{tests,scripts,src}/**/*.test.ts";
+const DAY_MS = 24 * 60 * 60 * 1000;
+const EXCLUSION_REASONS = [
+    "manual-paid-provider", "manual-native-lane", "manual-tui", "manual-pinned-host",
+    "manual-long-running", "manual-opt-in-probe", "triage-pending",
+] as const;
+
+type Exclusion = { reason: (typeof EXCLUSION_REASONS)[number]; since?: string };
 
 export const TIERS = ["both-modes", "ts-only", "rust-only", "excluded"] as const;
 export const HOSTS = ["opencode", "opencode2", "pi", "omp"] as const;
@@ -31,6 +42,8 @@ export interface ModeManifestEntry {
     behavior?: boolean;
     divergences?: HostDivergence[];
     knownFailures?: KnownOpenCode2Failure[];
+    runs_in?: string;
+    exclusion?: Exclusion;
     rationale: string;
     contract_refs: string[];
 }
@@ -63,10 +76,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function validateEntry(value: unknown, index: number): ModeManifestEntry {
+function validateExclusion(value: unknown, path: string, now: number): Exclusion {
+    if (!isRecord(value) || Object.keys(value).some((key) => key !== "reason" && key !== "since") ||
+        !EXCLUSION_REASONS.includes(value.reason as Exclusion["reason"])) {
+        throw new Error(`${path}: invalid exclusion; expected a reason from ${EXCLUSION_REASONS.join(", ")}`);
+    }
+    const reason = value.reason as Exclusion["reason"];
+    const since = value.since;
+    if (since === undefined && reason !== "triage-pending") return { reason };
+    const time = typeof since === "string" && /^\d{4}-\d{2}-\d{2}$/.test(since) ? Date.parse(since) : NaN;
+    if (!Number.isFinite(time) || new Date(time).toISOString().slice(0, 10) !== since) {
+        throw new Error(`${path}: ${reason} exclusion requires a valid UTC date (YYYY-MM-DD) in since`);
+    }
+    const days = Math.floor(now / DAY_MS) - Math.floor(time / DAY_MS);
+    if (days < 0) throw new Error(`${path}: exclusion since date is in the future`);
+    if (reason === "triage-pending" && days > 30) {
+        throw new Error(`${path}: triage-pending exclusion is older than 30 days (since ${since})`);
+    }
+    return { reason, since: since as string };
+}
+
+function validateEntry(value: unknown, index: number, now: number): ModeManifestEntry {
     if (!isRecord(value)) throw new Error(`entry ${index} is not an object`);
     const requiredKeys = ["path", "tier", "invocation", "hosts", "rationale", "contract_refs"];
-    const allowedKeys = [...requiredKeys, "behavior", "divergences", "knownFailures"];
+    const allowedKeys = [...requiredKeys, "behavior", "divergences", "knownFailures", "runs_in", "exclusion"];
     const actualKeys = Object.keys(value).sort();
     if (
         requiredKeys.some((key) => !actualKeys.includes(key)) ||
@@ -97,7 +130,7 @@ function validateEntry(value: unknown, index: number): ModeManifestEntry {
     const hosts = value.hosts;
     if (
         !Array.isArray(hosts) ||
-        hosts.length === 0 ||
+        (hosts.length === 0 && (path.startsWith("tests/") || invocation.ts || invocation.rust)) ||
         hosts.some((host) => typeof host !== "string" || !HOSTS.includes(host as Host)) ||
         new Set(hosts).size !== hosts.length
     ) {
@@ -175,6 +208,9 @@ function validateEntry(value: unknown, index: number): ModeManifestEntry {
     if (typedTier === "both-modes" && (!invocation.ts || !invocation.rust)) {
         throw new Error(`entry ${index} (${path}) is both-modes but is absent from an invocation`);
     }
+    const runsIn = value.runs_in;
+    if (runsIn !== undefined && typeof runsIn !== "string") throw new Error(`${path}: runs_in must be a path`);
+    const exclusion = value.exclusion === undefined ? undefined : validateExclusion(value.exclusion, path, now);
 
     return {
         path,
@@ -183,6 +219,8 @@ function validateEntry(value: unknown, index: number): ModeManifestEntry {
         hosts: [...hosts] as Host[],
         ...(behavior === undefined ? {} : { behavior }),
         ...(divergences.length === 0 ? {} : { divergences }),
+        ...(runsIn === undefined ? {} : { runs_in: runsIn }),
+        ...(exclusion === undefined ? {} : { exclusion }),
         rationale,
         contract_refs: [...contractRefs] as string[],
     };
@@ -192,12 +230,13 @@ function validateEntry(value: unknown, index: number): ModeManifestEntry {
 export function validateManifestDocument(
     raw: unknown,
     expectedFiles: string[] = enumerateTestFiles(),
+    { now = Date.now(), ci = readCiSources(resolve(E2E_ROOT, "../..")) }: { now?: number; ci?: CiSources } = {},
 ): ValidationResult {
-    if (!isRecord(raw) || raw.schema !== 1 || typeof raw.header !== "string" || !Array.isArray(raw.entries)) {
-        throw new Error("mode manifest must be an object with schema: 1, header, and entries");
+    if (!isRecord(raw) || raw.schema !== 2 || typeof raw.header !== "string" || !Array.isArray(raw.entries)) {
+        throw new Error("mode manifest must be an object with schema: 2, header, and entries");
     }
 
-    const entries = raw.entries.map(validateEntry);
+    const entries = raw.entries.map((entry, index) => validateEntry(entry, index, now));
     const expectedSet = new Set(expectedFiles);
     const seen = new Map<string, number>();
     for (const [index, entry] of entries.entries()) {
@@ -208,7 +247,7 @@ export function validateManifestDocument(
         if (!existsSync(resolve(E2E_ROOT, entry.path))) {
             throw new Error(`manifest path does not exist: ${entry.path}`);
         }
-        if (!entry.path.startsWith("tests/") || !entry.path.endsWith(".test.ts")) {
+        if (!/^(?:tests|scripts|src)\/.+\.test\.ts$/.test(entry.path)) {
             throw new Error(`manifest path is not under ${TEST_GLOB}: ${entry.path}`);
         }
         if (seen.get(entry.path)! > 1) {
@@ -233,26 +272,27 @@ export function validateManifestDocument(
         throw new Error(`duplicate manifest entries: ${duplicate.join(", ")}`);
     }
 
-    return {
-        manifest: { schema: 1, header: raw.header, entries },
+    const validation: ValidationResult = {
+        manifest: { schema: 2, header: raw.header, entries },
         files: expectedFiles,
     };
+    const covered = ciModeCoverage(validation, ci);
+    const issues: string[] = [];
+    for (const entry of entries) {
+        if (covered.has(entry.path)) {
+            if (entry.exclusion) issues.push(`${entry.path}: selected by CI but declares an exclusion`);
+        } else if (entry.invocation.ts || entry.invocation.rust) {
+            issues.push(`${entry.path}: declares an invocation but no CI lane selects it`);
+        } else if (!entry.exclusion) {
+            issues.push(`${entry.path}: not selected by any CI lane; add runs_in or an exclusion reason`);
+        }
+    }
+    if (issues.length > 0) throw new Error(issues.join("\n"));
+    return validation;
 }
 
 export function validateModeManifest(): ValidationResult {
     return validateManifestDocument(readManifest());
-}
-
-export function filesForMode(
-    validation: ValidationResult,
-    mode: Mode,
-    harness: HarnessSelection = "all",
-): string[] {
-    return validation.manifest.entries
-        .filter((entry) => entry.invocation[mode])
-        .filter((entry) => harness === "all" || entry.hosts.includes(harness))
-        .map((entry) => entry.path)
-        .sort();
 }
 
 function parseArgs(args: string[]): { mode?: Mode; harness: HarnessSelection } {

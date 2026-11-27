@@ -1,6 +1,6 @@
 {
-    "schema": 1,
-    "header": "CI push workflows run the manifest-derived TypeScript suites and Rust hermetic suite through scripts/run-rust-hermetic-e2e.sh; tag releases run the same Rust invocation. Cargo.lock pins the Rust dependency versions and git revisions. CI mc-module daemon tests and push/release builders use the locked subconscious source to build ck-subc; the scheduled CI builder intentionally probes default-branch HEAD as drift, while test shards consume its prebuilt artifact.",
+    "schema": 2,
+    "header": "CI push workflows run the manifest-derived TypeScript suites and Rust hermetic suite through scripts/run-rust-hermetic-e2e.sh; tag releases run the same Rust invocation. Direct CI commands are recorded by runs_in; files that do not run in CI carry an exclusion reason. Cargo.lock pins the Rust dependency versions and git revisions. CI mc-module daemon tests and push/release builders use the locked subconscious source to build ck-subc; the scheduled CI builder intentionally probes default-branch HEAD as drift, while test shards consume its prebuilt artifact.",
     "entries": [
         {
             "path": "tests/opencode2/issue-889-model-switch.test.ts",
@@ -277,6 +277,7 @@
         },
         {
             "path": "tests/issue-752-restart-first-pass.test.ts",
+            "exclusion": {"reason": "manual-opt-in-probe"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "opt-in reproduction probe (MC_REPRO_752=1): the first pass after a real host restart, warm and idle-expired, with one queued drop on a session at about 60%; records decision rows, the queued drop, the served bytes against the last pre-restart request and the usage reading, with PID lsof throwaway-store containment. Its red cases name the defects that are real, so it runs by hand, outside the mode lanes",
@@ -285,6 +286,7 @@
         },
         {
             "path": "tests/issue-797-restart-tool-rows.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "opt-in real-host check (MC_REPRO_797=1): after a restart with stored tool-definition rows of 74 tools the route no longer offers and an expired provider cache, the first pass sizes the session from the request's own tools (no emergency drop) and the retired rows are deleted, with PID lsof throwaway-store containment; runs by hand on OpenCode 1 and OpenCode 2, outside the mode lanes",
@@ -293,6 +295,7 @@
         },
         {
             "path": "tests/rust-plugin-stage-cache.test.ts",
+            "exclusion": {"reason": "manual-native-lane"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "opt-in measurement (MC_RUST_STAGE_BASELINE): compares the pre-change Rust adapter bundle with the current one for byte-identical output and todo/mural stage cost through a hermetic module and isolated OpenCode 1.18; needs a preserved baseline bundle, so it runs by hand, outside the mode lanes",
@@ -301,6 +304,7 @@
         },
         {
             "path": "tests/system-prompt-change-order.test.ts",
+            "exclusion": {"reason": "manual-pinned-host"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "Opt-in real-host hook-order probe: run directly with bun test tests/system-prompt-change-order.test.ts (also with MC_E2E_MODE=rust) and a pinned npm opencode-darwin-arm64 1.18.30/1.18.35 executable first on PATH. An AGENTS.md edit and a configured instruction-file edit with a queued drop must each rewrite the provider prefix once, not again on the next request. Only these executable hashes have been validated as messages-first; Linux CI installs OpenCode 1.18.32, which is not a validated reference host, so selecting this probe there yields zero passing tests. Keep the hash guard and byte assertions intact until a Linux reference host is validated",
@@ -356,6 +360,7 @@
         },
         {
             "path": "tests/live-providers.test.ts",
+            "exclusion": {"reason": "manual-paid-provider"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "opt-in real-provider acceptance probes (MC_LIVE_PROVIDERS=1): billed calls to OpenAI, Bedrock, OpenRouter, DeepSeek and Kimi with keys served by CKCRED to the mc-e2e consumer, on OpenCode 1.18.30 in throwaway roots with host PID lsof containment; never run in CI",
@@ -364,6 +369,7 @@
         },
         {
             "path": "tests/historian-host-timeout.test.ts",
+            "exclusion": {"reason": "manual-long-running"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "manual regression probe on OpenCode 1.18.30, about 7 minutes: a historian run held by a slow model past Bun's default fetch timer completes under historian_timeout_ms, while a held synchronous prompt on the same plain-fetch client fails at the timer; throwaway root with host PID lsof containment",
@@ -372,6 +378,7 @@
         },
         {
             "path": "tests/fork-over-window-oc1.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "manual regression probe on OpenCode 1.18.30 (issue 608): a 1.x /fork is an unlinked copy, so nothing is inherited; the fork's over-window first pass and every retry after it must be reduced or refused (MC-H06) before the mock provider's enforced window, never sent as is; throwaway root with host PID lsof containment",
@@ -380,6 +387,7 @@
         },
         {
             "path": "tests/issue-574-unborn-project.test.ts",
+            "exclusion": {"reason": "manual-pinned-host"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "manual regression probe on OpenCode 1.18.30: a git repo with no commits keeps its dir: identity and existing memories, and sidebar refreshes log no identity errors; throwaway root with host PID lsof containment",
@@ -388,6 +396,7 @@
         },
         {
             "path": "tests/issue-570-home-project.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "manual regression probe on OpenCode 1.18.30 with throwaway HOME and host PID lsof containment",
@@ -396,6 +405,7 @@
         },
         {
             "path": "tests/issue-538-engine-wall.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1004,6 +1014,7 @@
         },
         {
             "path": "tests/opencode2/automatic-s3-paths.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1043,6 +1054,7 @@
         },
         {
             "path": "tests/opencode2/commands-s2-flush.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1058,6 +1070,7 @@
         },
         {
             "path": "tests/opencode2/commands-s2-host-registration.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1103,6 +1116,7 @@
         },
         {
             "path": "tests/opencode2/fork-inheritance.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1133,6 +1147,7 @@
         },
         {
             "path": "tests/opencode2/missing-history-boundary.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1238,6 +1253,7 @@
         },
         {
             "path": "tests/opencode2/commands-s2-keymap.test.ts",
+            "exclusion": {"reason": "manual-tui"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1253,6 +1269,7 @@
         },
         {
             "path": "tests/opencode2/commands-s2-tui-feedback.test.ts",
+            "exclusion": {"reason": "manual-tui"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1268,6 +1285,7 @@
         },
         {
             "path": "tests/opencode2/context-s2-lanes.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1308,6 +1326,7 @@
         },
         {
             "path": "tests/opencode2/converted-store-overwindow.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1324,6 +1343,7 @@
         },
         {
             "path": "tests/opencode2/dream-loop.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1387,6 +1407,7 @@
         },
         {
             "path": "tests/opencode2/restart-system-prompt-change.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1418,6 +1439,7 @@
         },
         {
             "path": "tests/opencode2/dreamer-s2-carrier.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1448,6 +1470,7 @@
         },
         {
             "path": "tests/opencode2/fold-s3-owner.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1512,6 +1535,7 @@
         },
         {
             "path": "tests/opencode2/hidden-run-notifications.test.ts",
+            "runs_in": "scripts/ci/e2e-host-opencode2-run-background-notification-guard.sh",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "Real OpenCode 2 host: historian and maintenance runs do not wake their holder or the user; the user's own completion remains notifiable; dedicated v2 lane",
@@ -1536,6 +1560,7 @@
         },
         {
             "path": "tests/opencode2/hidden-mapping-transcript.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1575,6 +1600,7 @@
         },
         {
             "path": "tests/opencode2/compaction-off-host-compaction.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1607,6 +1633,7 @@
         },
         {
             "path": "tests/opencode2/hidden-step-limit.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "Real OpenCode 2 host mock drives the Dreamer tool loop to its step cap and verifies the persisted failure classification",
@@ -1615,6 +1642,7 @@
         },
         {
             "path": "tests/opencode2/marker-s3-runtime.test.ts",
+            "runs_in": "scripts/ci/e2e-host-opencode2-run-oc2-conversion-and-marker-regressions.sh",
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1660,6 +1688,7 @@
         },
         {
             "path": "tests/opencode2/prompt-surface-s6.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1782,12 +1811,13 @@
         },
         {
             "path": "tests/opencode2/sidebar-component.test.ts",
+            "exclusion": {"reason": "manual-tui"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
                 "rust": false
             },
-            "rationale": "OpenCode v2 lane: rows only the real sidebar component draws on the GA 2.0.5 sidebar.content slot, which the v2 TUI's plain-text fallback projection never produces; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "rationale": "The real OpenCode 2 sidebar component draws rows absent from the plain-text fallback; requires a PTY and TUI capture.",
             "contract_refs": [
                 "OC2-S1"
             ],
@@ -1797,6 +1827,7 @@
         },
         {
             "path": "tests/opencode2/status-dialog.test.ts",
+            "exclusion": {"reason": "manual-tui"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1812,6 +1843,7 @@
         },
         {
             "path": "tests/opencode2/output-cap.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "Real OpenCode 2 output-cap wire comparison and reasoning-only provider default regression; runs in the dedicated v2 lane",
@@ -1820,6 +1852,7 @@
         },
         {
             "path": "tests/opencode2/over-limit-recovery.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1868,6 +1901,7 @@
         },
         {
             "path": "tests/opencode2/store-generation-conversion.test.ts",
+            "runs_in": "scripts/ci/e2e-host-opencode2-run-oc2-conversion-and-marker-regressions.sh",
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1899,6 +1933,7 @@
         },
         {
             "path": "tests/opencode2/tool-definition-telemetry.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1914,6 +1949,7 @@
         },
         {
             "path": "tests/opencode2/emergency-refusal-visible.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -1946,6 +1982,7 @@
         },
         {
             "path": "tests/opencode2/storage-refusal-reason.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -2968,6 +3005,7 @@
         },
         {
             "path": "tests/opencode2/rust-mode-boundary-restart-gate.test.ts",
+            "exclusion": {"reason": "manual-native-lane"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -2984,6 +3022,7 @@
         },
         {
             "path": "tests/opencode2/ts-mode-on-migrated-real-store.test.ts",
+            "exclusion": {"reason": "manual-opt-in-probe"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -2999,6 +3038,7 @@
         },
         {
             "path": "tests/rust-classify-host-runner.test.ts",
+            "exclusion": {"reason": "manual-native-lane"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -3014,6 +3054,7 @@
         },
         {
             "path": "tests/dreamer-verify-budget.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -3029,6 +3070,7 @@
         },
         {
             "path": "tests/dreamer-token-budget-oc1.test.ts",
+            "exclusion": {"reason": "manual-pinned-host"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -3044,6 +3086,7 @@
         },
         {
             "path": "tests/dreamer-verify-token-budget-oc1.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -3055,6 +3098,7 @@
         },
         {
             "path": "tests/dreamer-host-timeout.test.ts",
+            "exclusion": {"reason": "manual-long-running"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -3070,6 +3114,7 @@
         },
         {
             "path": "tests/issue-586-pi-responses-orphans.test.ts",
+            "exclusion": {"reason": "manual-opt-in-probe"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -3085,6 +3130,7 @@
         },
         {
             "path": "tests/historian-no-tools.test.ts",
+            "exclusion": {"reason": "manual-pinned-host"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -3101,6 +3147,7 @@
         },
         {
             "path": "tests/historian-window-fit.test.ts",
+            "exclusion": {"reason": "manual-pinned-host"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -3194,6 +3241,7 @@
         },
         {
             "path": "tests/degraded-pass-lock.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "manual regression probe on OpenCode 1.18.30: a context.db writer lock held across the tagging step replays the last good request instead of sending the conversation without its persisted drops; opt-in TMPDIR root with host and locker PID lsof containment",
@@ -3202,6 +3250,7 @@
         },
         {
             "path": "tests/opencode2/session-api-cutover.test.ts",
+            "exclusion": {"reason": "manual-pinned-host"},
             "tier": "excluded",
             "invocation": {
                 "ts": false,
@@ -3217,6 +3266,7 @@
         },
         {
             "path": "tests/rust-full-sync-frame-cap.test.ts",
+            "exclusion": {"reason": "manual-native-lane"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "manual real-module probe with prebuilt ck-mc and ck-subc (MC_E2E_CK_MC_PREBUILT_BIN, MC_E2E_CK_SUBC_BIN): a 9,268-message paged full-sync retry above 48 MiB in total is admitted frame by frame, while an oversized single tool frame stays refused",
@@ -3225,6 +3275,7 @@
         },
         {
             "path": "tests/dreamer-mapper-step-cap-pi.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "manual regression probe on a real Pi host (MC_E2E_MAPPER_STEP_PROBE=1): a 20-memory verify-broad batch that needs more than 60 mapper calls finalizes before the step cap and keeps a partial manifest instead of failing MC-D10; throwaway root with host PID lsof containment",
@@ -3233,6 +3284,7 @@
         },
         {
             "path": "tests/opencode2/mapper-step-finalize.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "manual regression probe on a real OpenCode 2.0.22 host (MC_E2E_MAPPER_STEP_PROBE=1): before the native 60-step ceiling the mapper is asked for its manifest with tools removed, so a verify-broad batch keeps a partial result; throwaway root with host PID lsof containment",
@@ -3241,6 +3293,7 @@
         },
         {
             "path": "tests/zen-primary-surface.test.ts",
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
             "rationale": "Opt-in probe on real OpenCode 1 and 2 hosts that an ordinary session never exposes the Zen hidden summarizer variants (system prompt, Task tool, agent lists). Set MC_PRIMARY_PROBE_ROOT, MC_PRIMARY_BASE_PLUGIN, MC_PRIMARY_OC1 and MC_PRIMARY_OC2; without them the host tests skip and the carrier-leak guard tests run as plain unit tests.",
@@ -3254,6 +3307,366 @@
             "rationale": "Issue 938 on real Pi and OMP hosts: an extension tool returns images; their tags count each image at the per-image cost, the protected tail ends inside the image outputs, and queued drops on old images land past the execute threshold and leave the request. A full /ctx-recomp over a pending marker that ended on a folded tool result stages and applies the marker for the rebuilt history, so the request is cut and the restarted host no longer loads summarized messages. Mock provider only, throwaway roots.",
             "contract_refs": ["FOLD-UNDER-PRESSURE"],
             "hosts": ["pi", "omp"]
+        },
+        {
+            "path": "scripts/check-rust-prerequisites.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "scripts/ci-dists.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-check-compiled-contracts.sh",
+            "rationale": "Verifies that CI restores the producer dists before loading compiled plugin contracts.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "scripts/ci-workflow.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "scripts/ckios-reasoning-only-probe.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/e2e-host-opencode-cache-analysis-oracle.sh",
+            "rationale": "Exercises the reasoning-only and marker-boundary probes against the installed OpenCode 1 host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": ["opencode"]
+        },
+        {
+            "path": "scripts/known-oc2-failures.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "scripts/run-slow-unit-tests.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "scripts/select-host-shard.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "scripts/select-rust-shard.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "scripts/select-unit-shard.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "scripts/test-db-guard.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "scripts/tool-sweep-concurrency-gate.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "scripts/tool-sweep-marker-refusal-gate.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
+            "rationale": "The marker-retention assertion expects retry to advance the marker before a pass with rewrite permission.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": ["opencode"]
+        },
+        {
+            "path": "scripts/tool-sweep-upgrade-gate.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "exclusion": {"reason": "manual-opt-in-probe"},
+            "rationale": "Requires MC_PROBE_UPGRADE_FROM and an old comparison bundle compatible with the seeded store schema.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": ["opencode"]
+        },
+        {
+            "path": "scripts/validate-mode-manifest.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/cache-analysis.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/e2e-host-opencode-cache-analysis-oracle.sh",
+            "rationale": "Runs the OpenCode 1 cache oracle against the CI host and compiled plugin.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": ["opencode"]
+        },
+        {
+            "path": "src/contention-turn-outcome.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/harness.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "exclusion": {"reason": "triage-pending", "since": "2026-11-27"},
+            "rationale": "Fake SDK response tests lack the spawn options now required by sendPrompt.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/host-open-files.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/live-providers/auth.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "exclusion": {"reason": "manual-paid-provider"},
+            "rationale": "The live-auth case requires an explicit opt-in, a real host and paid provider credentials.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/live-providers/calibrate.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/live-providers/recorder.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/live-providers/thinking-matrix.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/live-providers/trim-only.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/live-providers/wire.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/mid-turn-prefix-ab.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/mock-provider/server.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/mock-routing.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/opencode-runner/spawn.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/opencode2-runner/cli-resolution.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/opencode2-runner/open-file-inventory.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/opencode2-runner/opencode1-prompt-diagnostics.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/opencode2-runner/plugin-activation.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/opencode2-runner/schema-guard.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/pi-harness.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/pi-runner/rpc-client.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/repro/prefill-tail-repro.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/rust-pass-observation.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/rust-runner/executable-staging.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/rust-runner/hermetic-subc.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
+        },
+        {
+            "path": "src/temp-dir.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "runs_in": "scripts/ci/preflight-layout-manifest-and-shard-contracts.sh",
+            "rationale": "Verifies e2e infrastructure without launching a real host.",
+            "contract_refs": ["packages/e2e-tests/mode-manifest.json"],
+            "hosts": []
         }
     ]
 }
