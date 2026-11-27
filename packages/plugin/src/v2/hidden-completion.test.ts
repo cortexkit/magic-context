@@ -38,6 +38,7 @@ import {
 import {
     createV2HiddenCompletionExecutor,
     type HiddenChildHost,
+    HiddenProviderError,
     toolLoopMessages,
 } from "./hidden-completion";
 import { HiddenModelActivity } from "./hidden-model-activity";
@@ -230,13 +231,21 @@ class Rows {
         return this.idle.get(sessionID)?.at(-1);
     }
 
-    appendIdle(sessionID: string, outcome: "succeeded" | "failed" | "interrupted") {
+    appendIdle(
+        sessionID: string,
+        outcome: "succeeded" | "failed" | "interrupted",
+        error?: unknown,
+    ) {
         const row: StoreRow<"idle"> = {
             id: `message-${++this.seq}`,
             session_id: sessionID,
             type: "idle",
             seq: this.seq,
-            data: { outcome, time: { created: Date.now() } },
+            data: {
+                outcome,
+                time: { created: Date.now() },
+                ...(error === undefined ? {} : { error }),
+            },
         };
         const current = this.idle.get(sessionID) ?? [];
         current.push(row);
@@ -320,6 +329,7 @@ async function setup(
         owner?: unknown;
         keepSubagents?: boolean;
         skipContextHook?: boolean;
+        writeRows?: (rows: Rows, sessionID: string) => void;
     } = {},
 ) {
     const db = new Database(":memory:");
@@ -397,6 +407,10 @@ async function setup(
             };
             if (!capabilities.skipContextHook) hook.apply(draft);
             requests.push(structuredClone(draft));
+            if (capabilities.writeRows) {
+                capabilities.writeRows(rows, input.sessionID);
+                return;
+            }
             if (failPrompt) throw new Error("provider unavailable");
             if (promptError) throw promptError;
             if (providerError !== undefined) {
@@ -940,6 +954,101 @@ describe("OpenCode 2 hidden child completion", () => {
             state.db.close();
         }
     });
+
+    const outputLimit = {
+        type: "output-limit",
+        message: "Response still truncated after two output token limit continuations",
+    };
+
+    function writeContinuedLengthRows(rows: Rows, sessionID: string) {
+        // OpenCode 2.4.2 persists each of the original request and two continuations.
+        for (let call = 0; call < 3; call++) {
+            const row = rows.append(sessionID, "", { finish: "length" });
+            row.data.rawFinish = "max_output_tokens";
+            row.data.content = [{ type: "reasoning", text: "budget spent reasoning" }];
+            row.data.tokens = {
+                input: 101,
+                output: 64,
+                reasoning: 0,
+                cache: { read: 0, write: 0 },
+            };
+        }
+    }
+
+    test("collects the last assistant when OpenCode ends a hidden run at the output limit", async () => {
+        const state = await setup(undefined, {
+            writeRows(rows, sessionID) {
+                writeContinuedLengthRows(rows, sessionID);
+                rows.appendIdle(sessionID, "failed", outputLimit);
+            },
+        });
+        const handle = await state.executor.open({ ...run, kind: "historian", agent: "historian" });
+        try {
+            await state.executor.attempt(handle, request());
+            expect(await state.executor.collect(handle, 50)).toMatchObject({
+                text: null,
+                reasoning: "budget spent reasoning",
+                lengthCapped: true,
+                usage: { input: 101, output: 64, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+                tokenLog: { input: 101, output: 64, finish_reason: "length" },
+            });
+            expect(state.requests).toHaveLength(1);
+        } finally {
+            await close(state.executor, handle, true);
+            state.db.close();
+        }
+    });
+
+    test("rejects provider failure even after length-capped assistant rows", async () => {
+        const providerError = { ...outputLimit, type: "provider.rate-limit" };
+        const state = await setup(undefined, {
+            writeRows(rows, sessionID) {
+                writeContinuedLengthRows(rows, sessionID);
+                rows.appendIdle(sessionID, "failed", providerError);
+            },
+        });
+        state.setEventSessionError(providerError);
+        const handle = await state.executor.open(run);
+        try {
+            const attempt = state.executor.attempt(handle, request());
+            await expect(attempt).rejects.toBeInstanceOf(HiddenProviderError);
+            await expect(attempt).rejects.toMatchObject({ hostError: providerError });
+        } finally {
+            await close(state.executor, handle, false);
+            state.db.close();
+        }
+    });
+
+    test("rejects interruption even after length-capped assistant rows", async () => {
+        const state = await setup(undefined, {
+            writeRows(rows, sessionID) {
+                writeContinuedLengthRows(rows, sessionID);
+                rows.appendIdle(sessionID, "interrupted", outputLimit);
+            },
+        });
+        const handle = await state.executor.open(run);
+        try {
+            await expect(state.executor.attempt(handle, request())).rejects.toThrow(
+                "outcome=interrupted",
+            );
+        } finally {
+            await close(state.executor, handle, false);
+            state.db.close();
+        }
+    });
+
+    test("times out and interrupts a hidden run with no terminal rows", async () => {
+        const state = await setup(undefined, { writeRows() {} });
+        const handle = await state.executor.open({ ...run, timeoutMs: 40 });
+        try {
+            await expect(state.executor.attempt(handle, request())).rejects.toThrow("timed out");
+            expect(state.interrupts).toEqual([handle.id]);
+        } finally {
+            await close(state.executor, handle, false);
+            state.db.close();
+        }
+    });
+
     test("sends the exact calibrated pair with options and provider usage", async () => {
         const state = await setup("host-generation-1", {
             modelCatalog: async () => [

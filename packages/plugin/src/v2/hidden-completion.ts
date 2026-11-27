@@ -413,7 +413,7 @@ async function awaitAssistantRow(
     afterSeq: number,
     deadline: number,
     signal?: AbortSignal,
-): Promise<StoreRow<"assistant">> {
+): Promise<{ row: StoreRow<"assistant">; outputLimit?: true }> {
     for (;;) {
         // Checked before reading: a cancelled run must not open another reader.
         const refusedBefore = localFailure();
@@ -428,6 +428,19 @@ async function awaitAssistantRow(
         if (refused) throw refused;
         if (newIdle && (!newAssistant || newIdle.seq > newAssistant.seq)) {
             const outcome = newIdle.data.outcome;
+            const error = newIdle.data.error;
+            // OpenCode fails the session after its own continuations hit the output limit,
+            // but the last assistant row still holds a completed, truncated reply.
+            if (
+                outcome === "failed" &&
+                newAssistant &&
+                error &&
+                typeof error === "object" &&
+                "type" in error &&
+                error.type === "output-limit"
+            ) {
+                return { row: newAssistant, outputLimit: true };
+            }
             if (outcome === "failed" || outcome === "interrupted") {
                 const sessionError = (await readSessionError()) ?? newAssistant?.data.error;
                 const details = [
@@ -441,7 +454,7 @@ async function awaitAssistantRow(
                       })
                     : new HiddenProviderError(details.join("; "), { hostError: sessionError });
             }
-            if (outcome === "succeeded" && newAssistant) return newAssistant;
+            if (outcome === "succeeded" && newAssistant) return { row: newAssistant };
         }
         if (newAssistant) {
             const outcome = assistantOutcome(newAssistant);
@@ -465,7 +478,7 @@ async function awaitAssistantRow(
                 });
             }
             if (typeof newAssistant.data.finish === "string" || outcome === "succeeded") {
-                return newAssistant;
+                return { row: newAssistant };
             }
         }
         if (Date.now() >= deadline) {
@@ -977,7 +990,7 @@ export async function createV2HiddenCompletionExecutor(
                     aborted,
                     ...(budget ? [budgetStopped] : []),
                 ]);
-                const row = await Promise.race([
+                const { row, outputLimit } = await Promise.race([
                     awaitAssistantRow(
                         options.openReader,
                         async () => {
@@ -1029,12 +1042,15 @@ export async function createV2HiddenCompletionExecutor(
                     await interruptAndRetire(run, "token-budget");
                     throw exceeded;
                 }
-                const reportedUsage = steps.some(
+                // Report the usage of the capped reply, not the sum of OpenCode's
+                // continuations. The budget above still charges all assistant rows.
+                const usageRows = outputLimit ? [row] : steps;
+                const reportedUsage = usageRows.some(
                     (step) =>
                         tokenNumber(step.data.tokens?.input) !== undefined ||
                         tokenNumber(step.data.tokens?.output) !== undefined,
                 );
-                const usage = sumRowUsage(steps);
+                const usage = sumRowUsage(usageRows);
                 // A host promise may resolve at the same instant as cancellation.
                 // Never publish a completion after the child has been retired.
                 if (request.signal?.aborted || run.retired || Date.now() >= deadline) {
@@ -1060,7 +1076,8 @@ export async function createV2HiddenCompletionExecutor(
                     // and floor omitted components to zero. With no numeric usage,
                     // use the local meter so budget accounting remains finite.
                     usage: reportedUsage ? usage : meter(system, promptText(request), text ?? ""),
-                    lengthCapped: ["length", "max_tokens"].includes(row.data.finish ?? ""),
+                    lengthCapped:
+                        outputLimit || ["length", "max_tokens"].includes(row.data.finish ?? ""),
                     providerId: row.data.model?.providerID ?? requested.providerID,
                     modelId: row.data.model?.id ?? requested.modelID,
                     attemptedModel: requestedRef,
