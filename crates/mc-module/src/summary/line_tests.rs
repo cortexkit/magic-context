@@ -788,3 +788,64 @@ fn the_lab_sessions_floor_on_the_reference_scale_is_pinned() {
         .collect();
     assert_eq!(found, pinned);
 }
+
+/// A score exactly at the line is not shown; just above it is a title.
+#[test]
+fn a_score_exactly_at_the_line_is_not_shown() {
+    for height in [6.0, 32.0, 70.0, 96.0] {
+        assert_eq!(form_under_line(height, height), NOT_SHOWN, "at {height}");
+        assert_eq!(form_under_line(height + 0.01, height), TITLE, "above {height}");
+    }
+    // In a plan: the newest summary, scored 6 where the line starts at 6.
+    let summaries = [Summary {
+        score: 6.0,
+        scored: false,
+        day: None,
+    }; 2];
+    let mut table = Table {
+        forms: vec![[500, 200, 80, 40, 20]; 2],
+        lines: vec![10; 2],
+        header: 10,
+    };
+    let plan = plan(&summaries, 600.0, &mut table, Options::default());
+    assert_eq!(plan.forms[1], NOT_SHOWN);
+}
+
+/// With the window unknown, a fold works with 25,000 tokens.
+#[test]
+fn an_unknown_window_gives_twenty_five_thousand_tokens() {
+    assert_eq!(HISTORY_BUDGET_WHEN_WINDOW_UNKNOWN, 25_000.0);
+    assert_eq!(effective_budget(0.0), 25_000.0);
+    assert_eq!(effective_budget(-3.0), 25_000.0);
+    assert_eq!(effective_budget(1.0), 1.0);
+    let mut random = Random::new(25);
+    let (session, mut table) = Generated::new(&mut random, 600);
+    let plan = plan(&session.summaries(), 0.0, &mut table, Options::default());
+    assert_eq!(plan.budget, 25_000.0);
+    assert!(plan.total <= 25_000 && plan.total > 23_000, "{}", plan.total);
+}
+
+/// The widest stretch is 12: a session just past fitting in full takes it,
+/// and at 12 the line still hides what it hides there.
+#[test]
+fn the_widest_stretch_is_twelve() {
+    let mut random = Random::new(7);
+    let (session, mut table) = Generated::new(&mut random, 400);
+    let summaries = session.summaries();
+    let full: u64 = table.forms.iter().map(|forms| forms[0]).sum();
+    let plan = plan(&summaries, full as f64 - 1.0, &mut table, Options::default());
+    assert_eq!(plan.stretch, Some(12.0));
+    assert_eq!(plan.forms, line_forms_with_floor(&plan, 12.0, &mut table));
+    // The line's far end at 12: flat at 96 from age 1718.3 × 12.
+    assert_eq!(line_height(1_718.3 * 12.0, 12.0), 96.0);
+    assert!(line_height(1_718.3 * 12.0 - 1.0, 12.0) < 96.0);
+}
+
+/// The forms the line and the floor give at `stretch`, for `plan`'s scores.
+fn line_forms_with_floor(plan: &Plan, stretch: f64, table: &mut Table) -> Vec<u8> {
+    let scores = Scores {
+        line: &plan.scores,
+        floor: &plan.floor_scores,
+    };
+    forms_on_line(scores, stretch, plan.budget, table)
+}

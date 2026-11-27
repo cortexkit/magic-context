@@ -730,3 +730,23 @@ fn stopping_the_sums_early_renders_the_same_bytes() {
         "exact, 900",
     );
 }
+
+/// The first plan already leaves room for what joining the pieces adds, as
+/// measured on the newest headings: with a counter that charges two tokens
+/// for every blank line between pieces, the body fits at the first plan,
+/// and the plan's joints are exactly those two tokens a joint.
+#[test]
+fn the_first_plan_charges_the_joints_between_pieces() {
+    let count = |text: &str| text.split_whitespace().count() + text.matches('\n').count();
+    let comps = session(1_500, 30, mixed_score);
+    for budget in [5_000.0, 30_000.0, 98_000.0] {
+        let rendered = render_history(&comps, budget, count);
+        let plan = &rendered.plan;
+        let pieces = plan.forms.iter().filter(|&&form| form < NOT_SHOWN).count() + plan.groups.len();
+        assert_eq!(plan.joints, 2 * (pieces as u64 - 1), "at {budget}");
+        assert_eq!(rendered.body_tokens.len(), 1, "at {budget}: {:?}", rendered.body_tokens);
+        assert!(rendered.body_tokens[0] as f64 <= budget);
+        // A line under a day heading joins with one newline, not two.
+        assert!(rendered.body_tokens[0] <= plan.total);
+    }
+}
