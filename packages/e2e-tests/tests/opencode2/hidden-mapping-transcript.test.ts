@@ -9,6 +9,7 @@ import { insertMemory } from "../../../plugin/src/features/magic-context/memory"
 import { resolveProjectIdentityForSession } from "../../../plugin/src/features/magic-context/memory/project-identity";
 import { Database } from "../../../plugin/src/shared/sqlite";
 import { CLI, isolation, spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
+import { providerSystemText } from "../../src/provider-system-text";
 
 async function eventually(check: () => boolean, label: string): Promise<void> {
     const deadline = Date.now() + 30_000;
@@ -70,7 +71,7 @@ test("OC2 commits complete 80-character, incremental and replacement mapping rep
             let calls = 0;
             let active = true;
             host.mock.addMatcher(body => {
-                if (!active || !String(body.instructions).includes("You are a memory mapper")) return null;
+                if (!active || !providerSystemText(body).includes("You are a memory mapper")) return null;
                 calls++;
                 if (calls <= 2) {
                     const prefix = calls === 1 && scenario === "incremental" ? "<mappings>\n" :
@@ -89,9 +90,16 @@ test("OC2 commits complete 80-character, incremental and replacement mapping rep
             expect(db.prepare("SELECT file_path FROM memory_verifications WHERE memory_id = ?").all(id)).toEqual([{ file_path: file }]);
             expect(calls).toBe(3);
             active = false;
-            const children = (await client.session.list({ directory: host.cwd, parentID: parent.id })).data;
-            const child = children.find(child => !seenChildren.has(child.id))!;
-            expect(child).toBeDefined();
+            // A hidden run may be a root or sit under the host's background session.
+            const roots = (await client.session.list({ directory: host.cwd, parentID: null })).data;
+            const children = await Promise.all(roots.map(async (root) =>
+                (await client.session.list({ directory: host.cwd, parentID: root.id })).data,
+            ));
+            const newRuns = [...roots, ...children.flat()].filter((session) =>
+                session.metadata?.magic_context === "hidden-run" && !seenChildren.has(session.id),
+            );
+            expect(newRuns).toHaveLength(1);
+            const child = newRuns[0]!;
             seenChildren.add(child.id);
             const recorded = await client.session.get({ sessionID: child.id });
             expect(recorded.model?.variant).toBe("high");
@@ -106,7 +114,7 @@ test("OC2 commits complete 80-character, incremental and replacement mapping rep
         }
         const beforeCurate = runs().at(-1)!.id;
         host.mock.addMatcher(body => {
-            if (!String(body.instructions).includes(CURATE_SYSTEM_PROMPT)) return null;
+            if (!providerSystemText(body).includes(CURATE_SYSTEM_PROMPT)) return null;
             if (!JSON.stringify(body.input).includes("function_call_output")) return {
                 openaiOutput: [{ type: "function_call", id: "fc_curate", call_id: "call_curate", name: "ctx_memory", arguments: JSON.stringify({ action: "update", ids: [lastMemory], category: "ARCHITECTURE", content: "The replacement fixture claim is implemented by its backing file. The fixture remains local to this project." }) }],
                 usage: { input_tokens: 100, output_tokens: 10 },
