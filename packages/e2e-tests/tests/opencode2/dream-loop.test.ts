@@ -17,6 +17,13 @@ import {
 	spawnOpencode2,
 	waitForPluginActive,
 } from "../../src/opencode2-runner/spawn";
+import { providerSystemText } from "../../src/provider-system-text";
+
+const hasProbeSystem = (body: Record<string, unknown>, agent: string) =>
+	providerSystemText(body).split("\n").includes(`DREAM_LOOP_${agent}`);
+
+const hasMapperSystem = (body: Record<string, unknown>) =>
+	providerSystemText(body).includes("memory mapper for the magic-context system");
 
 async function waitFile(file: string) {
 	const deadline = Date.now() + 25000;
@@ -75,7 +82,7 @@ test("OpenCode 2 tool-loop families execute scoped tools across steps and remove
 			const name = family.name;
 			let steps = 0;
 			host.mock.addMatcher((body) => {
-				if (body.instructions !== `DREAM_LOOP_${family.agent}`) return null;
+				if (!hasProbeSystem(body, family.agent)) return null;
 				steps++;
 				return steps === 1
 					? {
@@ -130,15 +137,18 @@ test("OpenCode 2 tool-loop families execute scoped tools across steps and remove
 			expect(steps).toBe(2);
 			const wire = host.mock
 				.requests()
-				.filter((r) => r.body.instructions === `DREAM_LOOP_${family.agent}`);
-			const secondInput = wire[1]?.body.input as Array<{
+				.filter((r) => hasProbeSystem(r.body, family.agent));
+			const fullSecondInput = wire[1]?.body.input as Array<{
 				type: string;
+				role?: string;
 				content?: Array<{ text?: string }>;
 			}>;
+			// The host can put system instructions before the conversation as developer items.
+			const secondInput = fullSecondInput.filter((item) => item.role !== "developer");
 			expect(secondInput[0]?.content?.[0]?.text).toBe(
 				`DREAM_PROMPT_${family.agent}`,
 			);
-			expect(JSON.stringify(secondInput)).not.toContain("mc:hidden:");
+			expect(JSON.stringify(fullSecondInput)).not.toContain("mc:hidden:");
 			expect(secondInput[1]?.type).toBe("function_call");
 			expect(secondInput[2]?.type).toBe("function_call_output");
 			expect(JSON.stringify(secondInput)).toContain(
@@ -167,13 +177,7 @@ test("OpenCode 2 tool-loop families execute scoped tools across steps and remove
 			"export const fixture = true;\n",
 		);
 		host.mock.addMatcher((body) => {
-			if (
-				typeof body.instructions !== "string" ||
-				!body.instructions.includes(
-					"memory mapper for the magic-context system",
-				)
-			)
-				return null;
+			if (!hasMapperSystem(body)) return null;
 			mapSteps++;
 			const text = JSON.stringify(body.input);
 			const id = text.match(/\[(\d+)\]/)?.[1];
@@ -214,13 +218,7 @@ test("OpenCode 2 tool-loop families execute scoped tools across steps and remove
 		expect(mapSteps).toBeGreaterThanOrEqual(2);
 		const mapWire = host.mock
 			.requests()
-			.filter(
-				(r) =>
-					typeof r.body.instructions === "string" &&
-					r.body.instructions.includes(
-						"memory mapper for the magic-context system",
-					),
-			);
+			.filter((r) => hasMapperSystem(r.body));
 		expect(JSON.stringify(mapWire[1]?.body.input)).toContain(
 			"Map these memories",
 		);
@@ -228,7 +226,7 @@ test("OpenCode 2 tool-loop families execute scoped tools across steps and remove
 		const beforeDenied = readFileSync(join(host.cwd, "tool-executed"), "utf8");
 		let deniedSteps = 0;
 		host.mock.addMatcher((body) => {
-			if (body.instructions !== "DREAM_LOOP_dreamer-docs") return null;
+			if (!hasProbeSystem(body, "dreamer-docs")) return null;
 			deniedSteps++;
 			return deniedSteps === 1
 				? {
@@ -259,7 +257,7 @@ test("OpenCode 2 tool-loop families execute scoped tools across steps and remove
 		expect(deniedSteps).toBe(2);
 		const deniedWire = host.mock
 			.requests()
-			.filter((r) => r.body.instructions === "DREAM_LOOP_dreamer-docs");
+			.filter((r) => hasProbeSystem(r.body, "dreamer-docs"));
 		expect(JSON.stringify(deniedWire[0]?.body.tools)).not.toContain(
 			"ctx_memory",
 		);
@@ -296,9 +294,9 @@ test("OpenCode 2 tool-loop families execute scoped tools across steps and remove
         // Parented child requests carry their root's session header. Classify the actual
         // hidden-run system prompts instead, including the production mapper's prompt.
         expect(host.mock.requests().filter((request) => {
-            const instructions = String(request.body.instructions);
-            return !instructions.startsWith("DREAM_LOOP_") &&
-                !instructions.includes("memory mapper for the magic-context system");
+            const instructions = providerSystemText(request.body);
+            return !instructions.split("\n").some((line) => line.startsWith("DREAM_LOOP_")) &&
+                !hasMapperSystem(request.body);
         })).toHaveLength(0);
     } catch (error) {
         console.error(host.stderr());
