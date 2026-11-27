@@ -597,23 +597,44 @@ pub(crate) enum Piece<'a> {
 }
 
 /// The token counts of one summary's pieces: its five forms on its own and
-/// its line under a day heading, each counted when first needed. A summary
-/// never changes once stored, so a count stays right for as long as the
-/// summary renders the same heading with the same counter; the session keeps
-/// them across folds ([`super::render::HistoryCounts`]).
+/// its line under a day heading, each counted when first needed. The session
+/// keeps them across folds ([`super::render::HistoryCounts`]); each count is
+/// kept with a hash of the text it counted and used again only for the same
+/// text, since a stored row can be rewritten in place.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PieceCounts {
-    pub forms: [Option<u64>; 5],
-    pub line: Option<u64>,
+    pub forms: [Option<Counted>; 5],
+    pub line: Option<Counted>,
+}
+
+/// A piece's token count and a hash of the text it was counted on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Counted {
+    pub tokens: u64,
+    pub text: u64,
+}
+
+/// The hash a count is kept with. Counts live only in memory, so the
+/// standard library's hasher, fixed within a build, is enough.
+pub(crate) fn text_hash(text: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::hash::DefaultHasher::new();
+    hasher.write(text.as_bytes());
+    hasher.finish()
 }
 
 /// The costs of a session's pieces with its own token counter. Each piece is
 /// counted once, into `known`: the search looks at the same pieces at many
 /// stretch factors, and later folds of the session at the same ones again.
+/// A count found in `known` is checked once per render against the text the
+/// piece renders now.
 pub(crate) struct CountedCosts<'k, R, C> {
     render: R,
     count: C,
     known: &'k mut [PieceCounts],
+    /// Which of each summary's six slots (five forms, then the line) this
+    /// render has checked or counted.
+    checked: Vec<[bool; 6]>,
     headers: HashMap<(usize, usize, usize), u64>,
     joint: f64,
 }
@@ -625,10 +646,12 @@ where
 {
     /// Costs over `known`, one entry per summary given to [`plan`].
     pub(crate) fn new(known: &'k mut [PieceCounts], render: R, count: C) -> Self {
+        let checked = vec![[false; 6]; known.len()];
         Self {
             render,
             count,
             known,
+            checked,
             headers: HashMap::new(),
             joint: 0.0,
         }
@@ -639,6 +662,33 @@ where
     pub(crate) fn set_joint(&mut self, joint: f64) {
         self.joint = joint;
     }
+
+    /// The tokens of summary `index`'s piece in `slot` (0..5 a form, 5 its
+    /// line): the kept count when it was counted on the same text, else
+    /// counted now.
+    fn tokens(&mut self, index: usize, slot: usize, piece: Piece) -> u64 {
+        let kept = if slot < 5 {
+            &mut self.known[index].forms[slot]
+        } else {
+            &mut self.known[index].line
+        };
+        if self.checked[index][slot] {
+            if let Some(counted) = kept {
+                return counted.tokens;
+            }
+        }
+        self.checked[index][slot] = true;
+        let text = (self.render)(piece);
+        let hash = text_hash(&text);
+        match kept {
+            Some(counted) if counted.text == hash => counted.tokens,
+            _ => {
+                let tokens = (self.count)(&text);
+                *kept = Some(Counted { tokens, text: hash });
+                tokens
+            }
+        }
+    }
 }
 
 impl<R, C> Costs for CountedCosts<'_, R, C>
@@ -647,16 +697,11 @@ where
     C: Fn(&str) -> u64,
 {
     fn piece(&mut self, index: usize, form: u8) -> u64 {
-        let (render, count) = (&self.render, &self.count);
-        *self.known[index].forms[usize::from(form - 1)]
-            .get_or_insert_with(|| count(&render(Piece::Form(index, form))))
+        self.tokens(index, usize::from(form - 1), Piece::Form(index, form))
     }
 
     fn group_line(&mut self, index: usize) -> u64 {
-        let (render, count) = (&self.render, &self.count);
-        *self.known[index]
-            .line
-            .get_or_insert_with(|| count(&render(Piece::Line(index))))
+        self.tokens(index, 5, Piece::Line(index))
     }
 
     fn group_header(&mut self, members: &[usize]) -> u64 {

@@ -731,8 +731,8 @@ fn kept_counts_follow_the_summary_and_the_counter() {
     let exact = claude();
     let estimator = crate::count::Counter::estimated_for_model(Some("anthropic/claude-opus-5-5"));
     let counted = super::line::PieceCounts {
-        forms: [Some(7), None, None, None, Some(3)],
-        line: Some(2),
+        forms: [Some(counted(7)), None, None, None, Some(counted(3))],
+        line: Some(counted(2)),
     };
     let counts = HistoryCounts::default();
     assert_eq!(counts.known(exact, &rows), vec![Default::default(); 3]);
@@ -780,8 +780,8 @@ fn a_revert_forgets_the_counts_of_the_summaries_it_removed() {
         })
         .collect();
     let counted = super::line::PieceCounts {
-        forms: [Some(7); 5],
-        line: Some(2),
+        forms: [Some(counted(7)); 5],
+        line: Some(counted(2)),
     };
     summaries.counts().known(claude(), &rows);
     summaries.counts().keep(claude(), &rows, vec![counted; 4]);
@@ -978,4 +978,78 @@ fn the_search_keeps_its_stretch_though_a_wider_one_also_fits_with_uneven_forms()
         render_compartment_at_tier(&rows[1], 1)
     );
     assert!(count(&body) <= 64, "{}", count(&body));
+}
+
+/// A row rewritten in place under the same sequence, range, creation time
+/// and days (as an edit to a stored row can) renders from its new text: a
+/// count kept for the old text is not used for the new one.
+#[test]
+fn a_rewritten_row_is_counted_again_not_from_the_old_texts_count() {
+    use super::head::{fold_with_counts, Inputs};
+    use super::index::Summaries;
+    use crate::context_db::StoredCompartment;
+    let row = StoredCompartment {
+        sequence: 1,
+        start_message: 1,
+        end_message: 9,
+        created_at: 123,
+        start_message_id: "a".into(),
+        end_message_id: "z".into(),
+        title: "Keep this work".into(),
+        importance: 80,
+        legacy: 0,
+        start_date: Some("2026-03-01".into()),
+        end_date: Some("2026-03-01".into()),
+        p1: Some(" original long clause".repeat(250).into()),
+        p2: Some("lighter detail".into()),
+        p3: Some("condensed".into()),
+        p4: Some("cue".into()),
+        ..Default::default()
+    };
+    let mut rewritten = row.clone();
+    rewritten.p1 = Some("Rewritten full record".into());
+    let counter = claude();
+    let fold = |summaries: &Summaries| {
+        let rows: Vec<StoredCompartment> = summaries
+            .rows(0..summaries.len(), None)
+            .unwrap()
+            .found
+            .into_iter()
+            .map(std::sync::Arc::unwrap_or_clone)
+            .collect();
+        let classes = Default::default();
+        let inputs = Inputs {
+            counter,
+            summaries: &rows,
+            docs: "",
+            rows: &[],
+            classes: &classes,
+            now_ms: 0,
+            gone: &[],
+            history_budget_tokens: 128,
+            history_local_budget_tokens: 128,
+            memory_budget_tokens: 0,
+            profile_budget_tokens: 0,
+        };
+        fold_with_counts(&inputs, &Default::default(), None, summaries.counts())
+    };
+    let mut warm = Summaries::default();
+    warm.replace(vec![row]);
+    fold(&warm);
+    warm.replace(vec![rewritten.clone()]);
+    let mut cold = Summaries::default();
+    cold.replace(vec![rewritten]);
+    let fresh = fold(&cold);
+    assert!(fresh.m0.contains("Rewritten full record"), "{}", fresh.m0);
+    let again = fold(&warm);
+    assert_eq!(again.m0, fresh.m0);
+    assert_eq!(again.summary_items, fresh.summary_items);
+}
+
+/// A kept count of `tokens`, for tests that fill counts in by hand.
+fn counted(tokens: u64) -> super::line::Counted {
+    super::line::Counted {
+        tokens,
+        text: super::line::text_hash(&tokens.to_string()),
+    }
 }

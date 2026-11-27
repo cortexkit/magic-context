@@ -346,9 +346,11 @@ struct CountsBySummary {
 
 /// The token counts of every history piece a session's folds have counted,
 /// by summary sequence, kept in memory for the session. A fold counts only
-/// the pieces no earlier fold counted: a summary never changes once stored.
-/// A summary whose heading would render differently (its days, or another
-/// summary at the same sequence after a revert) is counted again.
+/// the pieces no earlier fold counted on the same text: each count carries a
+/// hash of the text it counted ([`super::line::Counted`]), so a row rewritten
+/// in place is counted again. A summary whose heading would render
+/// differently (its days, or another summary at the same sequence after a
+/// revert) starts with no counts.
 #[derive(Debug, Default)]
 pub(crate) struct HistoryCounts(std::sync::Mutex<CountsBySummary>);
 
