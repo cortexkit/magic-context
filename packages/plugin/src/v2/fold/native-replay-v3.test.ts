@@ -559,6 +559,86 @@ async function oldReceipt(f: ReturnType<typeof fixture>, summary = "head") {
     return { raw, cut, bytes };
 }
 
+test("a legacy start floor may follow a non-conversational row without skipping conversation", async () => {
+    const f = fixture(4, 0, undefined, true);
+    const first = f.rows[0]!;
+    f.rows[0] = { ...first, type: "compaction", data: { status: "failed" } };
+    const { raw, cut } = await oldReceipt(f);
+    const draft = context([message(cut.id, "host checkpoint")]);
+    expect(await f.replay.prepareLegacyUpgrade({ draft, cut, reader: f.reader })).toBe(true);
+    expect(f.replay.legacyUpgradeInput("s", draft.model)).toEqual(raw);
+    expect(await f.replay.commitLegacyUpgrade("s", true)).toBe(true);
+    const receipt = f.kv.get("native-fold/v3/s") as { payload: string };
+    expect(JSON.parse(receipt.payload).replay.floor).toMatchObject({
+        kind: "start",
+        id: "u2",
+        after: first.seq,
+    });
+    expect(f.reader.earliestSequence("s")).toBe(first.seq);
+    const cold = f.make();
+    expect(await cold.admits("s", cut, f.reader)).toBe(true);
+    expect((await cold.restore("s", cut, "p/m"))?.map(({ id }) => id)).toEqual(
+        raw.map(({ id }) => id),
+    );
+});
+
+function cachedSummary(f: ReturnType<typeof fixture>, id: string) {
+    f.db
+        .prepare(
+            "UPDATE session_meta SET cached_m0_bytes = ?, cached_m0_last_baseline_end_message_id = ? WHERE session_id = 's'",
+        )
+        .run(Buffer.from("served summary"), id);
+}
+
+test("an unplaceable cached boundary is not evidence against a valid native floor", async () => {
+    const f = fixture(6, 0, undefined, true);
+    cachedSummary(f, "u4");
+    f.begin();
+    const cut = f.finish();
+    expect((await f.replay.restore("s", cut, "p/m"))?.map(({ id }) => id)).toEqual(["u5", "u6"]);
+
+    // The store cannot resolve this boundary, but u4 and its validated floor
+    // still exist. An unknown coordinate is not the same as an empty head.
+    cachedSummary(f, "missing-cache-end");
+    expect(await f.replay.restorationFloor("s", cut, f.reader)).toBe(4);
+    expect(
+        (await f.replay.restoreRead("s", cut, { providerID: "p", id: "m" })).map(({ id }) => id),
+    ).toEqual(["u5", "u6"]);
+});
+
+test("warm native restore reads rows absent from its stamps after coverage shrinks", async () => {
+    const f = fixture(6, 0, undefined, true);
+    cachedSummary(f, "u4");
+    f.begin();
+    const cut = f.finish();
+    expect((await f.replay.restore("s", cut, "p/m"))?.map(({ id }) => id)).toEqual(["u5", "u6"]);
+
+    // The cut and cache stay warm, but now the head covers only u1 and u2.
+    cachedSummary(f, "u2");
+    expect((await f.replay.restore("s", cut, "p/m"))?.map(({ id }) => id)).toEqual([
+        "u3",
+        "u4",
+        "u5",
+        "u6",
+    ]);
+});
+
+test("capture does not save a start floor when the first source row changed after restoration", async () => {
+    const f = fixture(6, 0, undefined, true);
+    f.begin();
+    f.finish();
+    const restored = f.rows
+        .filter(({ type }) => type === "user")
+        .map(({ id, data }) => message(id, String(data.text)));
+    const first = f.rows[0]!;
+    // The restore had already read u1, but the host now exposes a different
+    // first row. Capture must not certify a floor for a row it did not restore.
+    f.rows.unshift({ ...first, seq: first.seq - 1, id: "new-first-row" });
+    await f.replay.capture(context(restored), restored, undefined, first.id);
+    expect(f.kv.has("native-fold-state/v3/s")).toBe(false);
+    expect(f.logs.join("\n")).toContain("No usable host replay boundary");
+});
+
 test("applying the coverage limit to a legacy checkpoint with an empty source range is a no-op", async () => {
     const f = fixture(1, 0, undefined, true);
     f.rows[0] = { ...f.rows[0]!, type: "compaction", data: { status: "failed" } };

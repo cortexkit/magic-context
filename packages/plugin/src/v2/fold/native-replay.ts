@@ -1800,7 +1800,9 @@ export class NativeFoldReplay {
             if (
                 !metadata ||
                 (this.metadataThrough.get(sessionID) ?? -1) < through ||
-                (this.options.protocol === 3 && (this.metadataAfter.get(sessionID) ?? -1) > after)
+                (this.options.protocol === 3 &&
+                    this.options.rendersHistory?.(sessionID) &&
+                    (this.metadataAfter.get(sessionID) ?? -1) > after)
             ) {
                 reader ??= this.openReader(sessionID);
                 metadata = reader

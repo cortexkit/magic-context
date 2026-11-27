@@ -428,6 +428,41 @@ test.each([
     }
 });
 
+test("a queued committed revert cannot retire history in a different host store", async () => {
+    const { f, cutoff, stage, commit } = await revertFixture(1131);
+    const holder = "another historian";
+    const identity = V2StoreReader.prototype.hostIdentity;
+    const host = spyOn(V2StoreReader.prototype, "hostIdentity");
+    try {
+        f.compartment(f.rows.length - 1);
+        await f.pass();
+        const before = getCompartments(f.db, f.session);
+        expect(acquireCompartmentLease(f.db, f.session, holder)).toBeTruthy();
+        await stage();
+        f.revertBefore(cutoff);
+        await commit();
+        expect(getCompartments(f.db, f.session)).toEqual(before);
+        releaseCompartmentLease(f.db, f.session, holder);
+
+        // The same session and row ids can appear in copied stores. Change
+        // only the identity seen by the next pass, not what the reader returns.
+        host.mockReturnValue("other host store");
+        f.user("continue in the replacement store", 1_000);
+        await f.attempt();
+        expect(getCompartments(f.db, f.session)).toEqual(before);
+
+        // A different store invalidates the saved deletion evidence, even if
+        // requests return to the original store later.
+        host.mockImplementation(identity);
+        await f.attempt();
+        expect(getCompartments(f.db, f.session)).toEqual(before);
+    } finally {
+        host.mockRestore();
+        releaseCompartmentLease(f.db, f.session, holder);
+        await f.cleanup();
+    }
+});
+
 test("a missing summary end alone is not a committed revert proof", async () => {
     const { f, cutoff, commit } = await revertFixture(1129);
     try {
