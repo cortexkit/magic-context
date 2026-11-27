@@ -484,24 +484,36 @@ export default async (ctx) => {
 			writeFileSync(systemEpochPath, "aborted");
 			const abortedStart = Date.now();
 			const count = h.requests().length;
+			let releaseReply!: () => void;
+			const untilAborted = new Promise<void>((resolve) => {
+				releaseReply = resolve;
+			});
 			h.mock.enqueue({
 				text: "never served",
 				usage: { input_tokens: 0, output_tokens: 0 },
-				delayMs: 5_000,
+				until: untilAborted,
 			});
-			const aborted = h
-				.sendPrompt(session, "aborted idle attempt", { timeoutMs: 30_000 })
-				.catch((error) => {
-					expect(String(error)).toContain("MessageAbortedError");
+			try {
+				const aborted = h
+					.sendPrompt(session, "aborted idle attempt", { timeoutMs: 30_000 })
+					.then(
+						() => undefined,
+						(error: unknown) => String(error),
+					);
+				await h.waitFor(() => h!.requests().length > count, {
+					label: "aborted request reaches provider",
 				});
-			await h.waitFor(() => h!.requests().length > count, {
-				label: "aborted request reaches provider",
-			});
-			const response = await fetch(`${h.serverUrl}/session/${session}/abort`, {
-				method: "POST",
-			});
-			expect(response.ok).toBe(true);
-			await aborted;
+				const response = await fetch(
+					`${h.serverUrl}/session/${session}/abort`,
+					{
+						method: "POST",
+					},
+				);
+				expect(response.ok).toBe(true);
+				expect(await aborted).toContain("MessageAbortedError");
+			} finally {
+				releaseReply();
+			}
 			turns.push({
 				label: "aborted idle attempt",
 				start: abortedStart,
