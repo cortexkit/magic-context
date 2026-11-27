@@ -1929,6 +1929,7 @@ export class PiSubagentRunner implements SubagentRunner {
 			const accumulatedMessages: unknown[] = [];
 			accountingMessages = accumulatedMessages;
 			let finalizeDelivered = false;
+			let exemptRepliesRemaining = 2;
 			let preSteerToolCalls:
 				| ReturnType<typeof extractToolInvocations>
 				| undefined;
@@ -1987,15 +1988,18 @@ export class PiSubagentRunner implements SubagentRunner {
 						mappingMessages = e.messages;
 				}
 
-				if (
-					rpcBudget &&
-					e.type === "response" &&
-					(event as { command?: string; success?: boolean }).success === false
-				) {
-					const reply = event as { command?: string; error?: string };
+				if (rpcBudget && e.type === "response") {
+					const reply = event as {
+						id?: string;
+						command?: string;
+						success?: boolean;
+						error?: string;
+						data?: { disposition?: string };
+					};
 					if (
-						reply.command === "prompt" ||
-						(reply.command === "steer" && !sawAgentEnd)
+						reply.success === false &&
+						(reply.command === "prompt" ||
+							(reply.command === "steer" && !sawAgentEnd))
 					) {
 						terminateChild(child);
 						settle({
@@ -2006,6 +2010,17 @@ export class PiSubagentRunner implements SubagentRunner {
 							durationMs: Date.now() - startTime,
 						});
 						return;
+					}
+					if (
+						reply.success === true &&
+						reply.command === "steer" &&
+						reply.id === "dreamer-finalize" &&
+						reply.data?.disposition === "handled"
+					) {
+						sessionLog(
+							options.accountingSessionId ?? "subagent",
+							"Pi dreamer finalize: steer was handled by an input extension",
+						);
 					}
 				}
 				telemetry.observe(event);
@@ -2069,13 +2084,14 @@ export class PiSubagentRunner implements SubagentRunner {
 							});
 							return;
 						}
-						// Match refusals to the assistant reply that issued the calls.
-						// The steer acknowledgement only queues the instruction; even
-						// its delivery must not reclassify calls already issued.
-						if (rpcBudget && (decision === "finalize" || preSteerToolCalls)) {
-							preSteerToolCalls = finalizeDelivered
-								? undefined
-								: extractToolInvocations([message]);
+						// Match refusals to the reply that issued them. Exempt the finalize
+						// reply and at most one slipped reply before delivery, so a lost
+						// or rewritten steer cannot disable the two-refusal stop.
+						if (decision === "finalize" || preSteerToolCalls) {
+							preSteerToolCalls =
+								finalizeDelivered || exemptRepliesRemaining-- === 0
+									? undefined
+									: extractToolInvocations([message]);
 						}
 						if (decision === "finalize" && rpcBudget) {
 							try {
@@ -2112,6 +2128,9 @@ export class PiSubagentRunner implements SubagentRunner {
 							);
 						})
 					) {
+						// Only the verbatim user message confirms delivery, not the RPC
+						// acknowledgement. End the exemption at the next reply (or its
+						// existing bound), without reclassifying calls already issued.
 						finalizeDelivered = true;
 					}
 				}
@@ -2121,20 +2140,29 @@ export class PiSubagentRunner implements SubagentRunner {
 				if (
 					budget?.snapshot().finalizeFired &&
 					e.type === "tool_execution_end" &&
-					!(e.toolCallId && preSteerToolCalls?.has(e.toolCallId)) &&
 					resultParts?.some((part) => part.text === TOKEN_BUDGET_TOOL_REFUSAL)
 				) {
-					const refusal = budget.refuseTool();
-					if (refusal?.hardStopped) {
-						terminateChild(child);
-						settle({
-							ok: false,
-							reason: "token_budget",
-							error: "MC-D11: Pi dreamer made two calls after finalize",
-							durationMs: Date.now() - startTime,
-							meta: { tokenBudget: budget.snapshot() },
-						});
-						return;
+					if (e.toolCallId && preSteerToolCalls?.has(e.toolCallId)) {
+						sessionLog(
+							options.accountingSessionId ?? "subagent",
+							"Pi dreamer finalize: refusal spared for a call issued before steer delivery was confirmed",
+							{ toolCallId: e.toolCallId },
+						);
+					} else {
+						// refusedCalls counts only refusals toward the stop. Missing IDs
+						// cannot establish an exemption and still count.
+						const refusal = budget.refuseTool();
+						if (refusal?.hardStopped) {
+							terminateChild(child);
+							settle({
+								ok: false,
+								reason: "token_budget",
+								error: "MC-D11: Pi dreamer made two calls after finalize",
+								durationMs: Date.now() - startTime,
+								meta: { tokenBudget: budget.snapshot() },
+							});
+							return;
+						}
 					}
 				}
 				if (cap !== undefined && telemetry.steps > cap) {

@@ -4881,7 +4881,7 @@ describe("Pi dreamer prompt-token budget", () => {
 				role: "assistant",
 				usage: { input: 81 },
 				stopReason: "toolUse",
-				content: [{ type: "toolCall", name: "read" }],
+				content: [{ type: "toolCall", id: "pending", name: "read" }],
 			},
 		});
 		for (let i = 0; i < 2; i++)
@@ -4899,10 +4899,16 @@ describe("Pi dreamer prompt-token budget", () => {
 					],
 				},
 			});
-		expect(await run).toMatchObject({ ok: false, reason: "token_budget" });
+		child.emitClose();
+		expect(await run).toMatchObject({
+			ok: false,
+			reason: "token_budget",
+			error: "MC-D11: Pi dreamer made two calls after finalize",
+			meta: { tokenBudget: { refusedCalls: 2 } },
+		});
 	});
 
-	async function budgetScript() {
+	async function budgetScript(tokenBudget = 100) {
 		const child = createMockChild();
 		const { runner } = runnerWith(child, {
 			invocation,
@@ -4912,7 +4918,7 @@ describe("Pi dreamer prompt-token budget", () => {
 		const run = runner.run({
 			...baseOptions,
 			agent: "dreamer-memory-mapper",
-			tokenBudget: 100,
+			tokenBudget,
 		});
 		await prompt;
 		const issueCalls = (input: number, ...ids: string[]) =>
@@ -4925,26 +4931,30 @@ describe("Pi dreamer prompt-token budget", () => {
 					content: ids.map((id) => ({ type: "toolCall", id, name: "read" })),
 				},
 			});
-		const queueSteer = () => {
+		const queueSteer = (disposition?: "handled") => {
 			expect(child.stdinText).toContain("dreamer-finalize");
 			child.writeStdoutLine({
 				type: "response",
 				command: "steer",
 				id: "dreamer-finalize",
 				success: true,
+				...(disposition && { data: { disposition } }),
 			});
 		};
-		const deliverSteer = () => {
-			const steer = JSON.parse(child.stdinText.trimEnd().split("\n").at(-1)!);
+		const sendUserMessage = (text: string) => {
 			child.writeStdoutLine({
 				type: "message_end",
 				message: {
 					role: "user",
-					content: [{ type: "text", text: steer.message }],
+					content: [{ type: "text", text }],
 				},
 			});
 		};
-		const refuse = (id: string) =>
+		const deliverSteer = (suffix = "") => {
+			const steer = JSON.parse(child.stdinText.trimEnd().split("\n").at(-1)!);
+			sendUserMessage(steer.message + suffix);
+		};
+		const refuse = (id?: string) =>
 			child.writeStdoutLine({
 				type: "tool_execution_end",
 				toolCallId: id,
@@ -4973,7 +4983,16 @@ describe("Pi dreamer prompt-token budget", () => {
 			});
 			child.emitClose();
 		};
-		return { child, run, issueCalls, queueSteer, deliverSteer, refuse, answer };
+		return {
+			child,
+			run,
+			issueCalls,
+			queueSteer,
+			deliverSteer,
+			sendUserMessage,
+			refuse,
+			answer,
+		};
 	}
 
 	it.each([
@@ -5040,8 +5059,8 @@ describe("Pi dreamer prompt-token budget", () => {
 			await budgetScript();
 		issueCalls(81, "pending");
 		refuse("pending");
-		issueCalls(1, "late-1", "late-2");
 		queueSteer();
+		issueCalls(1, "late-1", "late-2");
 		refuse("late-1");
 		refuse("late-2");
 		deliverSteer();
@@ -5051,6 +5070,216 @@ describe("Pi dreamer prompt-token budget", () => {
 			assistantText: '<verify><verified id="1"/></verify>',
 			meta: { tokenBudget: { finalizeFired: true, refusedCalls: 0 } },
 		});
+	});
+
+	it.each([
+		"undelivered",
+		"rewritten",
+	] as const)("bounds the exemption when the steer is %s", async (delivery) => {
+		const { child, run, issueCalls, queueSteer, deliverSteer, refuse } =
+			await budgetScript();
+		issueCalls(81, "pending");
+		queueSteer();
+		refuse("pending");
+		if (delivery === "rewritten") deliverSteer(" (added by an input handler)");
+		for (const id of ["slipped", "post-1", "post-2"]) {
+			issueCalls(2, id);
+			refuse(id);
+		}
+		child.emitClose();
+		expect(await run).toMatchObject({
+			ok: false,
+			error: "MC-D11: Pi dreamer made two calls after finalize",
+			meta: { tokenBudget: { spent: 87, refusedCalls: 2, hardStopped: true } },
+		});
+	});
+
+	it("bounds the exemption after a step-reserve finalize with no delivery", async () => {
+		const { child, run, issueCalls, queueSteer, refuse } =
+			await budgetScript(3_000_000);
+		for (let i = 1; i <= 57; i++) issueCalls(10, `read-${i}`);
+		issueCalls(10, "pending");
+		queueSteer();
+		refuse("pending");
+		issueCalls(10, "slipped");
+		refuse("slipped");
+		issueCalls(10, "post-1", "post-2");
+		refuse("post-1");
+		refuse("post-2");
+		child.emitClose();
+		expect(await run).toMatchObject({
+			ok: false,
+			error: "MC-D11: Pi dreamer made two calls after finalize",
+			meta: {
+				tokenBudget: { spent: 600, finalizeFired: true, refusedCalls: 2 },
+			},
+		});
+	});
+
+	it("does not mistake an unrelated user message for the finalize steer", async () => {
+		const {
+			run,
+			issueCalls,
+			queueSteer,
+			sendUserMessage,
+			deliverSteer,
+			refuse,
+			answer,
+		} = await budgetScript();
+		issueCalls(81, "pending");
+		queueSteer();
+		refuse("pending");
+		sendUserMessage("An unrelated message");
+		issueCalls(1, "slipped-1", "slipped-2");
+		refuse("slipped-1");
+		refuse("slipped-2");
+		deliverSteer();
+		answer();
+		expect(await run).toMatchObject({
+			ok: true,
+			meta: { tokenBudget: { refusedCalls: 0 } },
+		});
+	});
+
+	it("spares three calls in each of the two eligible replies then counts two after delivery", async () => {
+		const { child, run, issueCalls, queueSteer, deliverSteer, refuse } =
+			await budgetScript();
+		issueCalls(81, "pending-1", "pending-2", "pending-3");
+		queueSteer();
+		for (const id of ["pending-1", "pending-2", "pending-3"]) refuse(id);
+		issueCalls(1, "slipped-1", "slipped-2", "slipped-3");
+		for (const id of ["slipped-1", "slipped-2", "slipped-3"]) refuse(id);
+		deliverSteer();
+		for (const id of ["post-1", "post-2"]) {
+			issueCalls(1, id);
+			refuse(id);
+		}
+		child.emitClose();
+		expect(await run).toMatchObject({
+			ok: false,
+			error: "MC-D11: Pi dreamer made two calls after finalize",
+			meta: { tokenBudget: { spent: 84, refusedCalls: 2 } },
+		});
+	});
+
+	it("ends a finalized run when the RPC input pipe breaks", async () => {
+		const { child, run, issueCalls } = await budgetScript();
+		issueCalls(81, "pending");
+		child.stdin.emit("error", new Error("write EPIPE"));
+		expect(await run).toMatchObject({
+			ok: false,
+			reason: "token_budget",
+			error: "Pi RPC input failed: write EPIPE",
+		});
+	});
+
+	it.each([
+		"result",
+		"invocation",
+	] as const)("counts refusals without ids on the %s", async (missing) => {
+		const { child, run, issueCalls, refuse } = await budgetScript();
+		if (missing === "result") {
+			issueCalls(81, "pending-a", "pending-b");
+			refuse();
+			refuse();
+		} else {
+			child.writeStdoutLine({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					stopReason: "toolUse",
+					usage: { input: 81 },
+					content: [
+						{ type: "toolCall", name: "read" },
+						{ type: "toolCall", name: "read" },
+					],
+				},
+			});
+			refuse("pending-a");
+			refuse("pending-b");
+		}
+		child.emitClose();
+		expect(await run).toMatchObject({
+			ok: false,
+			error: "MC-D11: Pi dreamer made two calls after finalize",
+			meta: { tokenBudget: { refusedCalls: 2 } },
+		});
+	});
+
+	it.each([
+		false,
+		true,
+	])("counts reused tool IDs after delivery (retry: %s)", async (retry) => {
+		const { child, run, issueCalls, queueSteer, deliverSteer, refuse } =
+			await budgetScript();
+		issueCalls(81, "dup");
+		queueSteer();
+		refuse("dup");
+		deliverSteer();
+		if (retry) {
+			child.writeStdoutLine({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					stopReason: "error",
+					usage: { input: 0 },
+					content: [],
+				},
+			});
+			child.writeStdoutLine({ type: "auto_retry_start" });
+		}
+		issueCalls(2, "dup", "post");
+		refuse("dup");
+		refuse("post");
+		child.emitClose();
+		expect(await run).toMatchObject({
+			ok: false,
+			error: "MC-D11: Pi dreamer made two calls after finalize",
+			meta: { tokenBudget: { spent: 83, refusedCalls: 2 } },
+		});
+	});
+
+	it("logs a swallowed finalize steer and the IDs of spared refusals", async () => {
+		const logs = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
+		try {
+			const { child, run, issueCalls, queueSteer, refuse } =
+				await budgetScript();
+			issueCalls(81, "pending");
+			queueSteer("handled");
+			refuse("pending");
+			issueCalls(1, "slipped");
+			refuse("slipped");
+			issueCalls(1, "post-1", "post-2");
+			refuse("post-1");
+			refuse("post-2");
+			child.emitClose();
+			expect(await run).toMatchObject({
+				reason: "token_budget",
+				meta: { tokenBudget: { refusedCalls: 2 } },
+			});
+			expect(
+				logs.mock.calls.filter(([, message]) =>
+					message.startsWith("Pi dreamer finalize:"),
+				),
+			).toEqual([
+				[
+					"subagent",
+					"Pi dreamer finalize: steer was handled by an input extension",
+				],
+				[
+					"subagent",
+					"Pi dreamer finalize: refusal spared for a call issued before steer delivery was confirmed",
+					{ toolCallId: "pending" },
+				],
+				[
+					"subagent",
+					"Pi dreamer finalize: refusal spared for a call issued before steer delivery was confirmed",
+					{ toolCallId: "slipped" },
+				],
+			]);
+		} finally {
+			logs.mockRestore();
+		}
 	});
 });
 
