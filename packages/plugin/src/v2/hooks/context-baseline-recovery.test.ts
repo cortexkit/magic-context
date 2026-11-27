@@ -1,6 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
 import { clearCachedM0M1 } from "../../features/magic-context/storage-meta-shared";
+import { getSlot } from "../../hooks/magic-context/lkg-slot";
 import * as renderOptions from "../../hooks/magic-context/render-options";
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
+import * as models from "../../shared/models-dev-cache";
 import { NativeFoldReplay } from "../fold/native-replay";
 import {
     type AdmissionV3,
@@ -8,13 +11,18 @@ import {
     IMPORTED_MC_SUMMARY,
 } from "../fold/native-replay-v3";
 import { foldDigest } from "../fold/owner";
-import { type Oc2ContextFixture, oc2ContextFixture } from "./__tests__/oc2-context.fixture";
+import {
+    installBusyAdmission,
+    lkgEvents,
+    type Oc2ContextFixture,
+    oc2ContextFixture,
+} from "./__tests__/oc2-context.fixture";
 import { HEAD_IDS } from "./payload";
 import type { SessionContext } from "./types";
 
 const options = {
     area: "oc2-new-baseline",
-    instructions: false,
+    instructions: true,
     temporal: false,
     cacheTtl: "never",
 };
@@ -47,6 +55,23 @@ function deleteRow(f: Oc2ContextFixture, id: string) {
     f.raw.prepare("DELETE FROM session_message WHERE id = ?").run(id);
 }
 
+function withoutCoveredInstructions(f: Oc2ContextFixture, draft: SessionContext, through: number) {
+    const texts = new Set(
+        (
+            f.raw
+                .prepare(
+                    "SELECT json_extract(data, '$.text') AS text FROM session_message WHERE session_id = ? AND type = 'system' AND seq <= ?",
+                )
+                .all(f.session, through) as { text: string }[]
+        ).map(({ text }) => text),
+    );
+    const messages = draft.messages.filter(
+        (message) => !(message.role === "system" && texts.has(String(message.content[0]?.text))),
+    );
+    expect(messages.length).toBeLessThan(draft.messages.length);
+    return JSON.stringify({ system: draft.system, messages });
+}
+
 async function replaceNativeReceipt<T>(
     f: Oc2ContextFixture,
     type: "native-fold" | "native-fold-state",
@@ -61,24 +86,25 @@ async function replaceNativeReceipt<T>(
 }
 
 const reasons = [
-    "missing floor row",
-    "edited summary floor row",
-    "changed host identity",
-    "deleted control and changed hidden history",
-    "invalid captured floor",
-    "capture beyond surviving store",
-    "nonqualifying imported checkpoint",
-    "legacy receipt whose upgrade cannot prove its history",
+    ["missing floor row", true],
+    ["edited summary floor row", true],
+    ["changed host identity", false],
+    ["deleted control and changed hidden history", true],
+    ["invalid captured floor", false],
+    ["capture beyond surviving store", false],
+    ["nonqualifying imported checkpoint", true],
+    ["legacy receipt whose upgrade cannot prove its history", false],
 ] as const;
 
 for (const [origin, offset] of [
     ["after summary publication", 62980],
     ["after a coordinate rebase", 63000],
 ] as const) {
-    for (const [index, reason] of reasons.entries()) {
-        test(`a fresh baseline ${origin} restores the exact checkpoint tail with ${reason}`, async () => {
+    for (const [index, [reason, readmitted]] of reasons.entries()) {
+        test(`a fresh baseline ${origin} with ${reason}: ${readmitted ? "managed, native, native" : "managed, managed"}`, async () => {
             const f = await oc2ContextFixture(offset + index, options);
             const restoration = spyOn(NativeFoldReplay.prototype, "restorationFloor");
+            const native = spyOn(NativeFoldReplay.prototype, "restore");
             try {
                 const floor = f.rows[5]!;
                 const controlAnchor = f.rows[8]!;
@@ -183,7 +209,9 @@ for (const [origin, offset] of [
                         break;
                 }
                 await f.restart();
+                native.mockClear();
                 const first = await f.pass();
+                expect(native).not.toHaveBeenCalled();
                 expect(restoration).toHaveBeenCalledTimes(1);
                 expect(await restoration.mock.results[0]?.value).toBeUndefined();
                 const checkpoint = f.raw
@@ -197,11 +225,27 @@ for (const [origin, offset] of [
                 expect(first.logs.join("\n")).not.toContain("history boundary repair:");
                 const next = await f.pass();
                 expect(rawIDs(next.draft)).toEqual(expected);
-                expect(next.bytes).toBe(first.bytes);
+                expect(next.draft.tools).toEqual(first.draft.tools);
+                if (readmitted) {
+                    expect(native).toHaveBeenCalledTimes(1);
+                    expect(restoration).toHaveBeenCalledTimes(1);
+                    expect(next.bytes).toBe(withoutCoveredInstructions(f, first.draft, anchor.seq));
+                    expect(next.bytes).not.toBe(first.bytes);
+                    const third = await f.pass();
+                    expect(native).toHaveBeenCalledTimes(2);
+                    expect(restoration).toHaveBeenCalledTimes(1);
+                    expect(third.bytes).toBe(next.bytes);
+                    expect(third.draft.tools).toEqual(next.draft.tools);
+                } else {
+                    expect(native).not.toHaveBeenCalled();
+                    expect(restoration).toHaveBeenCalledTimes(2);
+                    expect(next.bytes).toBe(first.bytes);
+                }
                 expect(next.logs.join("\n")).not.toMatch(
                     /history boundary repair:|HARD.*executed=true/,
                 );
             } finally {
+                native.mockRestore();
                 restoration.mockRestore();
                 await f.cleanup();
             }
@@ -210,7 +254,14 @@ for (const [origin, offset] of [
 }
 
 for (const [index, blocked] of (
-    ["cached boundary id", "cached baseline bytes", "no summaries", "missing newest end"] as const
+    [
+        "cached boundary id",
+        "cached baseline bytes",
+        "no summaries",
+        "missing newest end",
+        "an unresolved newest summary",
+        "unknown session mode",
+    ] as const
 ).entries()) {
     test(`an unusable checkpoint floor still refuses with ${blocked}`, async () => {
         const f = await oc2ContextFixture(62990 + index, options);
@@ -242,6 +293,20 @@ for (const [index, blocked] of (
                 case "missing newest end":
                     deleteRow(f, newest.id);
                     break;
+                case "an unresolved newest summary":
+                    f.db
+                        .prepare(
+                            "UPDATE compartments SET rebase_status = 'unresolved' WHERE session_id = ? AND sequence = 1",
+                        )
+                        .run(f.session);
+                    break;
+                case "unknown session mode":
+                    // Keep the mode unresolved when the normal host lookup retries it.
+                    f.raw.prepare("DELETE FROM session_v2 WHERE id = ?").run(f.session);
+                    f.db
+                        .prepare("UPDATE session_meta SET is_subagent = NULL WHERE session_id = ?")
+                        .run(f.session);
+                    break;
             }
             await f.restart();
             const result = await f.attempt();
@@ -257,7 +322,7 @@ for (const [index, blocked] of (
 }
 
 test("a first render with published history and an unadmitted checkpoint restores the exact tail", async () => {
-    const f = await oc2ContextFixture(62994, options);
+    const f = await oc2ContextFixture(62999, { ...options, instructions: false });
     try {
         const newest = f.rows[5]!;
         f.compartment(5);
@@ -295,7 +360,7 @@ test("a first render with published history and an unadmitted checkpoint restore
 
 // A fresh-baseline floor relies on the shared trim, not on the summary text
 // being visible: the history budget can archive even the newest summary.
-test("an archived newest summary serves the same prefix from the anchor or the earliest row", async () => {
+test("an archived newest summary serves the same requests from the anchor or the earliest row: managed, native, native", async () => {
     const serve = async (startAtEarliest: boolean) => {
         const f = await oc2ContextFixture(62975, {
             ...options,
@@ -305,7 +370,7 @@ test("an archived newest summary serves the same prefix from the anchor or the e
         try {
             for (const row of f.rows) {
                 row.inputTokens = 5;
-                f.edit(row.id, `row-${row.seq}`);
+                if (row.type !== "system") f.edit(row.id, `row-${row.seq}`);
             }
             f.compartment(5);
             await f.pass();
@@ -323,16 +388,26 @@ test("an archived newest summary serves the same prefix from the anchor or the e
             const changed = spyOn(NativeFoldReplay.prototype, "sourceChanged").mockReturnValue(
                 startAtEarliest,
             );
+            const native = spyOn(NativeFoldReplay.prototype, "restore");
             try {
                 const first = await f.pass();
+                expect(native).not.toHaveBeenCalled();
                 expect(first.bytes).not.toContain("Review history 1");
                 expect(first.logs.join("\n")).toMatch(/HARD.*reason=first_render executed=true/);
                 expect(rawIDs(first.draft)).toEqual(storeIDs(f, f.rows[13]!.seq));
                 changed.mockRestore();
                 const next = await f.pass();
-                expect(next.bytes).toBe(first.bytes);
-                return first.bytes;
+                expect(native).toHaveBeenCalledTimes(1);
+                expect(next.bytes).toBe(
+                    withoutCoveredInstructions(f, first.draft, f.rows[13]!.seq),
+                );
+                expect(next.bytes).not.toBe(first.bytes);
+                const third = await f.pass();
+                expect(native).toHaveBeenCalledTimes(2);
+                expect(third.bytes).toBe(next.bytes);
+                return [first.bytes, next.bytes, third.bytes];
             } finally {
+                native.mockRestore();
                 changed.mockRestore();
                 budget.mockRestore();
             }
@@ -341,5 +416,123 @@ test("an archived newest summary serves the same prefix from the anchor or the e
         }
     };
     const anchored = await serve(false);
-    expect(await serve(true)).toBe(anchored);
+    expect(await serve(true)).toEqual(anchored);
+});
+
+test("a repair above the old native floor changes only covered instructions: managed, native, native; logging is independent", async () => {
+    const serve = async (diagnostic: "present" | "absent" | "different checkpoint") => {
+        const f = await oc2ContextFixture(63020, options);
+        const native = spyOn(NativeFoldReplay.prototype, "restore");
+        const peek = BoundedSessionMap.prototype.peek;
+        let markerReads = 0;
+        // Alter only the diagnostic record, never the store or the checkpoint in the draft.
+        const marker = spyOn(BoundedSessionMap.prototype, "peek").mockImplementation(function (
+            this: BoundedSessionMap<unknown>,
+            id: string,
+        ) {
+            const value = peek.call(this, id);
+            if (!value || typeof value !== "object" || !("coveredInstructionIDs" in value))
+                return value;
+            markerReads++;
+            if (diagnostic === "absent") return undefined;
+            return diagnostic === "different checkpoint"
+                ? { ...value, checkpointID: "another-cut" }
+                : value;
+        });
+        try {
+            const old = f.rows[5]!;
+            const anchor = f.rows[13]!;
+            const deleted = f.rows[17]!;
+            f.compartment(5);
+            await f.pass();
+            const cut = await f.nativeFold(3, 2, "", "manual");
+            const currentFloor = async () => {
+                const key = `native-fold/v3/${encodeURIComponent(f.session)}`;
+                const { payload } = (await f.hostStorage.get(key)) as { payload: string };
+                return (JSON.parse(payload) as AdmissionV3).replay.floor.id;
+            };
+            expect(await currentFloor()).toBe(old.id);
+            f.compartment(13);
+            f.compartment(17);
+            f.user("first turn after history deletion", 1000);
+            deleteRow(f, old.id);
+            deleteRow(f, deleted.id);
+            await f.restart();
+            const first = await f.pass();
+            expect(first.logs.join("\n")).toContain("history boundary repair:");
+            expect(native).not.toHaveBeenCalled();
+            expect(await currentFloor()).toBe(anchor.id);
+            expect(rawIDs(first.draft)).toEqual(storeIDs(f, anchor.seq));
+            const next = await f.pass();
+            expect(native).toHaveBeenCalledTimes(1);
+            expect(next.logs.join("\n")).toContain("rematerialized=false, reason=cache_hit");
+            expect(next.logs.filter((line) => line.includes("was re-admitted"))).toEqual(
+                diagnostic === "present"
+                    ? [
+                          `${f.session} v2 host fold: after history recovery, the native record for checkpoint ${cut} was re-admitted; 1 covered instruction row is no longer sent, changing the cached prefix once`,
+                      ]
+                    : [],
+            );
+            expect(next.bytes).toBe(withoutCoveredInstructions(f, first.draft, anchor.seq));
+            expect(next.bytes).not.toBe(first.bytes);
+            expect(next.draft.tools).toEqual(first.draft.tools);
+            const third = await f.pass();
+            expect(native).toHaveBeenCalledTimes(2);
+            expect(third.bytes).toBe(next.bytes);
+            expect(third.draft.tools).toEqual(next.draft.tools);
+            expect(third.logs.join("\n")).not.toContain("was re-admitted");
+            expect(markerReads).toBe(1);
+            return JSON.stringify({
+                system: next.draft.system,
+                messages: next.draft.messages,
+                tools: next.draft.tools,
+            });
+        } finally {
+            marker.mockRestore();
+            native.mockRestore();
+            await f.cleanup();
+        }
+    };
+    const logged = await serve("present");
+    expect(await serve("absent")).toBe(logged);
+    expect(await serve("different checkpoint")).toBe(logged);
+});
+
+test("read-only recovery cannot use the fresh-baseline start without a receipt", async () => {
+    const admission = installBusyAdmission();
+    const limit = spyOn(models, "getSdkContextLimit").mockReturnValue(1_000_000);
+    const f = await oc2ContextFixture(63045, { ...options, instructions: false });
+    // Hold capture unavailable so a valid in-memory or captured floor cannot
+    // make the two replay inputs match for reasons unrelated to writer admission.
+    const capture = spyOn(NativeFoldReplay.prototype, "capture").mockResolvedValue(undefined);
+    try {
+        f.compartment(5);
+        await f.pass();
+        await f.nativeFold(3, 2, "", "manual");
+        const key = `native-fold/v3/${encodeURIComponent(f.session)}`;
+        const captureKey = `native-fold-state/v3/${encodeURIComponent(f.session)}`;
+        await f.hostStorage.set(key, undefined);
+        await f.hostStorage.set(captureKey, undefined);
+        clearCachedM0M1(f.db, f.session);
+        await f.restart();
+        f.user("healthy request saved after a fresh baseline", 120000);
+        await f.pass();
+        f.respond();
+        f.user("request while another writer is busy", 120000);
+        expect(getSlot(f.session)).toBeDefined();
+        expect(await f.hostStorage.get(key)).toBeUndefined();
+        expect(await f.hostStorage.get(captureKey)).toBeUndefined();
+        clearCachedM0M1(f.db, f.session);
+        admission.state.exhaustNext = true;
+        const attempt = await f.attempt();
+        expect(attempt.error).toBeInstanceOf(Error);
+        expect(lkgEvents(attempt.logs)).toBe("lkg_invalidated_reshape,lkg_miss");
+        expect(attempt.logs.join("\n")).toContain("arm=storage-busy");
+        expect(cached(f)).toEqual({ id: null, hasBytes: 0 });
+    } finally {
+        capture.mockRestore();
+        limit.mockRestore();
+        admission.restore();
+        await f.cleanup();
+    }
 });

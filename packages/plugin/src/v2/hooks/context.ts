@@ -88,7 +88,11 @@ import {
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
 import { noteHostCheckpointCommit } from "../../hooks/magic-context/host-checkpoint-ride";
-import { markCoveredInstructionRow } from "../../hooks/magic-context/host-served-rows";
+import {
+    hostInstructionRowID,
+    isCoveredInstructionRow,
+    markCoveredInstructionRow,
+} from "../../hooks/magic-context/host-served-rows";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
 import {
     armLatestThinkingRecoveryFromError,
@@ -673,6 +677,14 @@ interface V2ContextPass {
     sessionID: SessionContext["sessionID"];
     refused: boolean;
     storageNoticeWake?: boolean;
+    recoveredCheckpointID?: string;
+    nativeReplayCheckpointID?: string;
+    servedInstructionIDs?: ReadonlySet<string>;
+}
+
+interface RecoveredInstructions {
+    checkpointID: string;
+    coveredInstructionIDs: ReadonlySet<string>;
 }
 
 const contextPass = new AsyncLocalStorage<V2ContextPass>();
@@ -1128,6 +1140,8 @@ export async function registerContext(context: V2Context) {
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
     const toolDefinitionsHashes = new BoundedSessionMap<string>(1000);
     const requestToolsFingerprints = new BoundedSessionMap<RequestToolsFingerprint>(1000);
+    // Diagnostic only: rows the last served recovery put on the wire, never raw text.
+    const recoveredInstructions = new BoundedSessionMap<RecoveredInstructions>(1000);
     const promptSurfaceRuntime = createPromptSurfaceRuntime({
         harness: "opencode2",
         directory,
@@ -2066,6 +2080,7 @@ export async function registerContext(context: V2Context) {
                             continue;
                         }
                         if (event.type === "session.deleted") {
+                            recoveredInstructions.delete(sessionID);
                             overflowRecovery.forget(sessionID);
                             hostFoldIdle?.active(sessionID);
                             clearLkgMeasuredRequest(sessionID);
@@ -2579,6 +2594,10 @@ export async function registerContext(context: V2Context) {
         const nativeFloor = await nativeFoldReplay?.restorationFloor(draft.sessionID, cut, reader, {
             allowMissingFloor: newStart !== undefined,
         });
+        if (newStart && nativeFloor === undefined) {
+            const pass = contextPass.getStore();
+            if (pass) pass.recoveredCheckpointID = cut.id;
+        }
         const boundaryID = cached?.id ?? (nativeFloor === undefined ? newStart : undefined) ?? null;
         // Restore only rows after the cached message prefix and before the host
         // checkpoint; older rows are already present in the cached messages. The
@@ -2817,6 +2836,7 @@ export async function registerContext(context: V2Context) {
     const runManagedContext = async (
         draft: SessionContext,
         pass: V2ContextPass,
+        previousRecovery: RecoveredInstructions | undefined,
     ): Promise<"managed" | "skipped"> => {
         // Learn the host's message and attachment classes, so attachments on rows restored
         // after a host checkpoint can be rebuilt in the host's own shape.
@@ -3372,6 +3392,7 @@ export async function registerContext(context: V2Context) {
                             draft.model,
                         );
                     }
+                    if (nativeRestored) pass.nativeReplayCheckpointID = cut.id;
                 }
                 if (cut && nativeFoldReplay?.sourceChanged(draft.sessionID)) {
                     // Durable provenance no longer matches the host's pre-checkpoint
@@ -3563,6 +3584,32 @@ export async function registerContext(context: V2Context) {
                 >[1],
             );
             mapped.commit();
+            if (
+                replayHead === undefined &&
+                (pass.recoveredCheckpointID ||
+                    (previousRecovery &&
+                        pass.nativeReplayCheckpointID === previousRecovery.checkpointID))
+            ) {
+                pass.servedInstructionIDs = new Set(
+                    mapped.messages.flatMap(({ info, parts }) => {
+                        if (
+                            info.role !== "system" ||
+                            (pass.recoveredCheckpointID && !isCoveredInstructionRow(info)) ||
+                            !parts.some((value) => {
+                                const part = value as { type?: string; text?: unknown } | null;
+                                return (
+                                    part?.type === "text" &&
+                                    typeof part.text === "string" &&
+                                    part.text.length > 0
+                                );
+                            })
+                        )
+                            return [];
+                        const id = hostInstructionRowID(info);
+                        return id ? [id] : [];
+                    }),
+                );
+            }
             const checkpointPermission = checkpointPassPermissions.get(draft.sessionID);
             checkpointPassPermissions.delete(draft.sessionID);
             checkpointInputEstimates.delete(draft.sessionID);
@@ -3865,6 +3912,8 @@ export async function registerContext(context: V2Context) {
     await context.session.hook("context", (draft) =>
         withV2ContextPass(draft.sessionID, async (pass) => {
             hostFoldIdle?.active(draft.sessionID);
+            const previousRecovery = recoveredInstructions.peek(draft.sessionID);
+            recoveredInstructions.delete(draft.sessionID);
             // A hidden maintenance run (summary or dreamer) never asks a `/btw`
             // side question, so it prepares no replay, and it must not replace
             // the replay saved for the person's own session.
@@ -3875,7 +3924,7 @@ export async function registerContext(context: V2Context) {
             let returned = false;
             let outcome: Awaited<ReturnType<typeof runManagedContext>>;
             try {
-                outcome = await runManagedContext(draft, pass);
+                outcome = await runManagedContext(draft, pass, previousRecovery);
                 // Restoring a host checkpoint can replace a user-shaped tail with the last reply.
                 if (
                     !pass.refused &&
@@ -3934,6 +3983,32 @@ export async function registerContext(context: V2Context) {
                 checkpointPassPermissions.delete(draft.sessionID);
                 foldedInstructionIDs.delete(draft.sessionID);
                 finishServedRequest(draft, returned);
+            }
+            if (pass.servedInstructionIDs && !deletedSessions.has(draft.sessionID)) {
+                const served = pass.servedInstructionIDs;
+                if (
+                    previousRecovery &&
+                    previousRecovery.checkpointID === pass.nativeReplayCheckpointID
+                ) {
+                    const left = [...previousRecovery.coveredInstructionIDs].filter(
+                        (id) => !served.has(id),
+                    ).length;
+                    if (left > 0) {
+                        try {
+                            sessionLog(
+                                draft.sessionID,
+                                `v2 host fold: after history recovery, the native record for checkpoint ${previousRecovery.checkpointID} was re-admitted; ${left} covered instruction ${left === 1 ? "row is" : "rows are"} no longer sent, changing the cached prefix once`,
+                            );
+                        } catch {
+                            // A diagnostic cannot interrupt a prepared request.
+                        }
+                    }
+                }
+                if (pass.recoveredCheckpointID && served.size > 0)
+                    recoveredInstructions.set(draft.sessionID, {
+                        checkpointID: pass.recoveredCheckpointID,
+                        coveredInstructionIDs: served,
+                    });
             }
             // The shared last-good-request slot is saved before m[0] is replaced
             // by a host checkpoint message. Save the final message array here
@@ -4149,6 +4224,7 @@ export async function registerContext(context: V2Context) {
             if (hiddenChildSweepTimer) clearInterval(hiddenChildSweepTimer);
             await hiddenChildSweep.dispose();
             messageTimesCache.clear();
+            recoveredInstructions.clear();
             hostFoldIdle?.dispose();
             usageController.abort();
             // OpenCode 2 runs this disposer before it removes this instance's hooks
