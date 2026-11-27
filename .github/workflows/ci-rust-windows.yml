@@ -1,0 +1,46 @@
+name: CI (Windows Rust diagnostics)
+
+# Keep this separate while Windows is not required: the release gate checks
+# the conclusion of the main CI workflow, not only its aggregate jobs.
+on:
+  push:
+    branches: [master, main, "train/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: never
+
+jobs:
+  rust-windows:
+    name: Rust (Windows ${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-${{ matrix.target }}
+      - name: Build and test the Rust workspace natively
+        shell: bash
+        env:
+          MC_WINDOWS_TARGET: ${{ matrix.target }}
+          RUSTUP_TOOLCHAIN: stable-${{ matrix.target }}
+        run: bash scripts/ci/rust-windows-build-and-test.sh
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: rust-windows-${{ matrix.target }}-${{ github.run_attempt }}
+          path: target/windows-rust-logs/
+          if-no-files-found: error
