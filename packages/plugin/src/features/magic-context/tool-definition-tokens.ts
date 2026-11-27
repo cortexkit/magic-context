@@ -172,7 +172,7 @@ interface ToolSetSummary {
 interface SessionFlight {
     key: string;
     /** OpenCode 2: the exact set this session's last request carried. */
-    exact?: ToolSetSummary;
+    exact?: ToolSetSummary & { providerID: string; modelID: string };
 }
 
 const routes = new Map<string, RouteMeasurements>();
@@ -723,7 +723,10 @@ export function recordToolDefinitionSet(
     }
     for (const [toolID, slot] of next) writeSlot(route, toolID, slot);
     if (sessionId)
-        sessionFlights.set(sessionId, { key, exact: summarize([...next.entries()], true) });
+        sessionFlights.set(sessionId, {
+            key,
+            exact: { ...summarize([...next.entries()], true), providerID, modelID },
+        });
 }
 
 /**
@@ -771,6 +774,18 @@ export function getMeasuredToolDefinitionTokens(
     sessionId?: string,
 ): number | undefined {
     return resolve(providerID, modelID, agentName, sessionId)?.total;
+}
+
+/** The session's own recorded tool-definition total, even if the caller has no agent. */
+export function getExactSessionToolDefinitionTokens(
+    providerID: string | undefined,
+    modelID: string | undefined,
+    sessionId: string,
+): number | undefined {
+    const exact = sessionFlights.peek(sessionId)?.exact;
+    return exact && exact.providerID === providerID && exact.modelID === modelID
+        ? exact.total
+        : undefined;
 }
 
 /**

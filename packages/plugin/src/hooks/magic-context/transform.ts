@@ -60,6 +60,7 @@ import {
 } from "../../features/magic-context/store-generation-rebase";
 import type { Tagger } from "../../features/magic-context/tagger";
 import { observeTemporalDecisions } from "../../features/magic-context/temporal-decisions";
+import { getExactSessionToolDefinitionTokens } from "../../features/magic-context/tool-definition-tokens";
 import {
     clearOpenCodePendingTransformDecision,
     normalizeMaterializeReason,
@@ -4389,7 +4390,12 @@ export function createTransform(deps: TransformDeps) {
                     ? (served.rawTokens ?? served.tokens)
                     : Math.max(0, sessionMeta.systemPromptTokens) +
                       served.messageTokens.conversation +
-                      served.messageTokens.toolCall;
+                      served.messageTokens.toolCall +
+                      (getExactSessionToolDefinitionTokens(
+                          modelForBudget?.providerID,
+                          modelForBudget?.modelID,
+                          sessionId,
+                      ) ?? 0);
                 const provenTokens = served.refusalGrade ? served.refusalTokens : undefined;
                 if (
                     provenTokens !== undefined
@@ -4420,39 +4426,45 @@ export function createTransform(deps: TransformDeps) {
                     agentName: notificationParams.agent,
                     sessionId,
                 });
-                // Count the request the way it will really go out: system
-                // prompt, history and this route's measured tool definitions,
-                // unscaled. When the route's tool definitions are not measured
-                // yet, the estimate's figure is an upper envelope (the tool set
-                // this session last sent, scaled up), which would refuse
-                // a request that fits and keep the session flagged; leave it
-                // out then, as the entry check does. The system prompt and
-                // history stay in, so a carried session whose host-cut history
-                // shrank while the request is still over the window is still
-                // refused.
+                // OpenCode 2 can have an exact set for this session and model
+                // even when the route lookup misses for lack of an agent. Use
+                // that set without scaling. The estimator's fallback scales up
+                // the session's last tool count and could reject a request that fits.
+                const localToolDefinitionTokens = served.toolDefinitionsMeasured
+                    ? (served.rawComponents?.tools ?? served.messageTokens.toolCall) -
+                      served.messageTokens.toolCall
+                    : (getExactSessionToolDefinitionTokens(
+                          modelForBudget?.providerID,
+                          modelForBudget?.modelID,
+                          sessionId,
+                      ) ?? 0);
                 const localTokens = served.toolDefinitionsMeasured
                     ? (served.rawTokens ?? served.tokens)
                     : Math.max(0, sessionMeta.systemPromptTokens) +
                       served.messageTokens.conversation +
-                      served.messageTokens.toolCall;
-                const servedTokens =
-                    warmFitRetry && served.refusalGrade
-                        ? (served.refusalTokens ?? localTokens)
-                        : localTokens;
+                      served.messageTokens.toolCall +
+                      localToolDefinitionTokens;
+                const provenTokens =
+                    warmFitRetry && served.refusalGrade ? served.refusalTokens : undefined;
+                const servedTokens = provenTokens ?? localTokens;
+                const toolDefinitionTokens =
+                    provenTokens === undefined
+                        ? localToolDefinitionTokens
+                        : (served.toolDefinitionTokens ?? 0);
                 if (
                     !Number.isFinite(servedTokens) ||
                     servedTokens > unmanagedOverWindowPass.limit
                 ) {
                     sessionLog(
                         sessionId,
-                        `over-window first pass not sent: the request is still about ${servedTokens} tokens after this pass, over the ${unmanagedOverWindowPass.limit}-token window (history started at ${unmanagedOverWindowPass.tokens}) (MC-H06)`,
+                        `over-window first pass not sent: the request is still about ${servedTokens} tokens after this pass (tool definitions: ${toolDefinitionTokens}), over the ${unmanagedOverWindowPass.limit}-token window (history started at ${unmanagedOverWindowPass.tokens}) (MC-H06)`,
                     );
                     throw new UnmanagedOverWindowError(servedTokens, unmanagedOverWindowPass.limit);
                 }
                 unmanagedOverWindowSessions.delete(sessionId);
                 sessionLog(
                     sessionId,
-                    `over-window first pass reduced: the request is about ${servedTokens} tokens (history started at ${unmanagedOverWindowPass.tokens}), under the ${unmanagedOverWindowPass.limit}-token window`,
+                    `over-window first pass reduced: the request is about ${servedTokens} tokens (tool definitions: ${toolDefinitionTokens}; history started at ${unmanagedOverWindowPass.tokens}), under the ${unmanagedOverWindowPass.limit}-token window`,
                 );
             }
             const timedOutHistorianFailure = compartmentPhase.historianJoinTimedOut

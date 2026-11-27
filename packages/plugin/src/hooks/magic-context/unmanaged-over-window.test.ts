@@ -11,6 +11,7 @@ import { createTagger } from "../../features/magic-context/tagger";
 import {
     __resetToolDefinitionMeasurements,
     recordToolDefinition,
+    recordToolDefinitionSet,
 } from "../../features/magic-context/tool-definition-tokens";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
@@ -192,6 +193,92 @@ async function knownWindowTransform(
         await handler({}, output);
         return output.messages as unknown as Message[];
     };
+}
+
+for (const pass of ["carried over-window pass", "warm append"] as const) {
+    it(`${pass} counts only this session's exact tools for the current model, without scaling`, async () => {
+        // Run the control cases first so they are exercised even without the fix.
+        for (const tools of [
+            "none",
+            "other-model",
+            "other-provider",
+            "other-session",
+            "per-tool",
+            "fits",
+            "over",
+        ]) {
+            const sessionId = `ses-${pass.replaceAll(" ", "-")}-${tools}`;
+            const usage = new Map<
+                string,
+                { usage: ContextUsage; updatedAt: number; hasUsageTokens: boolean }
+            >();
+            const serve = await knownWindowTransform(sessionId, usage);
+            const limit = resolveTrustedContextLimit(PROVIDER, MODEL)!;
+            const messages = history(sessionId, 0, 0);
+            if (pass === "warm append") {
+                await serve(history(sessionId, 0, 0));
+                usage.set(sessionId, {
+                    usage: { inputTokens: 1_000, percentage: (1_000 / limit) * 100 },
+                    updatedAt: Date.now(),
+                    hasUsageTokens: true,
+                });
+                messages.push({
+                    info: { ...messages[0]!.info, id: "new-paste" },
+                    parts: [{ type: "text", text: LINE.repeat(500) }],
+                });
+            } else {
+                await expect(serve(history(sessionId, 20, 430))).rejects.toBeInstanceOf(
+                    UnmanagedOverWindowError,
+                );
+            }
+            const definition = {
+                id: "big-tool",
+                description: "word ".repeat(tools === "fits" ? 25_000 : WINDOW + 10_000),
+                parameters: {},
+            };
+            // OpenCode 2 records the draft under its agent; the transform has no agent.
+            if (tools === "per-tool") {
+                recordToolDefinition(
+                    PROVIDER,
+                    MODEL,
+                    "build",
+                    definition.id,
+                    definition.description,
+                    definition.parameters,
+                    sessionId,
+                );
+            } else if (tools !== "none") {
+                recordToolDefinitionSet(
+                    tools === "other-provider" ? "another-provider" : PROVIDER,
+                    tools === "other-model" ? "another-model" : MODEL,
+                    "build",
+                    [definition],
+                    tools === "other-session" ? `${sessionId}-sibling` : sessionId,
+                );
+            }
+            const estimate = estimateFinalWireInputTokens({
+                messages: messages as never,
+                systemPromptTokens: 0,
+                providerID: PROVIDER,
+                modelID: MODEL,
+                sessionId,
+            });
+            expect(estimate.toolDefinitionsMeasured).toBe(false);
+            expect(historyTokens(messages)).toBeLessThan(limit);
+            if (tools === "fits")
+                expect(estimate.tokens).toBeGreaterThan(WINDOW * UNMANAGED_OVER_WINDOW_FACTOR);
+            if (tools === "over") {
+                await expect(serve(messages)).rejects.toBeInstanceOf(UnmanagedOverWindowError);
+            } else {
+                const served = await serve(messages);
+                expect(served.at(-1)?.parts[0]?.text).toContain(
+                    pass === "warm append" ? LINE.repeat(500) : "the newest question",
+                );
+            }
+            closeDatabase();
+            __resetToolDefinitionMeasurements();
+        }
+    }, 30_000);
 }
 
 it("checks a warm defer whose newly appended user prompt dwarfs the window", async () => {
