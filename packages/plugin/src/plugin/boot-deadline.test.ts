@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import {
     __resetOffThreadMigrationClockForTests,
+    __setOffThreadMigrationClockForTests,
     beginOffThreadMigration,
 } from "../shared/off-thread-migration-clock";
 import {
@@ -12,31 +13,52 @@ import {
     runBootPhaseWithinBudget,
 } from "./boot-deadline";
 
+function useBootClock() {
+    jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+    const started = Date.now();
+    __setOffThreadMigrationClockForTests({
+        now: () => Date.now() - started,
+        setTimeout(callback, delayMs) {
+            const timer = setTimeout(callback, delayMs);
+            return () => clearTimeout(timer);
+        },
+    });
+}
+
+const flushBoot = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 describe("boot phase deadline", () => {
+    afterEach(() => {
+        __resetOffThreadMigrationClockForTests();
+        jest.useRealTimers();
+    });
+
     test("a schema migration running off the main thread does not count against the deadline", async () => {
+        useBootClock();
         const messages: string[] = [];
         const endMigration = beginOffThreadMigration();
+        const hooks = Promise.withResolvers<string>();
         try {
-            const result = await runBootPhaseWithDeadline(
+            const boot = runBootPhaseWithDeadline(
                 "hooks",
-                () =>
-                    new Promise<string>((resolve) =>
-                        setTimeout(() => {
-                            endMigration();
-                            resolve("real hooks");
-                        }, 120),
-                    ),
+                () => hooks.promise,
                 20,
                 (message) => messages.push(message),
             );
-
-            expect(result.status).toBe("completed");
+            jest.advanceTimersByTime(19);
+            expect(messages).toEqual([]);
+            jest.advanceTimersByTime(1);
             expect(messages).toEqual([
                 "[magic-context] boot phase 'hooks' reached its 20ms deadline while a schema migration runs off the main thread; waiting for the migration, which does not count against the deadline",
             ]);
+            jest.advanceTimersByTime(100);
+            endMigration();
+            hooks.resolve("real hooks");
+            expect(await boot).toMatchObject({ status: "completed", value: "real hooks" });
+            expect(messages).toHaveLength(1);
         } finally {
             endMigration();
-            __resetOffThreadMigrationClockForTests();
+            hooks.resolve("real hooks");
         }
     });
 
@@ -77,16 +99,30 @@ describe("boot phase deadline", () => {
         // The contended-migration-lock shape: the open outlives the deadline but
         // succeeds. The caller must be able to adopt that value, otherwise a slow
         // box turns into a process-lifetime fail-closed session.
-        const result = await runBootPhaseWithDeadline(
+        useBootClock();
+        const hooks = Promise.withResolvers<string>();
+        let returned = false;
+        const boot = runBootPhaseWithDeadline(
             "hooks",
-            () => new Promise<string>((resolve) => setTimeout(() => resolve("real hooks"), 40)),
+            () => hooks.promise,
             10,
             () => {},
         );
 
+        void boot.then(() => {
+            returned = true;
+        });
+        jest.advanceTimersByTime(9);
+        await flushBoot();
+        expect(returned).toBe(false);
+        jest.advanceTimersByTime(1);
+        await flushBoot();
+        expect(returned).toBe(true);
+        const result = await boot;
         expect(result.status).toBe("timed_out");
         if (result.status !== "timed_out") return;
-        await expect(result.pending).resolves.toBe("real hooks");
+        hooks.resolve("real hooks");
+        expect(await result.pending).toBe("real hooks");
     });
 
     test("one boot budget bounds consecutive phases by the original deadline", async () => {

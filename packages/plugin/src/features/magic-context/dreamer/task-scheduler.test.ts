@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, jest } from "bun:test";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { insertMemory } from "../memory/storage-memory";
@@ -24,6 +24,7 @@ import {
 
 let db: Database | null = null;
 afterEach(() => {
+    jest.useRealTimers();
     if (db) closeQuietly(db);
     db = null;
 });
@@ -60,24 +61,39 @@ describe("task-scheduler — manual lease wait", () => {
     it("manual run waits for a briefly-held domain lease instead of reporting busy", async () => {
         db = freshDb();
         seedActiveMemory(db);
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
         const leaseKey = leaseKeyFor("curate", PROJECT);
         const otherHolder = "other-process";
         expect(acquireLease(db, otherHolder, leaseKey)).toBe(true);
-        // Free the lease shortly after the manual run starts waiting.
-        setTimeout(() => releaseLease(db as Database, otherHolder, leaseKey), 150);
-
         let executed = 0;
         const executor = async (): Promise<TaskExecOutcome> => {
             executed += 1;
             return { status: "completed" };
         };
-        const result = await runManualDream({
+        let finished = false;
+        const pending = runManualDream({
             db,
             projectIdentity: PROJECT,
             tasks: [cfg("curate", "0 4 * * 0")],
             executor,
             task: "curate",
+        }).then((result) => {
+            finished = true;
+            return result;
         });
+        const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+        await flush();
+        expect(finished).toBe(false);
+        expect(executed).toBe(0);
+        // Release only after the initial admission found the domain busy.
+        releaseLease(db, otherHolder, leaseKey);
+        jest.advanceTimersByTime(1_999);
+        await flush();
+        expect(executed).toBe(0);
+        jest.advanceTimersByTime(1);
+        await flush();
+        expect(finished).toBe(true);
+        const result = await pending;
         expect(executed).toBe(1);
         expect(result.ran).toEqual(["curate"]);
         expect(result.deferredBusy).toEqual([]);
@@ -86,6 +102,7 @@ describe("task-scheduler — manual lease wait", () => {
     it("scheduled ticks do not wait on a busy lease", async () => {
         db = freshDb();
         seedActiveMemory(db);
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
         const leaseKey = leaseKeyFor("curate", PROJECT);
         expect(acquireLease(db, "other-process", leaseKey)).toBe(true);
 
@@ -105,17 +122,23 @@ describe("task-scheduler — manual lease wait", () => {
             executed += 1;
             return { status: "completed" };
         };
-        const started = Date.now();
-        await runDueTasksForProject({
+        let finished = false;
+        const pending = runDueTasksForProject({
             db,
             projectIdentity: PROJECT,
             tasks: [cfg("curate", "0 4 * * 0")],
             executor,
             now,
+        }).then((result) => {
+            finished = true;
+            return result;
         });
-        expect(executed).toBe(0);
         // No lease-wait loop on the scheduled path: returns immediately.
-        expect(Date.now() - started).toBeLessThan(1500);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(finished).toBe(true);
+        expect(Date.now()).toBe(now);
+        expect(executed).toBe(0);
+        await pending;
     });
 });
 
