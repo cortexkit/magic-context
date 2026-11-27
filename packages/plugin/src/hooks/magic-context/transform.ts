@@ -123,6 +123,7 @@ import {
     describeFinalWireTail,
     estimateFinalWireInputTokens,
     estimateMessageTokens,
+    type FinalWireTokenEstimate,
 } from "./final-wire-token-estimate";
 import type { ForeignTextParts } from "./foreign-text-parts";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
@@ -858,6 +859,39 @@ export function resolveTransformHostSeams(
         hostRefusalNotice: deps.hostRefusalNotice ?? sendEmergencyRefusalNotice,
         hostRefuse: deps.hostRefuse ?? abortSessionFailClosed,
     };
+}
+
+function fitRequestCounts(
+    served: FinalWireTokenEstimate,
+    systemPromptTokens: number,
+    exactToolDefinitionTokens: number | undefined,
+) {
+    const routeToolDefinitionTokens =
+        (served.rawComponents?.tools ?? served.messageTokens.toolCall) -
+        served.messageTokens.toolCall;
+    const rawTokens = served.rawTokens ?? served.tokens;
+    // Count the current OpenCode 2 tool definitions instead of a scaled copy of
+    // the session's last tool count or a persisted route measurement. Keep the
+    // system prompt and messages in the count even if the host cut older history.
+    const localTokens =
+        exactToolDefinitionTokens !== undefined
+            ? rawTokens - routeToolDefinitionTokens + exactToolDefinitionTokens
+            : served.toolDefinitionsMeasured
+              ? rawTokens
+              : Math.max(0, systemPromptTokens) +
+                served.messageTokens.conversation +
+                served.messageTokens.toolCall;
+    const toolDefinitionTokens =
+        exactToolDefinitionTokens ??
+        (served.toolDefinitionsMeasured ? routeToolDefinitionTokens : 0);
+    // A calibrated total includes the route's tool count. A provider prefix
+    // was measured by the provider and does not use that count.
+    const provenTokens =
+        served.refusalGrade &&
+        (exactToolDefinitionTokens === undefined || served.refusalBasis === "provider-prefix")
+            ? served.refusalTokens
+            : undefined;
+    return { localTokens, toolDefinitionTokens, provenTokens };
 }
 
 // A control entry for the thinking-omission ledger, not a message id. After a
@@ -4386,17 +4420,15 @@ export function createTransform(deps: TransformDeps) {
                     agentName: notificationParams.agent,
                     sessionId,
                 });
-                const localTokens = served.toolDefinitionsMeasured
-                    ? (served.rawTokens ?? served.tokens)
-                    : Math.max(0, sessionMeta.systemPromptTokens) +
-                      served.messageTokens.conversation +
-                      served.messageTokens.toolCall +
-                      (getExactSessionToolDefinitionTokens(
-                          modelForBudget?.providerID,
-                          modelForBudget?.modelID,
-                          sessionId,
-                      ) ?? 0);
-                const provenTokens = served.refusalGrade ? served.refusalTokens : undefined;
+                const { localTokens, provenTokens } = fitRequestCounts(
+                    served,
+                    sessionMeta.systemPromptTokens,
+                    getExactSessionToolDefinitionTokens(
+                        modelForBudget?.providerID,
+                        modelForBudget?.modelID,
+                        sessionId,
+                    ),
+                );
                 if (
                     provenTokens !== undefined
                         ? provenTokens > warmAppendFit.limit
@@ -4426,26 +4458,20 @@ export function createTransform(deps: TransformDeps) {
                     agentName: notificationParams.agent,
                     sessionId,
                 });
-                // OpenCode 2 can have an exact set for this session and model
-                // even when the route lookup misses for lack of an agent. Use
-                // that set without scaling. The estimator's fallback scales up
-                // the session's last tool count and could reject a request that fits.
-                const localToolDefinitionTokens = served.toolDefinitionsMeasured
-                    ? (served.rawComponents?.tools ?? served.messageTokens.toolCall) -
-                      served.messageTokens.toolCall
-                    : (getExactSessionToolDefinitionTokens(
-                          modelForBudget?.providerID,
-                          modelForBudget?.modelID,
-                          sessionId,
-                      ) ?? 0);
-                const localTokens = served.toolDefinitionsMeasured
-                    ? (served.rawTokens ?? served.tokens)
-                    : Math.max(0, sessionMeta.systemPromptTokens) +
-                      served.messageTokens.conversation +
-                      served.messageTokens.toolCall +
-                      localToolDefinitionTokens;
-                const provenTokens =
-                    warmFitRetry && served.refusalGrade ? served.refusalTokens : undefined;
+                const {
+                    localTokens,
+                    toolDefinitionTokens: localToolDefinitionTokens,
+                    provenTokens: fitProvenTokens,
+                } = fitRequestCounts(
+                    served,
+                    sessionMeta.systemPromptTokens,
+                    getExactSessionToolDefinitionTokens(
+                        modelForBudget?.providerID,
+                        modelForBudget?.modelID,
+                        sessionId,
+                    ),
+                );
+                const provenTokens = warmFitRetry ? fitProvenTokens : undefined;
                 const servedTokens = provenTokens ?? localTokens;
                 const toolDefinitionTokens =
                     provenTokens === undefined

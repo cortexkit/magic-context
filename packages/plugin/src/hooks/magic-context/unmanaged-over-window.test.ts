@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import {
     closeDatabase,
@@ -10,6 +10,7 @@ import {
 import { createTagger } from "../../features/magic-context/tagger";
 import {
     __resetToolDefinitionMeasurements,
+    loadToolDefinitionMeasurements,
     recordToolDefinition,
     recordToolDefinitionSet,
 } from "../../features/magic-context/tool-definition-tokens";
@@ -22,6 +23,7 @@ import {
 } from "../../shared/models-dev-cache";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { resolveContextWindowGeometry, resolveTrustedContextLimit } from "./event-resolvers";
+import * as wire from "./final-wire-token-estimate";
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import { resetLkgSlotsForTest } from "./lkg-slot";
 import { createTransform } from "./transform";
@@ -151,6 +153,7 @@ async function knownWindowTransform(
     sessionId: string,
     usage?: Map<string, { usage: ContextUsage; updatedAt: number; hasUsageTokens: boolean }>,
     modelID = MODEL,
+    replayFits?: () => boolean,
 ) {
     const { dir } = createTestTempDir("mc-unmanaged-over-window-");
     tempDirs.push(dir);
@@ -187,6 +190,7 @@ async function knownWindowTransform(
     });
     const handler = createMessagesTransformHandler({
         magicContext: { "experimental.chat.messages.transform": transform },
+        replayFits,
     });
     return async (messages: Message[]) => {
         const output = { messages } as unknown as Output;
@@ -279,6 +283,159 @@ for (const pass of ["carried over-window pass", "warm append"] as const) {
             __resetToolDefinitionMeasurements();
         }
     }, 30_000);
+}
+
+async function prepareFitRequest(pass: "carried" | "warm", sessionId: string, modelID = MODEL) {
+    const usage = new Map<
+        string,
+        { usage: ContextUsage; updatedAt: number; hasUsageTokens: boolean }
+    >();
+    // Test the admission check itself, not whether a previous request is a fallback.
+    const serve = await knownWindowTransform(sessionId, usage, modelID, () => false);
+    const initial = () =>
+        history(sessionId, 0, 0).map((message) => ({
+            ...message,
+            info: { ...message.info, model: { providerID: PROVIDER, modelID } },
+        }));
+    const messages: Message[] = initial();
+    if (pass === "warm") {
+        await serve(initial());
+        const limit = resolveTrustedContextLimit(PROVIDER, modelID)!;
+        usage.set(sessionId, {
+            usage: { inputTokens: 1_000, percentage: (1_000 / limit) * 100 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+        });
+        messages.push({
+            info: { ...messages[0]!.info, id: "new-paste" },
+            parts: [{ type: "text", text: LINE.repeat(500) }],
+        });
+    } else {
+        await expect(serve(history(sessionId, 20, 430))).rejects.toBeInstanceOf(
+            UnmanagedOverWindowError,
+        );
+    }
+    return { serve, messages };
+}
+
+function loadStaleDefaultTools(modelID: string, tokens: number): void {
+    const db = openDatabase()!;
+    db.prepare(
+        `INSERT INTO tool_definition_measurements
+         (provider_id, model_id, agent_name, tool_id, token_count, recorded_at)
+         VALUES (?, ?, 'default', 'old-tool', ?, ?)`,
+    ).run(PROVIDER, modelID, tokens, Date.now());
+    loadToolDefinitionMeasurements(db);
+}
+
+function recordDraftTools(sessionId: string, modelID: string, tokens: number): void {
+    recordToolDefinitionSet(
+        PROVIDER,
+        modelID,
+        "build",
+        tokens === 0
+            ? []
+            : [{ id: "current-tool", description: "word ".repeat(tokens), parameters: {} }],
+        sessionId,
+    );
+}
+
+for (const pass of ["carried", "warm"] as const) {
+    for (const { shape, stale, exact, refuse } of [
+        { shape: "replaces a smaller persisted route", stale: 10, exact: 50_000, refuse: true },
+        {
+            shape: "replaces a larger persisted route with an empty draft",
+            stale: 50_000,
+            exact: 0,
+            refuse: false,
+        },
+        {
+            shape: "does not add the exact tools on top of a measured route",
+            stale: 22_000,
+            exact: 22_000,
+            refuse: false,
+        },
+        {
+            shape: "still counts the measured route without an exact record",
+            stale: 50_000,
+            exact: undefined,
+            refuse: true,
+        },
+    ]) {
+        it(`${pass} ${shape}`, async () => {
+            const sessionId = `ses-${pass}-${shape.replaceAll(" ", "-")}`;
+            const { serve, messages } = await prepareFitRequest(pass, sessionId);
+            loadStaleDefaultTools(MODEL, stale);
+            if (exact !== undefined) recordDraftTools(sessionId, MODEL, exact);
+            const measured = estimateFinalWireInputTokens({
+                messages: messages as never,
+                systemPromptTokens: 0,
+                providerID: PROVIDER,
+                modelID: MODEL,
+                sessionId,
+            });
+            expect(measured.toolDefinitionsMeasured).toBe(true);
+            expect(measured.rawComponents!.tools - measured.messageTokens.toolCall).toBe(stale);
+            if (refuse)
+                await expect(serve(messages)).rejects.toBeInstanceOf(UnmanagedOverWindowError);
+            else
+                expect((await serve(messages)).at(-1)?.parts[0]?.text).toContain(
+                    pass === "warm" ? LINE.repeat(500) : "the newest question",
+                );
+        });
+    }
+}
+
+for (const staleSmaller of [true, false]) {
+    for (const basis of ["calibrated", "provider-prefix"] as const) {
+        const direction = staleSmaller ? "smaller" : "larger";
+        it(`warm fit with ${basis} evidence and a ${direction} persisted route`, async () => {
+            const modelID = "gpt-5.5";
+            const sessionId = `ses-fit-${basis}-${direction}`;
+            const { serve, messages } = await prepareFitRequest("warm", sessionId, modelID);
+            loadStaleDefaultTools(modelID, staleSmaller ? 10 : 50_000);
+            recordDraftTools(sessionId, modelID, staleSmaller ? 50_000 : 0);
+            updateSessionMeta(openDatabase()!, sessionId, { systemPromptTokens: 100 });
+            const request = {
+                messages: messages as never,
+                systemPromptTokens: 100,
+                providerID: PROVIDER,
+                modelID,
+                sessionId,
+            };
+            const geometry = resolveContextWindowGeometry(PROVIDER, modelID)!;
+            const measure = wire.estimateFinalWireInputTokens;
+            const measuredPrefix = {
+                inputTokens: staleSmaller ? 1_000 : 50_000,
+                appendedMessages: [],
+            };
+            const evidence = measure({
+                ...request,
+                measuredPrefix: basis === "provider-prefix" ? measuredPrefix : undefined,
+            });
+            expect(evidence.refusalBasis).toBe(basis);
+            expect(evidence.refusalTokens! > geometry.usableHard).toBe(!staleSmaller);
+            // These fit callers have no provider-prefix snapshot today. Supply one
+            // to check that a proven prefix still outranks the local tool estimate.
+            const spy =
+                basis === "provider-prefix"
+                    ? spyOn(wire, "estimateFinalWireInputTokens").mockImplementation((input) =>
+                          measure({ ...input, measuredPrefix }),
+                      )
+                    : undefined;
+            try {
+                const refuse = basis === "provider-prefix" ? !staleSmaller : staleSmaller;
+                if (refuse)
+                    await expect(serve(messages)).rejects.toBeInstanceOf(UnmanagedOverWindowError);
+                else
+                    expect((await serve(messages)).at(-1)?.parts[0]?.text).toContain(
+                        LINE.repeat(500),
+                    );
+            } finally {
+                spy?.mockRestore();
+            }
+        });
+    }
 }
 
 it("checks a warm defer whose newly appended user prompt dwarfs the window", async () => {

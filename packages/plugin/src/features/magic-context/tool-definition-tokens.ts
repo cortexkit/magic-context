@@ -776,7 +776,7 @@ export function getMeasuredToolDefinitionTokens(
     return resolve(providerID, modelID, agentName, sessionId)?.total;
 }
 
-/** The session's own recorded tool-definition total, even if the caller has no agent. */
+/** Exact tool-definition total from the session's last OpenCode 2 request, if its provider and model match. */
 export function getExactSessionToolDefinitionTokens(
     providerID: string | undefined,
     modelID: string | undefined,
