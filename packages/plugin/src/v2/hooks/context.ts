@@ -2532,9 +2532,10 @@ export async function registerContext(context: V2Context) {
         const moduleBoundarySeq = moduleBoundaryID
             ? reader.sequenceForId(draft.sessionID, moduleBoundaryID)
             : undefined;
-        // After a boundary repair the cached prefix is gone and this pass
-        // rebuilds it against the anchor, so restore from the anchor: the
-        // same rows every later pass restores from the rebuilt baseline.
+        const repairAnchor =
+            boundaryRepair?.kind === "repaired" || boundaryRepair?.kind === "baseline-reset"
+                ? boundaryRepair.anchorEndMessageId
+                : undefined;
         const boundaryID =
             (
                 db
@@ -2543,9 +2544,8 @@ export async function registerContext(context: V2Context) {
                     )
                     .get(draft.sessionID) as { id: string | null } | null
             )?.id ??
-            (boundaryRepair?.kind === "repaired" || boundaryRepair?.kind === "baseline-reset"
-                ? boundaryRepair.anchorEndMessageId
-                : null);
+            repairAnchor ??
+            null;
         // Restore only rows after the cached message prefix and before the host
         // checkpoint; older rows are already present in the cached messages. The
         // first fold has no cached prefix, so it starts immediately before the
@@ -2558,7 +2558,12 @@ export async function registerContext(context: V2Context) {
         const servedBoundary = boundaryID
             ? servedBoundaryRow(reader, draft.sessionID, boundaryID)
             : null;
-        const nativeFloor = await nativeFoldReplay?.restorationFloor(draft.sessionID, cut, reader);
+        // Repair cleared the cached prefix. A missing native floor must not
+        // prevent rebuilding it from the surviving anchor, but a proven floor
+        // still takes precedence when it covers more of the stored history.
+        const nativeFloor = await nativeFoldReplay?.restorationFloor(draft.sessionID, cut, reader, {
+            allowMissingFloor: repairAnchor !== undefined,
+        });
         const retiredInstructions =
             (await nativeFoldReplay?.instructionRetirement(draft.sessionID, reader)) ??
             (() => false);
@@ -2566,7 +2571,9 @@ export async function registerContext(context: V2Context) {
             nativeFloor ?? -Infinity,
             // A changed hidden row may have lived inside the frozen
             // prefix. Make it available to the shared-path rebuild too.
-            (nativeFoldReplay?.sourceChanged(draft.sessionID) && !rustModeModuleClient
+            ((nativeFloor !== undefined || repairAnchor === undefined) &&
+            nativeFoldReplay?.sourceChanged(draft.sessionID) &&
+            !rustModeModuleClient
                 ? (reader.earliestSequence(draft.sessionID) ?? 0) - 1
                 : undefined) ??
                 (moduleBoundarySeq !== undefined ? moduleBoundarySeq - 1 : undefined) ??

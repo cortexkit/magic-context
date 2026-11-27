@@ -346,7 +346,7 @@ test("a deleted history boundary re-anchors on one rebuild pass and the request 
 		expect(after.some((row) => row.endMessageId === deleted)).toBe(false);
 		expect(baselineBoundary(scenario.host, sessionId)).toBe(anchor.endMessageId);
 		const log = await waitForLog(scenario.logPath, "history boundary repair");
-		expect(log).toContain(`history boundary repair: newest compartment end ${deleted} is not in the host store`);
+		expect(log).toContain(`history boundary repair: compartment end ${deleted} is not in the host store`);
 
 		// The pass after the repair is ordinary replay: the same prefix, and no
 		// second repair.
@@ -457,8 +457,10 @@ test("a boundary with no surviving anchor is never served as the whole window", 
 		// is refused before any provider request. Never the whole window.
 		expect(scenario.oversized).toEqual([]);
 		for (const size of sizes) expect(size).toBeLessThan(WINDOW);
-		const log = await waitForLog(scenario.logPath, /lkg_replay_served|prefix trim refused and the untrimmed request/);
-		expect(log).toMatch(/lkg_replay_served|prefix trim refused and the untrimmed request/);
+		const refusal = "[MC-S06] (v2-context-failed: Host checkpoint replay boundary is unavailable). This request was not sent.";
+		const log = await waitForLog(scenario.logPath, refusal);
+		expect(log).toContain("no older compartment end is in the host store; nothing to re-anchor on");
+		expect(log).toContain(refusal);
 	} catch (error) {
 		console.error(
 			scenario.host.stderr(),

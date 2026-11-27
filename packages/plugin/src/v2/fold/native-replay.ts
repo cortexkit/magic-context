@@ -543,6 +543,7 @@ export class NativeFoldReplay {
         sessionID: string,
         _cut: StoreRow<"compaction">,
         reader: V2StoreReader,
+        options?: { allowMissingFloor?: boolean },
     ): Promise<number | undefined> {
         // V2 records have no replay floor. A healthy writer stages a proven
         // summary boundary, a complete host checkpoint, or the legacy-only
@@ -552,6 +553,7 @@ export class NativeFoldReplay {
         if (this.options.protocol !== 3) return undefined;
         const replay = await this.floorState(sessionID, reader);
         if (replay) return replay.floor.after;
+        if (options?.allowMissingFloor) return undefined;
         const current = await this.admissions?.get(this.admissionKey(sessionID));
         const legacy = (await this.admissions?.get(admissionKey(sessionID))) as
             | { payload?: string }
