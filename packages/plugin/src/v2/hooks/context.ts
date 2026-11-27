@@ -1152,6 +1152,7 @@ export async function registerContext(context: V2Context) {
     // Idle folding waits out the served response's frozen cache lifetime, and
     // missing captures are restored from the source store rather than lost.
     const nativeFoldMemory = compactionOff ? undefined : nativeFoldCache(() => storage.require());
+    const loggedUncoveredCheckpoints = new BoundedSessionMap<true>(1000);
     const nativeFoldReplay = nativeFoldMemory
         ? new NativeFoldReplay(nativeFoldMemory, () => openStoreReader(), context.storage, {
               protocol: 3,
@@ -1169,10 +1170,15 @@ export async function registerContext(context: V2Context) {
               },
               onUncoveredFloor: (sessionID, floor, coverage) => {
                   const pass = contextPass.getStore();
-                  if (pass?.sessionID === sessionID) {
-                      if (pass.loggedUncoveredFloor) return;
-                      pass.loggedUncoveredFloor = true;
+                  if (pass?.sessionID === sessionID && pass.loggedUncoveredFloor) return;
+                  if (floor.kind === "checkpoint") {
+                      // The OpenCode 1 marker still points at the same row
+                      // after we save the lower OpenCode 2 replay floor.
+                      const key = JSON.stringify([sessionID, floor.id]);
+                      if (loggedUncoveredCheckpoints.get(key)) return;
+                      loggedUncoveredCheckpoints.set(key, true);
                   }
+                  if (pass?.sessionID === sessionID) pass.loggedUncoveredFloor = true;
                   sessionLog(
                       sessionID,
                       `v2 restore: ignored ${floor.kind} floor ${floor.id} at seq=${floor.after}; rendered coverage ${coverage.id ?? "none"} ends at seq=${coverage.after}`,
@@ -4332,6 +4338,7 @@ export async function registerContext(context: V2Context) {
             await hiddenChildSweep.dispose();
             messageTimesCache.clear();
             recoveredInstructions.clear();
+            loggedUncoveredCheckpoints.clear();
             hostFoldIdle?.dispose();
             usageController.abort();
             // OpenCode 2 runs this disposer before it removes this instance's hooks

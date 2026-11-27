@@ -277,6 +277,13 @@ test("an imported checkpoint cannot hide rows after the newest surviving summary
             expect(pass.bytes).not.toContain("Review history 1");
         }
         expect(next.bytes).toBe(first.bytes);
+        const third = await f.pass();
+        expect(third.bytes).toBe(next.bytes);
+        expect(
+            [first, next, third]
+                .flatMap(({ logs }) => logs)
+                .filter((line) => line.includes(`ignored checkpoint floor ${imported.id} `)),
+        ).toHaveLength(1);
     } finally {
         native.mockRestore();
         await f.cleanup();
