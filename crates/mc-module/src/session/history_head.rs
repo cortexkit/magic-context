@@ -223,7 +223,7 @@ impl Session {
             }
             _ => match self.summary_rows() {
                 Ok(mut summaries) => {
-                    self.date_summaries(&mut summaries, self.shown_days());
+                    self.date_summaries(&mut summaries);
                     folded(&head::Inputs {
                         summaries: &summaries,
                         ..fold_inputs
@@ -251,7 +251,7 @@ impl Session {
             self.summary_store(),
             &model_key,
             fold_inputs.counter,
-            |rows| self.date_summaries(rows, None),
+            |rows| self.date_summaries(rows),
         ) {
             Ok(newer) => newer,
             Err(unread) => return self.head_as_shown_for(unread),
@@ -273,7 +273,7 @@ impl Session {
                 Ok(summaries) => summaries,
                 Err(unread) => return self.head_as_shown_for(unread),
             };
-            self.date_summaries(&mut summaries, self.shown_days());
+            self.date_summaries(&mut summaries);
             base = folded(&head::Inputs {
                 summaries: &summaries,
                 ..fold_inputs
@@ -287,7 +287,7 @@ impl Session {
                 self.summary_store(),
                 &model_key,
                 fold_inputs.counter,
-                |rows| self.date_summaries(rows, None),
+                |rows| self.date_summaries(rows),
             ) {
                 Ok(newer) => newer,
                 Err(unread) => return self.head_as_shown_for(unread),
@@ -335,14 +335,6 @@ impl Session {
         self.render_head_for(settings, true)
     }
 
-    /// The days the served `m[1]` heads its summaries with, which a fold
-    /// falls back on ([`Session::date_summaries`]).
-    fn shown_days(&self) -> Option<&head::NewerDays> {
-        self.baseline
-            .as_ref()
-            .and_then(|baseline| baseline.newer_days.as_ref())
-    }
-
     /// Fill in the days each of `rows` shows in its heading: the UTC days
     /// its first and last message were written ([`crate::summary::dates`]).
     /// Each time comes from the first place that knows it: the transcript
@@ -351,20 +343,15 @@ impl Session {
     /// also holds the standalone plugin's times for a session moved from
     /// it (the messages before the move never enter this session's index).
     /// Each store is read once, for every time the places before it left
-    /// unknown. When none knows a time, a fold passes the days `m[1]`
-    /// showed (`shown`), and the row takes the day its own entry there
-    /// records, so dates `m[1]` showed stay in `m[0]`. A day still unknown
-    /// comes from the nearest timed message among the saved times and the
-    /// search index ([`crate::summary::dates::summary_times`]): a boundary
-    /// message without text has no time of its own. A row with either day
-    /// still unknown keeps no date. Only a render that writes headings
-    /// anew calls this: a fold, or `m[1]` showing a summary for the first
-    /// time.
-    pub(super) fn date_summaries(
-        &self,
-        rows: &mut [StoredCompartment],
-        shown: Option<&head::NewerDays>,
-    ) {
+    /// unknown. A day still unknown comes from the nearest timed message
+    /// among the saved times and the search index
+    /// ([`crate::summary::dates::summary_times`]): a boundary message
+    /// without text has no time of its own. A row with either day still
+    /// unknown keeps no date. The days depend only on what the stores hold,
+    /// so a rebuild after a restart dates as a warm one does. Only a render
+    /// that writes headings anew calls this: a fold, or `m[1]` showing a
+    /// summary for the first time.
+    pub(super) fn date_summaries(&self, rows: &mut [StoredCompartment]) {
         use std::collections::{BTreeSet, HashMap};
         let _timing = crate::notice_cost_timing::span("head.dates");
         let held = |mid: &str| {
@@ -420,15 +407,10 @@ impl Session {
         let mut days: Vec<(Option<String>, Option<String>)> = rows
             .iter()
             .map(|row| {
-                let recorded = shown
-                    .and_then(|shown| shown.get(&row.sequence))
-                    .filter(|recorded| recorded.belongs_to(row))
-                    .and_then(head::ShownDays::days);
-                let start = day(row.start_message, &row.start_message_id)
-                    .or_else(|| recorded.map(|days| days.start.clone()));
-                let end = day(row.end_message, &row.end_message_id)
-                    .or_else(|| recorded.map(|days| days.end.clone()));
-                (start, end)
+                (
+                    day(row.start_message, &row.start_message_id),
+                    day(row.end_message, &row.end_message_id),
+                )
             })
             .collect();
         // A boundary message with no time of its own: the nearest timed

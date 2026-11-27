@@ -212,59 +212,58 @@ fn a_summary_with_an_unknown_time_shows_no_date() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// When a fold can no longer find a summary's times anywhere, it heads the
-/// summary with the days `m[1]` showed for it, so they don't disappear from
-/// `m[0]`; but only when `m[1]`'s entry names the same messages as the
-/// summary at that sequence now.
+/// The same session after a restart: its saved state loaded into a new
+/// session over the same stores, holding the same view and transcript.
+fn restart(session: &Session) -> Session {
+    let store = session.store.as_ref().unwrap();
+    store.save(&session.key, &session.durable()).unwrap();
+    let (mut restored, _, _, _, _) = fixture();
+    restored.db = session.db.clone();
+    restored.store = session.store.clone();
+    restored.features.summarizer = true;
+    restored.project = session.project.clone();
+    restored.load_summaries();
+    restored.restore(store.load(&session.key).unwrap());
+    restored.latest = session.latest.clone();
+    restored.latest_unknown = false;
+    restored.index.extend(session.index.entries().to_vec());
+    restored.index_ready = true;
+    restored
+}
+
+/// When a cut could not save the times of the messages it let go (a failed
+/// write to `sessions.db`), the days `m[1]` showed from those times are not
+/// carried into `m[0]`: the next full rebuild dates the summary by the
+/// nearest timed message the stores hold, and a rebuild after a restart
+/// shows the same bytes.
 #[test]
-fn a_fold_keeps_the_days_m1_showed_for_the_same_summary() {
-    let lose_times = |session: &mut Session| {
-        let base = session.index.base();
-        session.index = crate::index::Index::starting_at(base);
-        session.index.extend(
-            (base..=60)
-                .map(|n| text(n, &format!("m{n}")))
-                .map(|mut entry| {
-                    entry.written_at = 0;
-                    entry
-                }),
-        );
-        session.store = None;
-    };
-    let dir = scratch("head-dates-fold-fallback");
+fn a_summary_whose_times_were_not_saved_takes_the_approximation_warm_and_cold() {
+    let dir = scratch("head-dates-unsaved");
     let (mut session, settings) = timed_head(&dir, time_of);
     build(&mut session, &settings).unwrap();
     publish(&mut session, 4);
     build(&mut session, &settings).unwrap();
     assert!(shown(&session, head::M1_ID).contains("## 13-16 · 2026-03-05→06 · Work 4"));
-    lose_times(&mut session);
+    // The transcript no longer holds the times, and none were saved.
+    let base = session.index.base();
+    session.index = crate::index::Index::starting_at(base);
+    session.index.extend((base..=60).map(|n| {
+        let mut entry = text(n, &format!("m{n}"));
+        entry.written_at = 0;
+        entry
+    }));
+    let store = session.store.clone().unwrap();
+    store.save_app_index(&session.key, &[], Some(1)).unwrap();
+    // Inside summary 4, a message of another day.
+    search_rows(&session, &[(14, DAY0 + 20 * 24 * 3_600_000)]);
     session.fold_due = true;
     build(&mut session, &settings).unwrap();
-    let m0 = shown(&session, head::M0_ID);
-    assert!(m0.contains("## 13-16 · 2026-03-05→06 · Work 4"), "{m0}");
-    assert!(
-        m0.contains("## 1-4 · Work 1"),
-        "only m[1] recorded days: {m0}"
-    );
-    std::fs::remove_dir_all(dir).unwrap();
-
-    // The same, but `m[1]`'s entry for sequence 4 named other messages.
-    let dir = scratch("head-dates-fold-fallback-other");
-    let (mut session, settings) = timed_head(&dir, time_of);
-    build(&mut session, &settings).unwrap();
-    publish(&mut session, 4);
-    build(&mut session, &settings).unwrap();
-    let mut baseline = session.baseline.as_deref().unwrap().clone();
-    match baseline.newer_days.as_mut().unwrap().get_mut(&4).unwrap() {
-        head::ShownDays::Of { of, .. } => of.start_id = "r13".into(),
-        unnamed => panic!("m[1] records which summary it dated: {unnamed:?}"),
-    }
-    session.baseline = Some(Arc::new(baseline));
-    lose_times(&mut session);
-    session.fold_due = true;
-    build(&mut session, &settings).unwrap();
-    let m0 = shown(&session, head::M0_ID);
-    assert!(m0.contains("## 13-16 · Work 4"), "{m0}");
+    let warm = shown(&session, head::M0_ID);
+    assert!(warm.contains("## 13-16 · 2026-03-21 · Work 4"), "{warm}");
+    let mut restored = restart(&session);
+    restored.fold_due = true;
+    build(&mut restored, &settings);
+    assert_eq!(shown(&restored, head::M0_ID), warm);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -332,7 +331,7 @@ fn a_boundary_without_a_time_takes_the_nearest_timed_message() {
             ..Default::default()
         })
         .collect();
-    session.date_summaries(&mut rows, None);
+    session.date_summaries(&mut rows);
     assert!(rows
         .iter()
         .all(|row| row.start_date.is_none() && row.end_date.is_none()));
@@ -362,11 +361,12 @@ fn a_boundary_without_a_time_takes_the_nearest_timed_message() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// A day `m[1]` recorded for a summary comes before the nearest timed
-/// message: it is the day the model was already shown. The same summary
-/// with no recorded day takes the nearest timed message's.
+/// A day `m[1]` showed is not carried into `m[0]` at a fold: `m[0]` dates
+/// every summary from what the stores hold. With the exact times gone, the
+/// nearest timed message's day is shown, and the next full rebuild shows
+/// the same day: nothing drifts between rebuilds over the same stores.
 #[test]
-fn a_recorded_day_comes_before_the_nearest_timed_message() {
+fn a_day_m1_showed_gives_way_to_the_stores_at_a_fold_and_stays() {
     let dir = scratch("head-dates-recorded-first");
     let (mut session, settings) = timed_head(&dir, time_of);
     build(&mut session, &settings).unwrap();
@@ -379,17 +379,10 @@ fn a_recorded_day_comes_before_the_nearest_timed_message() {
     session.fold_due = true;
     build(&mut session, &settings).unwrap();
     let m0 = shown(&session, head::M0_ID);
-    assert!(m0.contains("## 13-16 · 2026-03-05→06 · Work 4"), "{m0}");
-    // This fold's baseline records no `m[1]` days, so the next fold dates
-    // summary 4 by the message inside it.
-    assert_eq!(
-        session.baseline.as_ref().unwrap().newer_days,
-        Some(Default::default())
-    );
-    session.fold_due = true;
-    build(&mut session, &settings).unwrap();
-    let m0 = shown(&session, head::M0_ID);
     assert!(m0.contains("## 13-16 · 2026-03-21 · Work 4"), "{m0}");
+    session.fold_due = true;
+    build(&mut session, &settings);
+    assert_eq!(shown(&session, head::M0_ID), m0);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -457,7 +450,7 @@ fn nearest_message_dating_time() {
     let timed = |label: &str| {
         let mut dated = summaries.clone();
         let started = std::time::Instant::now();
-        session.date_summaries(&mut dated, None);
+        session.date_summaries(&mut dated);
         let elapsed = started.elapsed().as_secs_f64() * 1000.0;
         let undated = dated.iter().filter(|row| row.start_date.is_none()).count();
         println!("DATING {label}: {elapsed:.0} ms for {count} summaries, {undated} undated");
@@ -484,19 +477,7 @@ fn an_approximated_day_follows_the_stores_at_every_full_rebuild() {
     build(&mut session, &settings);
     let warm = shown(&session, head::M0_ID);
     assert!(warm.contains("## 5-8 · 2026-03-10 · Work 2"), "{warm}");
-    let store = session.store.as_ref().unwrap();
-    store.save(&session.key, &session.durable()).unwrap();
-    let (mut restored, _, _, _, _) = fixture();
-    restored.db = session.db.clone();
-    restored.store = session.store.clone();
-    restored.features.summarizer = true;
-    restored.project = session.project.clone();
-    restored.load_summaries();
-    restored.restore(store.load(&session.key).unwrap());
-    restored.latest = session.latest.clone();
-    restored.latest_unknown = false;
-    restored.index.extend(session.index.entries().to_vec());
-    restored.index_ready = true;
+    let mut restored = restart(&session);
     assert_eq!(shown(&restored, head::M0_ID), warm);
     restored.fold_due = true;
     build(&mut restored, &settings);

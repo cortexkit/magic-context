@@ -132,14 +132,16 @@ fn a_refresh_shows_what_it_showed_and_a_fold_reads_older_text_from_context_db() 
 
     // A fold renders m[0] again: summaries the session no longer holds come
     // from context.db as it is now, the ones m[1] showed as it showed them.
-    // The cut let their messages go and this session saves no times, so the
-    // days come from what m[1] showed, and only its summaries keep them.
+    // The cut let their messages go, and this session has no sessions.db to
+    // save their times in (every running session has one), so the fold
+    // finds no day for them: m[0] dates from the stores only, not from what
+    // m[1] showed.
     session.fold_due = true;
     build(&mut session, &settings).expect("a fold");
     let m0 = shown(&session, head::M0_ID);
     assert!(m0.contains("## 1-4 · Edited title 1"), "{m0}");
-    assert!(m0.contains("## 13-16 · 1970-01-01 · Work 4"), "{m0}");
-    assert!(m0.contains("## 17-20 · 1970-01-01 · Work 5"), "{m0}");
+    assert!(m0.contains("## 13-16 · Work 4"), "{m0}");
+    assert!(m0.contains("## 17-20 · Work 5"), "{m0}");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -181,7 +183,7 @@ fn a_fold_whose_summaries_cannot_be_read_keeps_the_head_as_shown() {
     );
     build(&mut session, &settings).expect("the fold lands");
     assert!(!session.fold_due);
-    assert!(shown(&session, head::M0_ID).contains("## 13-16 · 1970-01-01 · Work 4"));
+    assert!(shown(&session, head::M0_ID).contains("## 13-16 · Work 4"));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -403,7 +405,7 @@ fn a_fold_reads_3700_summaries_back() {
         (0..7)
             .map(|_| {
                 let started = std::time::Instant::now();
-                session.date_summaries(&mut rows, None);
+                session.date_summaries(&mut rows);
                 started.elapsed()
             })
             .collect(),
