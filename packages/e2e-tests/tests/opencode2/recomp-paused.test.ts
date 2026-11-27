@@ -41,6 +41,7 @@ function hostDbPath(host: { env: NodeJS.ProcessEnv }): string {
 
 function readRows<T>(path: string, sql: string, ...params: unknown[]): T[] {
     const db = new Database(path, { readonly: true, fileMustExist: true });
+    db.exec("PRAGMA busy_timeout = 5000");
     try {
         return db.prepare(sql).all(...params) as T[];
     } finally {
@@ -309,6 +310,7 @@ test("a stopped recomp preserves the next request after a manual checkpoint, the
         await scenario.host.stopHost();
         for (const path of files) {
             const db = new Database(path, { fileMustExist: true });
+            db.exec("PRAGMA busy_timeout = 5000");
             try {
                 db.prepare("VACUUM INTO ?").run(`${path}.control`);
             } finally {
@@ -500,6 +502,7 @@ test.each([
             reader.close();
         }
         const sqlite = new Database(hostDb, { fileMustExist: true });
+        sqlite.exec("PRAGMA busy_timeout = 5000");
         try {
             const lastAssistant = rawIds.at(-1);
             const changed = sqlite
@@ -519,6 +522,7 @@ test.each([
         const files = [hostDb, context];
         for (const path of files) {
             const db = new Database(path, { fileMustExist: true });
+            db.exec("PRAGMA busy_timeout = 5000");
             try {
                 db.prepare("VACUUM INTO ?").run(`${path}.noise-control`);
             } finally {
