@@ -12,8 +12,10 @@ import {
     readdirSync,
     readFileSync,
     readSync,
+    realpathSync,
     rmSync,
     statSync,
+    symlinkSync,
     writeFileSync,
     writeSync,
 } from "node:fs";
@@ -21,12 +23,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import {
+    closeDatabase,
     initializeDatabase,
     inspectRpcServerDiscovery,
     LATEST_SUPPORTED_VERSION,
+    openDatabase,
 } from "@magic-context/core/features/magic-context/storage-db";
+import { markLkgRecoveryDirty } from "@magic-context/core/hooks/magic-context/lkg-recovery-fence";
 import { rpcPortFilePath } from "@magic-context/core/shared/rpc-utils";
 import { Database } from "@magic-context/core/shared/sqlite";
+import {
+    MAGIC_CONTEXT_STORAGE_ENTRIES,
+    tightenStorageTreeSync,
+    writeStorageFileSync,
+} from "@magic-context/core/shared/storage-permissions";
 import { writeTestExecutable } from "@magic-context/core/shared/test-fake-executable";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 
@@ -306,6 +316,91 @@ describe("doctor repair-db", () => {
         expect(copyDatabaseBundle(source, destination)).toEqual([destination]);
         expect(statSync(destination).mode & 0o777).toBe(0o600);
     });
+
+    it.skipIf(process.platform === "win32")(
+        "recognizes top-level entries from storage open, legacy import, fences and a CLI backup",
+        async () => {
+            const root = realpathSync(tempStorage());
+            const legacy = join(root, "opencode", "storage", "plugin", "magic-context");
+            const storage = join(root, "cortexkit", "magic-context");
+            const oldEnv = {
+                XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+                MAGIC_CONTEXT_TEST_DATA_DIR: process.env.MAGIC_CONTEXT_TEST_DATA_DIR,
+            };
+            process.env.XDG_DATA_HOME = root;
+            process.env.MAGIC_CONTEXT_TEST_DATA_DIR = root;
+            try {
+                mkdirSync(join(legacy, "models"), { recursive: true });
+                writeStorageFileSync(join(legacy, "models", "weights"), "fixture");
+                const seed = new Database(join(legacy, "context.db"));
+                try {
+                    seed.exec("CREATE TABLE inventory_witness (id INTEGER)");
+                } finally {
+                    seed.close();
+                }
+                const db = openDatabase();
+                expect(db?.prepare("SELECT * FROM inventory_witness").all()).toEqual([]);
+                expect(readFileSync(join(storage, "models", "weights"), "utf8")).toBe("fixture");
+                expect(
+                    markLkgRecoveryDirty({
+                        sessionId: "inventory",
+                        processLocalProof: false,
+                        slot: {
+                            jsonPrefix: "[]",
+                            inputIdSeq: [],
+                            inputContentDigests: [],
+                            lastInputMessageId: "last",
+                            modelKey: "test/model",
+                            providerKey: "test",
+                            capturedAt: 1,
+                        },
+                    }),
+                ).toBeDefined();
+                expect(readdirSync(join(storage, "lkg-recovery-fences"))).not.toEqual([]);
+                await closeDatabase();
+
+                // Model the module logger and dashboard's config-save output in this CLI fixture.
+                for (const [directory, file] of [
+                    ["logs", "module.log"],
+                    ["config-backups", "user.jsonc"],
+                ]) {
+                    mkdirSync(join(storage, directory), { mode: 0o700 });
+                    writeStorageFileSync(join(storage, directory, file), "fixture");
+                }
+                const result = await runRepairDb({
+                    storageDir: storage,
+                    prompts: new MockPrompts(),
+                    deps: {
+                        now: () => new Date("2026-08-11T12:36:56.789Z"),
+                        sqliteExecutable: join(root, "missing-sqlite3"),
+                    },
+                });
+                expect(result).toBe(REPAIR_DB_EXIT.failed);
+                const entries = readdirSync(storage);
+                expect(entries).toContain("context.db.corrupt-backup-20260811T123656789Z");
+                expect(
+                    entries.filter(
+                        (name) =>
+                            !MAGIC_CONTEXT_STORAGE_ENTRIES.some((entry) =>
+                                typeof entry === "string" ? entry === name : entry.test(name),
+                            ),
+                    ),
+                ).toEqual([]);
+
+                const alias = join(root, "alias");
+                symlinkSync(storage, alias);
+                chmodSync(storage, 0o755);
+                expect(tightenStorageTreeSync(alias)).toMatchObject({ failures: 0, tightened: 1 });
+                expect(statSync(storage).mode & 0o777).toBe(0o700);
+            } finally {
+                await closeDatabase();
+                for (const [name, value] of Object.entries(oldEnv)) {
+                    if (value === undefined) delete process.env[name];
+                    else process.env[name] = value;
+                }
+            }
+        },
+    );
 
     if (!salvageCapability.available) {
         // The salvage test below is registered as skipped; this test states why

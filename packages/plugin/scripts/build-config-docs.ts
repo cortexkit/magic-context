@@ -208,7 +208,7 @@ Project config may only set \`"rerank": {"provider": "off"}\`. Project routing, 
         ],
         title: "Advanced",
         intro: "Behavior tuning most installs never need to touch.",
-        outro: "On Unix, if the Magic Context data folder is a symbolic link, Magic Context follows it and applies the usual owner-only permissions to the folder it points to (`0700` for directories, `0600` for files). The startup check leaves symbolic links inside that folder alone. If you turn off `storage.enforce_private_permissions`, Magic Context still uses the linked folder but does not tighten its permissions.",
+        outro: "On Unix, Magic Context makes its data folder owner-only by default. If the data folder is a symbolic link, Magic Context follows it and makes the whole target folder private (`0700` for directories and `0600` for files, which removes file execute bits), leaving links inside it alone. It does this only if the target is not a filesystem root, your home folder, or a mount point, and every top-level entry belongs to Magic Context (`.DS_Store` is ignored). Otherwise the startup check leaves the target as it is. Give the store a folder of its own so Magic Context can protect it. Turning off `storage.enforce_private_permissions` skips startup permission tightening even for a linked folder.",
     },
 ];
 

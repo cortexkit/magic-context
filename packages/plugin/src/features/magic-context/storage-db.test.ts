@@ -2,7 +2,9 @@
 
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import type { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
 import {
+    chmodSync,
     existsSync,
     mkdirSync,
     readdirSync,
@@ -291,6 +293,28 @@ describe("explicit shared storage resolution", () => {
             );
         }
 
+        it.skipIf(process.platform === "win32")(
+            `does not log a linked-root permission failure when the ${asynchronous ? "async" : "sync"} open has enforcement off`,
+            async () => {
+                const open = asynchronous ? openDatabaseAsync : openDatabase;
+                const root = realpathSync(makeTempDir("storage-db-broken-link-off-"));
+                const alias = join(root, "alias");
+                symlinkSync(join(root, "missing"), alias);
+                setStoragePrivatePermissionEnforcement(false);
+                const log = spyOn(logger, "log");
+                try {
+                    await expect(
+                        Promise.resolve().then(() => open(join(alias, "context.db"))),
+                    ).rejects.toThrow("storage unavailable: EEXIST: file already exists, mkdir");
+                    expect(log.mock.calls.map(([line]) => line).join("\n")).not.toContain(
+                        "storage permission tightening",
+                    );
+                } finally {
+                    log.mockRestore();
+                }
+            },
+        );
+
         it(`selects native turn routing before the first ${asynchronous ? "async" : "sync"} open`, async () => {
             const open = asynchronous ? openDatabaseAsync : openDatabase;
             const dbPath = join(makeTempDir("storage-db-turn-routing-"), "context.db");
@@ -325,6 +349,91 @@ describe("explicit shared storage resolution", () => {
                     .filter((line) => line.includes("resolved storage root link"));
                 expect(linkLines).toHaveLength(1);
                 expect(linkLines[0]).toContain(`${alias} -> ${target}`);
+            } finally {
+                log.mockRestore();
+            }
+        },
+    );
+
+    it.skipIf(process.platform === "win32")(
+        "tightens an empty linked target and checks it again after creating the store",
+        () => {
+            const root = realpathSync(makeTempDir("storage-db-empty-linked-"));
+            const target = join(root, "target");
+            const alias = join(root, "alias");
+            const database = join(target, "context.db");
+            mkdirSync(target);
+            chmodSync(target, 0o755);
+            symlinkSync(target, alias);
+            const realReaddir = fs.readdirSync;
+            const observations = new Set<boolean>();
+            const readdir = spyOn(fs, "readdirSync").mockImplementation((...args) => {
+                if (args[0] === target) observations.add(existsSync(database));
+                return realReaddir(...args);
+            });
+            try {
+                expect(openDatabase(join(alias, "context.db"))).not.toBeNull();
+            } finally {
+                readdir.mockRestore();
+            }
+            expect(observations).toEqual(new Set([false, true]));
+            expect(statSync(target).mode & 0o777).toBe(0o700);
+            expect(statSync(database).mode & 0o777).toBe(0o600);
+            expect(existsSync(join(target, ".storage-permissions-v1"))).toBe(true);
+        },
+    );
+
+    it.skipIf(process.platform === "win32")(
+        "leaves a linked folder with foreign entries alone even after the store is created",
+        async () => {
+            const root = realpathSync(makeTempDir("storage-db-mixed-linked-"));
+            const target = join(root, "target");
+            const alias = join(root, "alias");
+            const database = join(target, "context.db");
+            const marker = join(target, ".storage-permissions-v1");
+            const foreign = join(target, "my-unrelated-executable.sh");
+            const cache = join(target, "models");
+            mkdirSync(target);
+            chmodSync(target, 0o755);
+            writeFileSync(foreign, "keep");
+            chmodSync(foreign, 0o755);
+            symlinkSync(target, alias);
+            const log = spyOn(logger, "log");
+            try {
+                expect(openDatabase(join(alias, "context.db"))).not.toBeNull();
+                await closeDatabase();
+                expect(statSync(target).mode & 0o777).toBe(0o755);
+                expect(existsSync(marker)).toBe(false);
+
+                mkdirSync(cache);
+                chmodSync(cache, 0o755);
+                chmodSync(database, 0o644);
+                const modeSnapshot = () =>
+                    [target, database, cache, foreign].map((file) => statSync(file).mode & 0o777);
+                const looseModes = [0o755, 0o644, 0o755, 0o755];
+                expect(modeSnapshot()).toEqual(looseModes);
+                for (let start = 0; start < 3; start++) {
+                    expect(openDatabase(join(alias, "context.db"))).not.toBeNull();
+                    expect(modeSnapshot()).toEqual(looseModes);
+                    expect(existsSync(marker)).toBe(false);
+                    await closeDatabase();
+                }
+
+                const skipLines = log.mock.calls
+                    .map(([line]) => line)
+                    .filter((line) => line.includes("was not made private"));
+                expect(skipLines).toHaveLength(4);
+                for (const line of skipLines) {
+                    expect(line).toContain("1 entry");
+                    expect(line).toContain("a folder of its own");
+                    expect(line).not.toContain("my-unrelated-executable.sh");
+                }
+                fs.unlinkSync(foreign);
+                expect(openDatabase(join(alias, "context.db"))).not.toBeNull();
+                expect(
+                    [target, database, cache].map((file) => statSync(file).mode & 0o777),
+                ).toEqual([0o700, 0o600, 0o700]);
+                expect(existsSync(marker)).toBe(true);
             } finally {
                 log.mockRestore();
             }

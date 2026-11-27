@@ -220,8 +220,46 @@ function ensureSecureStorageDir(dir: string, dbPath: string): void {
     } catch (error) {
         // A broken root link can fail during mkdir, before the startup check.
         // Report the permission failure without replacing the original open error.
-        if (isLinkedStorageRoot(dir)) tightenStorageTree(dbPath, true);
+        if (shouldEnforcePrivateStoragePermissions() && isLinkedStorageRoot(dir)) {
+            tightenStorageTree(dbPath, true);
+        }
         throw error;
+    }
+}
+
+function describeLinkedStorageSkip(
+    reason: "filesystem-root" | "home-folder" | "mount-point" | number,
+): string {
+    switch (reason) {
+        case "filesystem-root":
+            return "it is a filesystem root";
+        case "home-folder":
+            return "it is your home folder";
+        case "mount-point":
+            return "it is a mount point";
+        default: {
+            const entries = reason === 1 ? "entry" : "entries";
+            return `it holds ${reason} ${entries} that Magic Context did not create`;
+        }
+    }
+}
+
+// Fixed text is retained by the issue-report log templates; exception prose is not.
+function describeLinkedStorageFailure(failure: string, nonDirectoryPath?: string): string {
+    if (nonDirectoryPath !== undefined) return `${nonDirectoryPath} is not a directory`;
+    switch (failure) {
+        case "ENOENT":
+            return "ENOENT";
+        case "ELOOP":
+            return "ELOOP";
+        case "EACCES":
+            return "EACCES";
+        case "EPERM":
+            return "EPERM";
+        case "ENOTDIR":
+            return "ENOTDIR";
+        default:
+            return "could not resolve or inspect the linked target";
     }
 }
 
@@ -229,8 +267,17 @@ function tightenStorageTree(dbPath: string, reportResolvedLink = false): void {
     const { failures, rootLink } = tightenStorageTreeSync(dirname(dbPath), dbPath);
     if (rootLink && "failure" in rootLink) {
         log(
-            `[magic-context] storage permission tightening failures=${failures}: storage root link ${rootLink.path}: ${rootLink.failure}`,
+            `[magic-context] storage permission tightening failures=${failures}: storage root link ${rootLink.path}: ${describeLinkedStorageFailure(rootLink.failure, rootLink.nonDirectoryTarget)}`,
         );
+        return;
+    }
+    if (rootLink?.skipped !== undefined) {
+        if (reportResolvedLink) {
+            const { path: linkPath, target: targetPath } = rootLink;
+            log(
+                `[magic-context] linked storage folder ${linkPath} -> ${targetPath} was not made private because ${describeLinkedStorageSkip(rootLink.skipped)}. Move the store to a folder of its own so Magic Context can protect it.`,
+            );
+        }
         return;
     }
     if (rootLink && reportResolvedLink) {

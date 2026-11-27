@@ -141,11 +141,13 @@ Project memories therefore flow across OpenCode, Pi, and OMP, while per-session 
 
 For semantic search to work cross-harness, every host resolves embedding config per project identity on each retrieval path. Keep the effective `embedding` block consistent across OpenCode, Pi, and OMP for the same project.
 
+### Owner-only storage
+
+On Unix, Magic Context makes its data folder owner-only by default. If the data folder is a symbolic link, Magic Context follows it and makes the whole target folder private (`0700` for directories and `0600` for files, which removes file execute bits), leaving links inside it alone. It does this only if the target is not a filesystem root, your home folder, or a mount point, and every top-level entry belongs to Magic Context (`.DS_Store` is ignored). Otherwise the startup check leaves the target as it is. Give the store a folder of its own so Magic Context can protect it. Turning off `storage.enforce_private_permissions` skips startup permission tightening even for a linked folder.
+
 ### Trusted-group shared storage
 
-On Unix, if the Magic Context data folder is a symbolic link, Magic Context follows it and applies the usual owner-only permissions to the folder it points to (`0700` for directories, `0600` for files). The startup check leaves symbolic links inside that folder alone. If you turn off `storage.enforce_private_permissions`, Magic Context still uses the linked folder but does not tighten its permissions.
-
-By default, Magic Context enforces owner-only `0700` storage directories and `0600` storage files. For a deliberate Unix deployment where trusted users share one store and an operator manages permissions externally, set this **in user config only**:
+For a deliberate Unix deployment where trusted users share one store and an operator manages permissions externally, set this **in user config only**:
 
 ```jsonc
 {

@@ -160,6 +160,27 @@ test("all generated templates retain their static parts and omit canaries in eve
     }
 });
 
+test("linked storage failures keep only fixed causes and anonymous paths", () => {
+    const privacy = new IssuePrivacy({});
+    const format = (reason: string) =>
+        privacy.logLine(
+            `[2026-09-05T10:41:07.130Z] [magic-context] storage permission tightening failures=1: storage root link /home/private-person/My Alias: ${reason}`,
+        );
+    for (const errno of ["ENOENT", "ELOOP", "EACCES", "EPERM", "ENOTDIR"]) {
+        const line = format(errno);
+        expect(line).toContain(`: ${errno}`);
+        expect(line).not.toContain("private-person");
+        expect(line).not.toContain("My Alias");
+    }
+    const nonDirectory = format("/Volumes/Private Disk/Not A Folder is not a directory");
+    expect(nonDirectory).toContain("is not a directory");
+    expect(nonDirectory).not.toContain("Private Disk");
+    expect(nonDirectory).not.toContain("Not A Folder");
+    const unknown = format("CUSTOM_ERRNO: private reason from the filesystem");
+    expect(unknown).not.toContain("CUSTOM_ERRNO");
+    expect(unknown).not.toContain("private reason");
+});
+
 test("template slots keep individual measurements, enums, models, versions and identity aliases", () => {
     const privacy = new IssuePrivacy({});
     const line = (text: string) =>

@@ -29,6 +29,7 @@ import {
 } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import { open as openAsync, writeFile as writeFileAsync } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { isPidAlive } from "./rpc-utils";
 
@@ -38,6 +39,40 @@ const STORAGE_PERMISSIONS_MARKER = `.storage-permissions-v${STORAGE_PERMISSIONS_
 const STORAGE_PERMISSIONS_MARKER_BYTES = Buffer.from(`${STORAGE_PERMISSIONS_POLICY_VERSION}\n`);
 const STORAGE_PERMISSIONS_MARKER_MAX_AGE_MS = 24 * 60 * 60_000;
 const LEGACY_FENCE_TEMP_MIN_AGE_MS = 10 * 60_000;
+
+/** Top-level names that Magic Context creates in its data folder. */
+export const MAGIC_CONTEXT_STORAGE_ENTRIES: readonly (string | RegExp)[] = [
+    "context.db",
+    "context.db-wal",
+    "context.db-shm",
+    "context.db-journal",
+    "store.db", // The 0.49 Magic Context module's companion database.
+    "store.db-wal",
+    "store.db-shm",
+    "store.db-journal",
+    STORAGE_PERMISSIONS_MARKER,
+    "models",
+    "logs",
+    "backups",
+    "config-backups",
+    "lkg-recovery-fences",
+    "rpc",
+    "project-identities",
+    "heap-snapshots",
+    "host-profiler",
+    "pi-served-array-digests",
+    "pi-served-array-bodies",
+    "pi-served-tag-numbers",
+    "window-reports.jsonl",
+    "window-reports.jsonl.1",
+    // Atomic storage writes add .<pid>.<12 hex digits>.tmp to these root files.
+    /^(?:last_announced_version|last-update-check\.json|pending-plugin-update\.json|model-context-limits-(?:opencode|opencode2)\.json)(?:\.[1-9]\d*\.[a-f0-9]{12}\.tmp)?$/,
+    /^identity-merge-backup-[A-Za-z0-9]{6}$/,
+    // Session migration snapshot and database-repair copies/staging bundles.
+    /^context\.db\.bak-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/,
+    /^context\.db\.corrupt-(?:backup|original)-\d{8}T\d{9}Z(?:-[1-9]\d{0,3})?(?:-wal|-shm)?$/,
+    /^context\.db\.recovering-\d{8}T\d{9}Z-[1-9]\d*(?:-[1-9]\d{0,3})?(?:\.(?:count-source|recover-source|(?:fresh\.)?db)(?:-wal|-shm)?|\.sql)$/,
+];
 
 /**
  * Storage roots and their configured aliases. Marker invalidation must stop
@@ -299,10 +334,38 @@ function readStoragePermissionCertificate(marker: string): Stats | undefined {
     }
 }
 
+type LinkedRootSkip = "filesystem-root" | "home-folder" | "mount-point" | number;
+
+function inspectLinkedStorageRoot(
+    root: string,
+    rootStat: Stats,
+): { skipped: LinkedRootSkip } | { entries: string[] } {
+    const parent = dirname(root);
+    if (root === parent) return { skipped: "filesystem-root" };
+    try {
+        if (root === realpathSync(homedir())) return { skipped: "home-folder" };
+    } catch (error) {
+        // A missing home cannot be the existing target. Other errors prevent the safety check.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (lstatSync(parent).dev !== rootStat.dev) return { skipped: "mount-point" };
+    const entries = readdirSync(root);
+    const foreignEntries = entries.filter(
+        (name) =>
+            name !== ".DS_Store" &&
+            !MAGIC_CONTEXT_STORAGE_ENTRIES.some((entry) =>
+                typeof entry === "string" ? entry === name : entry.test(name),
+            ),
+    ).length;
+    return foreignEntries === 0 ? { entries } : { skipped: foreignEntries };
+}
+
 type StoragePermissionCheck = {
     tightened: number;
     failures: number;
-    rootLink?: { path: string; target: string } | { path: string; failure: string };
+    rootLink?:
+        | { path: string; target: string; skipped?: LinkedRootSkip }
+        | { path: string; failure: string; nonDirectoryTarget?: string };
 };
 
 /** Tighten existing entries during startup. Follow a linked storage root, but no links inside it. */
@@ -318,6 +381,7 @@ export function tightenStorageTreeSync(
     let root = startupPath;
     let rootStat: Stats | undefined;
     let rootLink: StoragePermissionCheck["rootLink"];
+    let linkedEntries: string[] | undefined;
     try {
         rootStat = lstatSync(root);
     } catch {
@@ -327,15 +391,32 @@ export function tightenStorageTreeSync(
         try {
             root = realpathSync(startupPath);
             rootStat = lstatSync(root);
+            if (rootStat.isDirectory() && enforce) {
+                const eligibility = inspectLinkedStorageRoot(root, rootStat);
+                if ("skipped" in eligibility) {
+                    return {
+                        tightened: 0,
+                        failures: 0,
+                        rootLink: { path: startupPath, target: root, skipped: eligibility.skipped },
+                    };
+                }
+                linkedEntries = eligibility.entries;
+            }
         } catch (error) {
+            if (!enforce) return { tightened: 0, failures: 0 };
             const failure = (error as NodeJS.ErrnoException).code ?? String(error);
             return { tightened: 0, failures: 1, rootLink: { path: startupPath, failure } };
         }
         if (!rootStat.isDirectory()) {
+            if (!enforce) return { tightened: 0, failures: 0 };
             return {
                 tightened: 0,
                 failures: 1,
-                rootLink: { path: startupPath, failure: `${root} is not a directory` },
+                rootLink: {
+                    path: startupPath,
+                    failure: "not a directory",
+                    nonDirectoryTarget: root,
+                },
             };
         }
         rootLink = { path: startupPath, target: root };
@@ -443,12 +524,23 @@ export function tightenStorageTreeSync(
         if (!recursive || !stat.isDirectory()) return;
         let entries: string[];
         try {
-            entries = readdirSync(entryPath);
+            // Do not walk any root entry that was not included in the eligibility check.
+            entries = (entryPath === root ? linkedEntries : undefined) ?? readdirSync(entryPath);
         } catch {
             failures++;
             return;
         }
-        for (const entry of entries) visit(join(entryPath, entry));
+        for (const entry of entries) {
+            // The snapshot may still list the certificate this check just removed.
+            if (
+                entryPath === root &&
+                linkedEntries &&
+                markerRemoved &&
+                entry === STORAGE_PERMISSIONS_MARKER
+            )
+                continue;
+            visit(join(entryPath, entry));
+        }
     };
     if (certificate) {
         visit(root, false, false, rootStat);

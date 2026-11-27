@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
-import { join } from "node:path";
+import * as os from "node:os";
+import * as path from "node:path";
 import { withStorageFileMutex } from "./storage-file-mutex";
 import {
     __resetStoragePrivatePermissionEnforcementForTests,
@@ -13,6 +14,41 @@ import { cleanupTestTempDir, createTestTempDir } from "./test-temp-dir";
 
 const roots: string[] = [];
 const markerName = ".storage-permissions-v1";
+const { join } = path;
+
+function linkedFixture(name: string): { parent: string; root: string; alias: string } {
+    const { dir } = createTestTempDir(`mc-storage-link-${name}-`);
+    roots.push(dir);
+    const parent = fs.realpathSync(dir);
+    const root = join(parent, "storage");
+    const alias = join(parent, "alias");
+    fs.mkdirSync(root);
+    fs.chmodSync(root, 0o755);
+    fs.symlinkSync(root, alias);
+    return { parent, root, alias };
+}
+
+function mode(file: string): number {
+    return fs.lstatSync(file).mode & 0o777;
+}
+
+function writeLooseOwnedTree(root: string): void {
+    const models = join(root, "models");
+    fs.mkdirSync(models);
+    fs.writeFileSync(join(root, "context.db"), "");
+    fs.writeFileSync(join(models, "weights"), "cache fixture");
+    for (const [file, permissions] of [
+        [root, 0o755],
+        [models, 0o755],
+        [join(root, "context.db"), 0o644],
+        [join(models, "weights"), 0o755],
+    ] as const)
+        fs.chmodSync(file, permissions);
+}
+
+function ownedTreeModes(root: string): number[] {
+    return [".", "context.db", "models", "models/weights"].map((name) => mode(join(root, name)));
+}
 
 function fixture(): string {
     const { dir: parent } = createTestTempDir("mc-storage-startup-");
@@ -246,6 +282,63 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
         }
     });
 
+    it("retarget between starts: new target fully walked, old untouched", () => {
+        const { root, alias } = linkedFixture("retarget-between");
+        const { root: next } = linkedFixture("retarget-next");
+        writeLooseOwnedTree(root);
+        writeLooseOwnedTree(next);
+        expect(tightenStorageTreeSync(alias).failures).toBe(0);
+        const before = ownedTreeModes(root);
+        const oldMarker = fs.lstatSync(join(root, markerName));
+        fs.unlinkSync(alias);
+        fs.symlinkSync(next, alias);
+
+        expect(tightenStorageTreeSync(alias).failures).toBe(0);
+        expect(ownedTreeModes(next)).toEqual([0o700, 0o600, 0o700, 0o600]);
+        expect(fs.existsSync(join(next, markerName))).toBe(true);
+        expect(ownedTreeModes(root)).toEqual(before);
+        expect(fs.lstatSync(join(root, markerName))).toMatchObject({
+            ino: oldMarker.ino,
+            mtimeMs: oldMarker.mtimeMs,
+        });
+    });
+
+    it("retarget during the walk: marker and every chmod stay in the first target", () => {
+        const { root, alias } = linkedFixture("retarget-during");
+        const { root: next } = linkedFixture("retarget-during-next");
+        writeLooseOwnedTree(root);
+        writeLooseOwnedTree(next);
+        const before = ownedTreeModes(next);
+        const realReaddir = fs.readdirSync;
+        let swapped = false;
+        const readdir = spyOn(fs, "readdirSync").mockImplementation((...args) => {
+            // The top-level eligibility probe is read-only. Redirect from inside the walk.
+            if (!swapped && args[0] === join(root, "models")) {
+                swapped = true;
+                fs.unlinkSync(alias);
+                fs.symlinkSync(next, alias);
+            }
+            return realReaddir(...args);
+        });
+        const chmod = spyOn(fs, "chmodSync");
+        try {
+            expect(tightenStorageTreeSync(alias, join(alias, "context.db")).failures).toBe(0);
+            expect(swapped).toBe(true);
+            expect(chmod.mock.calls.length).toBeGreaterThan(1);
+            expect(
+                chmod.mock.calls.every(
+                    ([file]) => file === root || String(file).startsWith(`${root}/`),
+                ),
+            ).toBe(true);
+        } finally {
+            readdir.mockRestore();
+            chmod.mockRestore();
+        }
+        expect(fs.existsSync(join(root, markerName))).toBe(true);
+        expect(fs.existsSync(join(next, markerName))).toBe(false);
+        expect(ownedTreeModes(next)).toEqual(before);
+    });
+
     it("does not follow an interior link to a loose directory outside storage", () => {
         const root = fixture();
         const outside = join(root, "..", "outside");
@@ -281,6 +374,111 @@ describe.skipIf(process.platform === "win32")("startup permission certificate", 
         expect(fs.lstatSync(root).mode & 0o777).toBe(0o755);
         expect(fs.lstatSync(file).mode & 0o777).toBe(0o644);
         expect(fs.existsSync(join(root, markerName))).toBe(false);
+    });
+
+    it("does not tighten a linked filesystem root", () => {
+        const { root, alias } = linkedFixture("filesystem-root");
+        const realDirname = path.dirname;
+        // Model the root predicate without pointing the link at a real filesystem root.
+        const dirname = spyOn(path, "dirname").mockImplementation((file) =>
+            file === root ? root : realDirname(file),
+        );
+        try {
+            expect(tightenStorageTreeSync(alias)).toMatchObject({ tightened: 0, failures: 0 });
+        } finally {
+            dirname.mockRestore();
+        }
+        expect(mode(root)).toBe(0o755);
+        expect(fs.existsSync(join(root, markerName))).toBe(false);
+    });
+
+    it("does not tighten a linked target that resolves to the user's home folder", () => {
+        const { parent, root, alias } = linkedFixture("home");
+        const homePath = join(parent, "home-link");
+        fs.symlinkSync(root, homePath);
+        const home = spyOn(os, "homedir").mockReturnValue(homePath);
+        try {
+            expect(tightenStorageTreeSync(alias)).toMatchObject({ tightened: 0, failures: 0 });
+        } finally {
+            home.mockRestore();
+        }
+        expect(mode(root)).toBe(0o755);
+        expect(fs.existsSync(join(root, markerName))).toBe(false);
+    });
+
+    it("does not tighten a linked mount point on a different device from its parent", () => {
+        const { parent, root, alias } = linkedFixture("mount");
+        const realLstat = fs.lstatSync;
+        const lstat = spyOn(fs, "lstatSync").mockImplementation((...args) => {
+            const stat = realLstat(...args);
+            if (args[0] === parent) stat.dev = realLstat(root).dev + 1;
+            return stat;
+        });
+        try {
+            expect(tightenStorageTreeSync(alias)).toMatchObject({ tightened: 0, failures: 0 });
+        } finally {
+            lstat.mockRestore();
+        }
+        expect(mode(root)).toBe(0o755);
+        expect(fs.existsSync(join(root, markerName))).toBe(false);
+    });
+
+    it("leaves a linked target with only foreign entries alone", () => {
+        const { root, alias } = linkedFixture("foreign-only");
+        const foreign = join(root, "other-executable");
+        fs.writeFileSync(foreign, "other");
+        fs.chmodSync(foreign, 0o755);
+
+        expect(tightenStorageTreeSync(alias)).toMatchObject({ tightened: 0, failures: 0 });
+        expect(mode(foreign)).toBe(0o755);
+        expect(mode(root)).toBe(0o755);
+        expect(fs.existsSync(join(root, markerName))).toBe(false);
+    });
+
+    it("rechecks a linked target even with a marker and rejects lookalike entries", () => {
+        const { root, alias } = linkedFixture("foreign-with-marker");
+        writeLooseOwnedTree(root);
+        expect(tightenStorageTreeSync(alias).failures).toBe(0);
+        const marker = join(root, markerName);
+        const oldMarker = fs.lstatSync(marker);
+        const foreign = [
+            "context.db-wal-unrelated",
+            "context.db.corrupt-backup-20260811T123656789Z-not-a-backup",
+            "last_announced_version.123.not-hex-temp.tmp",
+            "identity-merge-backup-too-long",
+            "opencode.db",
+            "run-index.db",
+        ];
+        for (const name of foreign) fs.writeFileSync(join(root, name), "unrelated");
+        fs.chmodSync(root, 0o755);
+
+        expect(tightenStorageTreeSync(alias)).toMatchObject({
+            tightened: 0,
+            failures: 0,
+            rootLink: { skipped: foreign.length },
+        });
+        expect(mode(root)).toBe(0o755);
+        expect(fs.lstatSync(marker)).toMatchObject({
+            ino: oldMarker.ino,
+            mtimeMs: oldMarker.mtimeMs,
+        });
+    });
+
+    it("tightens a linked target containing only Finder's .DS_Store", () => {
+        const { root, alias } = linkedFixture("finder");
+        fs.writeFileSync(join(root, ".DS_Store"), "Finder fixture");
+        fs.chmodSync(join(root, ".DS_Store"), 0o600);
+        expect(tightenStorageTreeSync(alias)).toMatchObject({ tightened: 1, failures: 0 });
+        expect(mode(root)).toBe(0o700);
+        expect(fs.existsSync(join(root, markerName))).toBe(true);
+    });
+
+    it("does not count unresolved linked roots when enforcement is off", () => {
+        const { parent, alias } = linkedFixture("broken-off");
+        fs.unlinkSync(alias);
+        fs.symlinkSync(join(parent, "missing"), alias);
+        setStoragePrivatePermissionEnforcement(false);
+        expect(tightenStorageTreeSync(alias)).toEqual({ tightened: 0, failures: 0 });
     });
 
     for (const target of ["context.db", ".", "context.db-wal", "context.db-shm"]) {
