@@ -20,13 +20,23 @@
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	readdirSync,
+	realpathSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { pinMockAgents } from "../mock-routing";
 import type { MockProvider, MockResponse } from "../mock-provider/server";
 import { waitForReady } from "../opencode-runner/spawn";
 import { prepareContextDatabase } from "../prepare-context-db";
+import { describeOpenCode1Host, withOpenCode1PromptDiagnostics } from "./opencode1-prompt-diagnostics";
 import { isolateStoreDirectories } from "./store-directories";
 import { assertWriteFenceUnchanged, snapshotWriteFence } from "./write-fence";
 import {
@@ -216,11 +226,30 @@ export interface SpawnedOpenCode1 {
 	fixture: ConversionFixture;
 	stdout: () => string;
 	stderr: () => string;
+	withPromptDiagnostics: <T>(prompt: () => Promise<T>) => Promise<T>;
 	/** Stop the host and leave the mock provider running for the next generation. */
 	stop: () => Promise<void>;
 }
 
 const liveGroups = new Set<number>();
+
+function logTail(path: string): string {
+	try {
+		return `${path}:\n${readFileSync(path, "utf8").slice(-20_000)}`;
+	} catch (error) {
+		return `${path}: (unavailable: ${error})`;
+	}
+}
+
+function latestHostLogTail(directory: string): string {
+	try {
+		const latest = readdirSync(directory).filter((name) => name.endsWith(".log")).sort().at(-1);
+		return latest ? logTail(join(directory, latest)) : `${directory}: (no host log)`;
+	} catch (error) {
+		return `${directory}: (unavailable: ${error})`;
+	}
+}
+
 function killGroup(pid: number): void {
 	try {
 		process.kill(-pid, "SIGKILL");
@@ -254,6 +283,8 @@ export async function spawnOpencode1(
 	const { fixture, mockBaseURL } = options;
 	const cli = resolveOpenCode1CLI();
 	const configHome = fixture.env.OPENCODE1_CONFIG_HOME!;
+	const logLabel = options.logLabel ?? "v1";
+	const pluginLogPath = fixture.logPath(logLabel);
 	const env: NodeJS.ProcessEnv = {
 		PATH: process.env.PATH,
 		HOME: fixture.env.HOME,
@@ -270,7 +301,7 @@ export async function spawnOpencode1(
 		OPENCODE_DISABLE_PROJECT_CONFIG: "true",
 		OPENCODE_DISABLE_AUTOUPDATE: "true",
 		MAGIC_CONTEXT_STORAGE_DIR: fixture.storageDir,
-		MAGIC_CONTEXT_LOG_PATH: fixture.logPath(options.logLabel ?? "v1"),
+		MAGIC_CONTEXT_LOG_PATH: pluginLogPath,
 		MAGIC_CONTEXT_LOG_SYNC: "1",
 		ANTHROPIC_API_KEY: "mock-key-not-real",
 	};
@@ -404,6 +435,14 @@ export async function spawnOpencode1(
 			fixture,
 			stdout: () => stdout,
 			stderr: () => stderr,
+			withPromptDiagnostics: (prompt) =>
+				withOpenCode1PromptDiagnostics(prompt, () =>
+					[
+						describeOpenCode1Host(`${logLabel} ${url}`, child, stdout, stderr),
+						latestHostLogTail(join(fixture.env.XDG_DATA_HOME!, "opencode", "log")),
+						logTail(pluginLogPath),
+					].join("\n"),
+				),
 			stop,
 		};
 	} catch (error) {

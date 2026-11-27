@@ -18,6 +18,7 @@ import {
     type PromptDriver,
     SHARED_MOCK_MODEL_ID,
     SHARED_MOCK_PROVIDER_ID,
+    type SpawnedOpenCode1,
     spawnOpencode1,
 } from "../../src/opencode2-runner/conversion-lane";
 import { spawnOpencode2, waitForPluginActive } from "../../src/opencode2-runner/spawn";
@@ -642,27 +643,29 @@ beforeAll(async () => {
     const sessionId = created.data?.id;
     if (!sessionId) throw new Error("1.x session create returned no id");
 
-    const promptOn = (client: V1Client): PromptDriver =>
+    const promptOn = (host: SpawnedOpenCode1, client: V1Client): PromptDriver =>
         async (text, extraParts = []) => {
-            const result = await client.session.prompt({
-                path: { id: sessionId },
-                body: {
-                    model: { providerID: SHARED_MOCK_PROVIDER_ID, modelID: SHARED_MOCK_MODEL_ID },
-                    parts: [{ type: "text", text }, ...extraParts],
-                },
-            });
+            const result = await host.withPromptDiagnostics(() =>
+                client.session.prompt({
+                    path: { id: sessionId },
+                    body: {
+                        model: { providerID: SHARED_MOCK_PROVIDER_ID, modelID: SHARED_MOCK_MODEL_ID },
+                        parts: [{ type: "text", text }, ...extraParts],
+                    },
+                }),
+            );
             if (!result.data) {
                 const logs = readdirSync(fixture.root, { recursive: true })
                     .filter((path) => String(path).endsWith(".log"))
                     .map((path) => `${path}:\n${readFileSync(join(fixture.root, String(path)), "utf8").slice(-30000)}`)
                     .join("\n");
-                throw new Error(`1.x prompt failed: ${JSON.stringify(result.error)}\n${v1.stderr()}\n${logs}`);
+                throw new Error(`1.x prompt failed: ${JSON.stringify(result.error)}\n${host.stderr()}\n${logs}`);
             }
             if (result.data.info?.error) {
                 throw new Error(`1.x assistant error: ${JSON.stringify(result.data.info.error)}`);
             }
         };
-    const promptV1 = promptOn(v1Client);
+    const promptV1 = promptOn(v1, v1Client);
 
     const driveHistorian = async (
         prompt: PromptDriver,
@@ -1104,7 +1107,7 @@ beforeAll(async () => {
         if (!backStopped) await back.stop();
     });
     const backClient = sdk.createOpencodeClient({ baseUrl: back.url }) as unknown as V1Client;
-    const promptBack = promptOn(backClient);
+    const promptBack = promptOn(back, backClient);
 
     const backFirstRequest = mock.requests().length;
     await promptBack("first prompt back on the old host");
