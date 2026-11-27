@@ -1,11 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterAll, beforeAll, expect, it } from "bun:test";
-import {
-    createScenarioHarness,
-    forEachHost,
-    type ScenarioHarness,
-} from "../src/scenario-hosts";
+import { createScenarioHarness, forEachHost, type ScenarioHarness } from "../src/scenario-hosts";
 import { FOLD_SKIP_REASON } from "../src/rust-scenario-support";
 
 /**
@@ -45,8 +41,6 @@ import { FOLD_SKIP_REASON } from "../src/rust-scenario-support";
 // Historian system prompt marker, see compartment-prompt.ts.
 const HISTORIAN_SYSTEM_MARKER = "the hippocampus of a long-running coding agent";
 
-const HISTORIAN_DELAY_MS = 8_000;
-
 function isHistorianRequest(body: Record<string, unknown>): boolean {
     const system = body.system;
     if (system === undefined || system === null) return false;
@@ -68,9 +62,12 @@ forEachHost(import.meta.url, "slow historian vs fast main", (host) => {
     afterAll(async () => {
         await h.dispose();
     });
-    it(
-        "main turns stay responsive while historian hangs in background",
-        async () => {
+    it("main turns stay responsive while historian hangs in background", async () => {
+        let releaseHistorian!: () => void;
+        const until = new Promise<void>((resolve) => {
+            releaseHistorian = resolve;
+        });
+        try {
             // Historian: slow valid-shape response. We return an empty-compartments
             // payload so the historian wrapper doesn't throw on parse failure —
             // the exact contents don't matter for this test; we're only verifying
@@ -90,7 +87,7 @@ forEachHost(import.meta.url, "slow historian vs fast main", (host) => {
                         cache_creation_input_tokens: 500,
                         cache_read_input_tokens: 0,
                     },
-                    delayMs: HISTORIAN_DELAY_MS,
+                    until,
                 };
             });
 
@@ -140,7 +137,8 @@ forEachHost(import.meta.url, "slow historian vs fast main", (host) => {
             // turn 12 is dispatched.
 
             // Turn 12: transform fires the trigger, kicks off historian in
-            // background (non-blocking). The mock will hang historian for 8s.
+            // background (non-blocking). Keep its reply held through turn 14 so
+            // the later turns also test the in-flight path.
             // Keep usage here low so we don't accidentally trip the 95% blocking
             // path (BLOCK_UNTIL_DONE_PERCENTAGE).
             h.mock.setDefault({
@@ -184,17 +182,21 @@ forEachHost(import.meta.url, "slow historian vs fast main", (host) => {
                 { timeoutMs: 60_000, label: "main turn 12 request arrives at mock" },
             );
 
-            const mainRequestAtT12 = h.mock.requests().find(
-                (request) =>
-                    !isHistorianRequest(request.body) &&
-                    JSON.stringify(request.body).includes("turn 12:"),
-            );
+            const mainRequestAtT12 = h.mock
+                .requests()
+                .find(
+                    (request) =>
+                        !isHistorianRequest(request.body) &&
+                        JSON.stringify(request.body).includes("turn 12:"),
+                );
             expect(mainRequestAtT12).toBeDefined();
 
             if (process.env.MC_E2E_MODE === "rust") {
                 // The hermetic Broca producer is intentionally immediate, so this
                 // delay-ordering assertion remains limited to the mock-backed TS leg.
-                console.log(`[rust-e2e] slow-historian delay assertions SKIPPED: ${FOLD_SKIP_REASON}`);
+                console.log(
+                    `[rust-e2e] slow-historian delay assertions SKIPPED: ${FOLD_SKIP_REASON}`,
+                );
                 await turn12Promise;
                 return;
             }
@@ -218,16 +220,12 @@ forEachHost(import.meta.url, "slow historian vs fast main", (host) => {
             const historianReqCountAtT12 = h.mock
                 .requests()
                 .filter((r) => isHistorianRequest(r.body)).length;
-            expect(historianReqCountAtT12).toBeGreaterThanOrEqual(
-                historianReqCountBeforeT12,
-            );
+            expect(historianReqCountAtT12).toBeGreaterThanOrEqual(historianReqCountBeforeT12);
 
             // Now finish turn 12 and drive further turns for INVARIANT 2.
             await turn12Promise;
 
             // INVARIANT 2: no later historian request may overlap the first.
-            // On a slow host the 8s mock delay can finish before these turns, in
-            // which case a new historian run after that completion is legitimate.
             await h.sendPrompt(sessionId, "turn 13: additional turn while historian pending.");
             await h.sendPrompt(sessionId, "turn 14: more activity while historian pending.");
 
@@ -236,9 +234,7 @@ forEachHost(import.meta.url, "slow historian vs fast main", (host) => {
                 { timeoutMs: 10_000, label: "historian request captured" },
             );
 
-            const historianRequests = h.mock
-                .requests()
-                .filter((r) => isHistorianRequest(r.body));
+            const historianRequests = h.mock.requests().filter((r) => isHistorianRequest(r.body));
             const [firstHistorianRequest, ...laterHistorianRequests] = historianRequests;
             expect(firstHistorianRequest).toBeDefined();
             if (!firstHistorianRequest) {
@@ -259,11 +255,9 @@ forEachHost(import.meta.url, "slow historian vs fast main", (host) => {
 
             // INVARIANT 3: at least one historian request was captured.
             expect(historianRequests.length).toBeGreaterThanOrEqual(1);
-
-        },
-        // Bumped from 120s → 600s for CI: the test makes 12+ turns plus a slow
-        // historian with an 8s mock delay. On idle local hardware this runs in
-        // ~10s, but GitHub-hosted runners with CPU contention can take longer.
-        600_000,
-    );
+        } finally {
+            releaseHistorian();
+        }
+    }, // The setup sends 11 turns before exercising the overlap.
+    600_000);
 });
