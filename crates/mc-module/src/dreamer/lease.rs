@@ -323,7 +323,9 @@ pub fn monotonic_ms() -> u64 {
         // SAFETY: GetTickCount64 takes no arguments and returns the system's
         // tick count without accessing caller-owned memory.
         #[allow(unsafe_code)]
-        unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() }
+        unsafe {
+            windows_sys::Win32::System::SystemInformation::GetTickCount64()
+        }
     }
 }
 
