@@ -40,6 +40,8 @@ function contextDbPath(host: Host): string {
 
 export function readRows<T>(path: string, sql: string, ...params: unknown[]): T[] {
     const db = new Database(path, { readonly: true, fileMustExist: true });
+    // The host under test writes to this store; wait for its lock instead of failing.
+    db.exec("PRAGMA busy_timeout = 5000");
     try {
         return db.prepare(sql).all(...params) as T[];
     } finally {
@@ -165,6 +167,7 @@ export async function probe(s: Session, label: string) {
     const text = JSON.stringify(wire?.input ?? wire?.messages ?? []);
     const heads = [...text.matchAll(/History \d+-\d+/g)].map(match => match[0]);
     const db = new Database(contextDbPath(s.host), { readonly: true, fileMustExist: true });
+    db.exec("PRAGMA busy_timeout = 5000");
     const { droppedTags, stripped, hiddenSeam } = (() => {
         try {
             return {
