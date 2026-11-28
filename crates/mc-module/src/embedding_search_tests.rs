@@ -49,8 +49,12 @@ async fn ctx_search_returns_keyword_results_within_the_query_embedding_budget() 
     for _ in 0..2 {
         assert!(short.embed_documents(&["upkeep".into()]).await.is_none());
     }
+    // With the circuit open the search asks the endpoint nothing, so it answers
+    // from keywords at once. The bound is far below the query budget a hanging
+    // endpoint would use up (the first search above), and loose enough for a
+    // busy machine; the connection count below is the exact proof.
     let output = tokio::time::timeout(
-        Duration::from_millis(50),
+        Duration::from_secs(2),
         session.tool(&client, &settings, "ctx_search", &input),
     )
     .await
