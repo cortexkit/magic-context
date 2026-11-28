@@ -559,33 +559,13 @@ impl<'s, 'd> TitleFill<'s, 'd> {
     }
 }
 
-/// The title fill as it first was: the whole plan counted again for every
-/// title tried. [`fill_titles`] must choose exactly what this chooses.
+/// The plan as first written, kept for the tests to compare with:
+/// [`reference`].
 #[cfg(test)]
-pub(crate) fn fill_titles_reference(
-    summaries: &[Summary],
-    mut forms: Vec<u8>,
-    budget: f64,
-    costs: &mut impl Costs,
-    options: Options,
-) -> (Vec<u8>, Vec<Vec<usize>>, u64) {
-    let limit = options.limit(budget);
-    let (mut groups, mut total) = cost_within(summaries, &forms, costs, options, limit);
-    for index in (0..forms.len()).rev() {
-        if forms[index] != NOT_SHOWN {
-            continue;
-        }
-        forms[index] = TITLE;
-        let (with_title, with_total) = cost_within(summaries, &forms, costs, options, limit);
-        if with_total as f64 > budget {
-            forms[index] = NOT_SHOWN;
-            break;
-        }
-        (groups, total) = (with_title, with_total);
-    }
-    (forms, groups, total)
-}
-
+#[path = "line_reference.rs"]
+mod reference;
+#[cfg(test)]
+pub(crate) use reference::fill_titles_reference;
 /// The stretch factor the search settles on (`None` when everything fits in
 /// full), with its forms, total and day groups.
 fn search(
