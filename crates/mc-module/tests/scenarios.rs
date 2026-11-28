@@ -95,6 +95,8 @@ struct HostClient {
     child_started: Arc<tokio::sync::Notify>,
     /// Optional per-notice observations; a tool step delivers more than one notice.
     notice_log: Arc<Mutex<Option<Vec<NoticeTrace>>>>,
+    /// When the long-head scenario opts in, timestamp its notice processing.
+    long_head_started: Option<std::time::Instant>,
     runner_capabilities: Arc<mc_module::runner_capabilities::RunnerCapabilities>,
     describe: Arc<Mutex<Option<Result<Value, String>>>>,
 }
@@ -490,11 +492,27 @@ impl Provider for InProcess {
         } else {
             None
         };
+        let progress = self.client.long_head_started.map(|started| {
+            let now = std::time::Instant::now();
+            long_head_mark(Some(started), &format!("notice={} start", request.seq));
+            (started, now, request.seq)
+        });
         let session = &self.route.session;
         let module = self.module();
         let answer = module.notice(session, request).map_err(call_error)?;
         if answer == NoticeAnswer::Received {
             module.idle(session).await.map_err(call_error)?;
+        }
+        if let Some((started, notice, seq)) = progress {
+            long_head_mark(
+                Some(started),
+                &format!(
+                    "notice={seq} done notice_ms={}",
+                    notice.elapsed().as_millis()
+                ),
+            );
+            #[cfg(feature = "context-db-timing")]
+            log_long_head_context_cost(seq, module.take_context_lock_samples());
         }
         if let Some((seq, percentage)) = observation {
             let child_runs = self.client.host().unwrap().child_runs().len();
@@ -4127,10 +4145,25 @@ async fn a_long_head_session_keeps_ck_mcs_index_window_sized() {
     // next rebuild, once usage reaches the threshold every eight turns or
     // so, and each cuts the messages they cover. After a restart, ck-mc reads
     // only what the model still sees, however long the session has run.
+    let progress = std::env::var_os("MC_LONG_HEAD_TIMING").map(|_| std::time::Instant::now());
+    long_head_mark(progress, "setup start");
     let dir = scratch("long-head");
     let mut session = config("head", Kind::OpenAi, free());
     session.cache_ttl_ms = 24 * 3_600_000;
-    let mut runner = start_full(session, Settings::default(), Some(dir.clone())).await;
+    let client = HostClient {
+        long_head_started: progress,
+        ..HostClient::default()
+    };
+    let mut runner = start_with_client(
+        client,
+        session,
+        Settings::default(),
+        Some(dir.clone()),
+        false,
+        |_| {},
+    )
+    .await;
+    long_head_mark(progress, "setup done; 40 rounds start");
     let small_turn = |prompt: &str| {
         vec![
             user(prompt),
@@ -4145,11 +4178,14 @@ async fn a_long_head_session_keeps_ck_mcs_index_window_sized() {
         steps.push(Step::Wait { ms: 15 * 60_000 });
     }
     runner.play(&steps).await;
+    long_head_mark(progress, "40 rounds done");
     assert_clean(&runner);
     let total = runner.host().entries().len();
     assert!(total >= 160, "{total}");
     runner.provider().client.reads.lock().unwrap().clear();
+    long_head_mark(progress, "restart start");
     runner.provider().restart();
+    long_head_mark(progress, "restart done; last turn start");
     runner.play(&small_turn("One more.")).await;
     assert_clean(&runner);
     let read: usize = runner
@@ -4163,6 +4199,41 @@ async fn a_long_head_session_keeps_ck_mcs_index_window_sized() {
         .sum();
     assert!(read > 0 && read <= 48, "read {read} of {total} entries");
     let _ = std::fs::remove_dir_all(&dir);
+    long_head_mark(progress, "assertions done; scratch cleanup attempted");
+}
+
+fn long_head_mark(started: Option<std::time::Instant>, phase: &str) {
+    if let Some(started) = started {
+        eprintln!(
+            "long-head elapsed_ms={} {phase}",
+            started.elapsed().as_millis()
+        );
+    }
+}
+
+#[cfg(feature = "context-db-timing")]
+fn log_long_head_context_cost(seq: u64, samples: Vec<mc_module::context_db::timing::Sample>) {
+    let mut writes = 0;
+    let mut write_hold = std::time::Duration::ZERO;
+    let mut longest = std::time::Duration::ZERO;
+    let mut longest_site = None;
+    for sample in &samples {
+        if sample.wrote {
+            writes += 1;
+            write_hold += sample.elapsed;
+            if sample.elapsed > longest {
+                longest = sample.elapsed;
+                longest_site = Some(sample.site);
+            }
+        }
+    }
+    eprintln!(
+        "long-head notice={seq} context_guard_calls={} write_guards={writes} write_hold_sum_ms={:.3} write_hold_max_ms={:.3} longest_site={}",
+        samples.len(),
+        write_hold.as_secs_f64() * 1000.0,
+        longest.as_secs_f64() * 1000.0,
+        longest_site.map_or_else(|| "none".into(), |site| site.to_string())
+    );
 }
 
 /// A summary the standalone plugin stored for session `session`, covering
