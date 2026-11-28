@@ -271,6 +271,7 @@ fn a_summary_whose_times_were_not_saved_takes_the_approximation_warm_and_cold() 
     restored.fold_due = true;
     build(&mut restored, &settings);
     assert_eq!(shown(&restored, head::M0_ID), warm);
+    drop((session, restored, store));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -342,6 +343,7 @@ fn a_boundary_without_a_time_takes_the_nearest_timed_message() {
     assert!(rows
         .iter()
         .all(|row| row.start_date.is_none() && row.end_date.is_none()));
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 
     // Before the session's first timed message: the next later one.
@@ -357,6 +359,7 @@ fn a_boundary_without_a_time_takes_the_nearest_timed_message() {
     ] {
         assert!(m0.contains(heading), "{heading}: {m0}");
     }
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 
     // No timed message anywhere: no date.
@@ -365,6 +368,7 @@ fn a_boundary_without_a_time_takes_the_nearest_timed_message() {
     build(&mut session, &settings).unwrap();
     let m0 = shown(&session, head::M0_ID);
     assert!(m0.contains("## 1-4 · Work 1"), "{m0}");
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -391,6 +395,7 @@ fn a_day_m1_showed_gives_way_to_the_stores_at_a_fold_and_stays() {
     session.fold_due = true;
     build(&mut session, &settings);
     assert_eq!(shown(&session, head::M0_ID), m0);
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -418,6 +423,7 @@ fn days_from_the_nearest_message_wait_for_a_fold() {
     let m0 = shown(&session, head::M0_ID);
     assert!(m0.contains("## 1-4 · 2026-03-01 · Work 1"), "{m0}");
     assert!(m0.contains("## 5-8 · 2026-03-02 · Work 2"), "{m0}");
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -466,6 +472,7 @@ fn nearest_message_dating_time() {
     };
     timed("first fold after a start");
     timed("later fold");
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -491,6 +498,7 @@ fn an_approximated_day_follows_the_stores_at_every_full_rebuild() {
     restored.fold_due = true;
     build(&mut restored, &settings);
     assert_eq!(shown(&restored, head::M0_ID), warm);
+    drop((session, restored));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -607,5 +615,6 @@ fn a_failed_save_at_a_cut_moves_a_day_to_the_nearest_message_once() {
     build(&mut session, &settings);
     assert_eq!(shown(&session, head::M0_ID), warm.0);
     assert!(saved_times(&dir).is_empty());
+    drop((session, cold, conn));
     std::fs::remove_dir_all(dir).unwrap();
 }

@@ -106,6 +106,7 @@ async fn numbers_review_the_summary_due_before_any_view_can_reach_a_floor_the_su
         4
     );
     assert!(run.force_keep_last_compartment);
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
