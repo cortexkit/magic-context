@@ -15,7 +15,7 @@ import {
 // indexing after a completed reply, embeddings), so that write can meet a
 // held write lock. Seen on a real OpenCode host: with a second connection
 // holding the lock for 30 ms right after the `/ctx-flush` reply completed, the
-// write failed with "database is locked" and the rebuild's row was never
+// write failed with "database is locked" and the flush pass's decision row was never
 // written.
 
 const SESSION = "ses-decision-write-retry";
