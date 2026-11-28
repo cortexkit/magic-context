@@ -27,9 +27,10 @@ pub(crate) fn has_carried_parts(entry: &Entry) -> bool {
     carried_parts(entry).next().is_some()
 }
 
-/// A row whose parts are all left out is absent from the request. A runner
-/// can also open a genuinely empty row, which reasoning cleanup still treats
-/// as a step.
+/// A row whose parts are all left out is absent from the request. A row
+/// with no parts at all is different: a runner opens one when a model step
+/// starts, so it is in the request and still counts as one step, for
+/// example when old reasoning is cleared by step age.
 pub(crate) fn is_absent_from_request(entry: &Entry) -> bool {
     omitted_only(entry, || has_carried_parts(entry))
 }
