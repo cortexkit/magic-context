@@ -200,7 +200,9 @@ impl Record {
                     Some(
                         if matches!(
                             error,
-                            SummaryError::Failed(_) | SummaryError::PaidThenWait { .. }
+                            SummaryError::Failed(_)
+                                | SummaryError::RunFailed(_)
+                                | SummaryError::PaidThenWait { .. }
                         ) {
                             run.requests
                                 .last()
@@ -312,6 +314,7 @@ pub(crate) fn summary_error_class(error: &SummaryError) -> &'static str {
         SummaryError::AccountWait(_) => "account_wait",
         SummaryError::NeverRan(_) => "never_ran",
         SummaryError::Uncertain(_) => "unconfirmed",
+        SummaryError::RunFailed(_) => "provider_error",
         SummaryError::Failed(message) | SummaryError::PaidThenWait { error: message, .. } => {
             if message.starts_with("prompt_over_window:") {
                 "prompt_over_window"

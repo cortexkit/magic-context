@@ -2529,6 +2529,7 @@ const TEMPLATE_DATA = [
 "channel2 delivery wrapper failed (ignored):",
 "channel2 fold-cycle reset failed (ignored):",
 "channel2 U-collapse reset failed (ignored):",
+"ck-mc: a child run ended without completing",
 "ck-mc: bus: published docs proposal notices",
 "ck-mc: bus: retired the previous connection",
 "ck-mc: dreamer: scheduling a project failed",

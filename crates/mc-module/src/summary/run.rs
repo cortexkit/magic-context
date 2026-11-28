@@ -487,6 +487,9 @@ pub enum SummaryError {
     PaidThenWait { error: String, wait: AccountWait },
     /// Any other failure, as text.
     Failed(String),
+    /// A runner ending whose provider message and reason must stay separate
+    /// until the caller has decided whether to retry.
+    RunFailed(RunFailure),
 }
 
 impl std::fmt::Display for SummaryError {
@@ -503,7 +506,53 @@ impl std::fmt::Display for SummaryError {
             Self::Failed(error) | Self::Uncertain(error) | Self::PaidThenWait { error, .. } => {
                 f.write_str(error)
             }
+            Self::RunFailed(error) => error.fmt(f),
         }
+    }
+}
+
+impl SummaryError {
+    /// The error text used to decide whether to retry or defer a request.
+    /// A runner's reason is diagnostic only; only the provider message can
+    /// supply a retry keyword or a request-refusal code.
+    pub(crate) fn failure_policy_text(&self) -> Option<std::borrow::Cow<'_, str>> {
+        match self {
+            Self::Failed(error) | Self::PaidThenWait { error, .. } => Some(error.as_str().into()),
+            Self::RunFailed(error) => {
+                Some(format!("the run ended {}: {}", error.state, error.message).into())
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn retryable(&self) -> bool {
+        !matches!(self, Self::PaidThenWait { .. })
+            && self
+                .failure_policy_text()
+                .is_some_and(|error| retryable(&error))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunFailure {
+    state: String,
+    message: String,
+    reason: Option<String>,
+}
+
+impl RunFailure {
+    fn detail(&self) -> std::borrow::Cow<'_, str> {
+        match (self.message.is_empty(), self.reason.as_deref()) {
+            (true, reason) => reason.unwrap_or("no reason given").into(),
+            (false, Some(reason)) => format!("{} (reason: {reason})", self.message).into(),
+            (false, None) => self.message.as_str().into(),
+        }
+    }
+}
+
+impl std::fmt::Display for RunFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the run ended {}: {}", self.state, self.detail())
     }
 }
 
@@ -543,6 +592,7 @@ impl From<SummaryError> for Failure {
             SummaryError::AccountWait(wait) => Self::AccountWait(wait),
             SummaryError::NeverRan(wait) => Self::NeverRan(wait),
             SummaryError::Failed(error) => Self::Failed(error),
+            SummaryError::RunFailed(error) => Self::Failed(error.to_string()),
             SummaryError::Uncertain(error) => Self::Uncertain(error),
             SummaryError::PaidThenWait { error, wait } => Self::PaidThenWait { error, wait },
         }
@@ -913,9 +963,7 @@ async fn attempt<C: RunnerClient>(
                 tokio::time::sleep(backoff(retry).max(floor).min(remaining)).await;
                 retry += 1;
             }
-            Err(CallError::Summary(SummaryError::Failed(error)))
-                if retry < MAX_RETRIES && retryable(&error) =>
-            {
+            Err(CallError::Summary(error)) if retry < MAX_RETRIES && error.retryable() => {
                 let remaining = call_on
                     .deadline
                     .saturating_duration_since(tokio::time::Instant::now());
@@ -945,7 +993,9 @@ async fn attempt<C: RunnerClient>(
             }
             // The child names the run to the runner's owner, who can match it
             // against the runner's own records.
-            Err(CallError::Summary(SummaryError::Failed(error))) => {
+            Err(CallError::Summary(
+                error @ (SummaryError::Failed(_) | SummaryError::RunFailed(_)),
+            )) => {
                 return Err(Failure::Failed(format!(
                     "{error} (child {})",
                     child.session.session
@@ -960,7 +1010,7 @@ async fn attempt<C: RunnerClient>(
                 return Err(wait_after_retry(paid_failure, wait, true))
             }
             Err(CallError::HostRefused(error)) => {
-                return Err(Failure::HostRefused(error));
+                return Err(Failure::HostRefused(error.to_string()));
             }
             Err(CallError::Summary(error)) => return Err(error.into()),
         }
@@ -1071,19 +1121,16 @@ pub(crate) struct Ended {
     /// can end this way.
     pub step_capped: bool,
     /// For a run stopped at its step limit, the failure [`Ended::completed`]
-    /// reports; empty for a completed run.
-    failure: String,
+    /// reports; absent for a completed run.
+    failure: Option<RunFailure>,
 }
 
 impl Ended {
     /// The reply of a run that completed. A run stopped at its step limit
     /// is the failure every caller saw before such runs were told apart.
-    pub(crate) fn completed(self) -> Result<Reply, String> {
-        if self.step_capped {
-            Err(self.failure)
-        } else {
-            Ok(self.reply)
-        }
+    pub(crate) fn completed(self) -> Result<Reply, SummaryError> {
+        self.failure
+            .map_or(Ok(self.reply), |error| Err(SummaryError::RunFailed(error)))
     }
 }
 
@@ -1092,7 +1139,7 @@ impl Ended {
 #[derive(Debug)]
 enum CallError {
     Summary(SummaryError),
-    HostRefused(String),
+    HostRefused(SummaryError),
     RetryAt { next_ms: u64, error: String },
 }
 
@@ -1131,9 +1178,12 @@ pub(crate) async fn send_and_wait<C: RunnerClient>(
     usage: &mut Option<StepUsage>,
 ) -> Result<Reply, SummaryError> {
     send_and_wait_stepped(client, child, send_id, prompt, how, usage)
-        .await?
-        .completed()
-        .map_err(SummaryError::from)
+        .await
+        .and_then(Ended::completed)
+        .map_err(|error| match error {
+            SummaryError::RunFailed(error) => SummaryError::Failed(error.to_string()),
+            error => error,
+        })
 }
 
 /// [`send_and_wait`], with a run stopped at its step limit returned as
@@ -1191,7 +1241,7 @@ async fn send_and_wait_with_usage<C: RunnerClient>(
     match send_and_wait_inner(client, child, send_id, prompt, how, usage, reported).await {
         Ok(reply) => Ok(reply),
         Err(CallError::Summary(error)) => Err(error),
-        Err(CallError::HostRefused(error)) => Err(SummaryError::Failed(error)),
+        Err(CallError::HostRefused(error)) => Err(error),
         Err(CallError::RetryAt { next_ms, .. }) => Err(SummaryError::AccountWait(
             AccountWait::retry_at(next_ms, how.send, now_ms()),
         )),
@@ -1353,10 +1403,13 @@ async fn send_and_wait_inner<C: RunnerClient>(
             // same refusal forever.
             if reply.reason.as_deref() == Some(cortexkit_role_llm_runner::send::REASON_HOST_REFUSED)
             {
-                return Err(CallError::HostRefused(format!(
-                    "the host refused the {} send; it is not resent (host_refused)",
-                    how.send.name()
-                )));
+                return Err(CallError::HostRefused(
+                    format!(
+                        "the host refused the {} send; it is not resent (host_refused)",
+                        how.send.name()
+                    )
+                    .into(),
+                ));
             }
             // Every other reason, including a future one, proves final
             // non-delivery. Only that proof permits a new id; an unknown
@@ -1463,19 +1516,44 @@ async fn send_and_wait_inner<C: RunnerClient>(
             }
             return Err(SummaryError::AccountWait(wait).into());
         }
-        let error = result
-            .error
-            .as_ref()
-            .map_or_else(String::new, |error| error.message.clone());
+        let failure = RunFailure {
+            state: result.state.clone(),
+            message: result
+                .error
+                .as_ref()
+                .map_or_else(String::new, |error| error.message.clone()),
+            reason: result
+                .reason
+                .as_ref()
+                .filter(|reason| !reason.is_empty())
+                .cloned(),
+        };
+        if let Some(reason) = failure
+            .reason
+            .as_deref()
+            .or_else(|| failure.message.is_empty().then_some("no reason given"))
+        {
+            tracing::info!(
+                session = %child.session.session,
+                %run_id,
+                state = %failure.state,
+                %reason,
+                "ck-mc: a child run ended without completing"
+            );
+        }
         if let Some(next_ms) = caller_next_ms(&result).filter(|_| {
             result
                 .error
                 .as_ref()
                 .is_some_and(|error| error.provider_code == "transient")
         }) {
+            let error = if failure.message.is_empty() {
+                failure.to_string()
+            } else {
+                failure.detail().into_owned()
+            };
             return Err(CallError::RetryAt { next_ms, error });
         }
-        let failure = format!("the run ended {}: {error}", result.state);
         if result.state == states::ERROR
             && result
                 .error
@@ -1485,7 +1563,7 @@ async fn send_and_wait_inner<C: RunnerClient>(
             if let Some(observed) = reported {
                 observed.never_delivered = true;
             }
-            return Err(CallError::HostRefused(failure));
+            return Err(CallError::HostRefused(SummaryError::RunFailed(failure)));
         }
         if result.state == states::MAX_STEPS {
             return Ok(Ended {
@@ -1498,10 +1576,10 @@ async fn send_and_wait_inner<C: RunnerClient>(
                         .unwrap_or_default(),
                 },
                 step_capped: true,
-                failure,
+                failure: Some(failure),
             });
         }
-        return Err(failure.into());
+        return Err(SummaryError::RunFailed(failure).into());
     }
     Ok(Ended {
         reply: Reply {
@@ -1513,7 +1591,7 @@ async fn send_and_wait_inner<C: RunnerClient>(
                 .unwrap_or_default(),
         },
         step_capped: false,
-        failure: String::new(),
+        failure: None,
     })
 }
 

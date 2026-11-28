@@ -974,6 +974,39 @@ async fn incomplete_lab_keeps_accepted_calls_and_lists_missing_ids() {
 }
 
 #[tokio::test]
+async fn interrupted_run_reason_reaches_the_lab_artifact() {
+    for (answer, expected) in [
+        (
+            r#"{"run_id":"run","state":"interrupted","reason":"runner_shutdown"}"#,
+            "runner_shutdown",
+        ),
+        (
+            r#"{"run_id":"run","state":"interrupted"}"#,
+            "no reason given",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let result = serde_json::from_str(answer).unwrap();
+        let (_, log) = crate::test_log::logged_async(
+            fixture.run(fixture.spec_value(), Ends::Result(Box::new(result))),
+        )
+        .await;
+        let recorded = fixture.output("run.json");
+        assert_eq!(recorded["stop"], "error");
+        assert_eq!(
+            recorded["error"],
+            format!("the run ended interrupted: {expected}")
+        );
+        assert!(
+            log.lines()
+                .any(|line| line.contains("a child run ended without completing")
+                    && line.contains(expected)),
+            "{log}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn undefined_persona_name_refuses_before_sending_to_model() {
     let fixture = Fixture::new();
     fs::write(

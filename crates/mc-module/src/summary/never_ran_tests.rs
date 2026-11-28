@@ -223,6 +223,75 @@ async fn direct(client: &Client, send: SendKind) -> Result<Reply, SummaryError> 
     .await
 }
 
+#[tokio::test(start_paused = true)]
+async fn interrupted_run_reason_reaches_the_summarizer_error() {
+    for (answer, expected) in [
+        (
+            r#"{"run_id":"run","state":"interrupted","reason":"runner_shutdown"}"#,
+            "runner_shutdown",
+        ),
+        (
+            r#"{"run_id":"run","state":"interrupted"}"#,
+            "no reason given",
+        ),
+    ] {
+        let result = serde_json::from_str(answer).unwrap();
+        let client = Client::new(vec![active()], vec![result]);
+        let (result, log) = crate::test_log::logged_async(direct(&client, SendKind::TurnOne)).await;
+        let Err(error) = result else {
+            panic!("interrupted run unexpectedly replied")
+        };
+        assert!(
+            matches!(error, SummaryError::Failed(ref message) if *message == format!("the run ended interrupted: {expected}")),
+            "{error}"
+        );
+        assert!(
+            log.lines()
+                .any(|line| line.contains("a child run ended without completing")
+                    && line.contains(expected)),
+            "{log}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_reason_does_not_change_summarizer_retry() {
+    for reason in [
+        None,
+        Some("timeout"),
+        Some("rate_limit_429"),
+        Some("runner_shutdown"),
+    ] {
+        let mut result = RunResult::new("run", states::ERROR);
+        result.reason = reason.map(str::to_owned);
+        let client = Client::new(
+            vec![active()],
+            vec![
+                result,
+                handover("nothing_written"),
+                handover("nothing_written"),
+                handover("nothing_written"),
+            ],
+        );
+        let Err(error) = run(&client, None, &account_wait_send_tests::job()).await else {
+            panic!("the first route should fail without a same-route retry");
+        };
+        assert_eq!(
+            *client.reports.lock().unwrap(),
+            [Outcome::Failed, Outcome::Cancelled]
+        );
+        let sends = client.sends.lock().unwrap();
+        assert_ne!(sends[0].1.route_decision_id, sends[1].1.route_decision_id);
+        assert!(
+            error.to_string().contains(&format!(
+                "the run ended error: {}",
+                reason.unwrap_or("no reason given")
+            )),
+            "{error}"
+        );
+    }
+}
+
 #[test]
 fn never_ran_published_vector_bytes_match_the_pinned_hash() {
     use sha2::{Digest, Sha256};

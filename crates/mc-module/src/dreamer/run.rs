@@ -41,8 +41,8 @@ use crate::routing::{self, DreamDemand, Router, DREAM_OUTPUT_TOKENS};
 use crate::summary::account_wait::{AccountWait, Reselect, SendKind};
 use crate::summary::fit::Window;
 use crate::summary::run::{
-    backoff, now_ms, retryable, send_and_wait_recorded, send_and_wait_stepped, Ended, Model,
-    PlanRun, Reply, SummaryError, MAX_RETRIES,
+    backoff, now_ms, send_and_wait_recorded, send_and_wait_stepped, Ended, Model, PlanRun, Reply,
+    SummaryError, MAX_RETRIES,
 };
 
 /// How long one task run may take, retries and fallbacks included.
@@ -188,7 +188,10 @@ pub(super) fn usage_tokens(usage: Option<&StepUsage>) -> (u64, u64) {
 }
 
 enum AttemptError {
-    Failed(String),
+    Failed {
+        error: String,
+        request_specific: bool,
+    },
     Wait(AccountWait),
 }
 
@@ -574,10 +577,11 @@ async fn run_inner<C: RunnerClient + Router>(
                 }
                 Err(error) => {
                     report(Outcome::Failed, &reports).await;
-                    let error = error.to_string();
                     return Err(TaskError::Failed {
-                        request_specific: request_refusal(&error),
-                        error,
+                        request_specific: error
+                            .failure_policy_text()
+                            .is_some_and(|text| request_refusal(&text)),
+                        error: error.to_string(),
                         usage: used,
                         unusable_reply,
                     });
@@ -662,16 +666,19 @@ async fn run_inner<C: RunnerClient + Router>(
                 }
                 // Any other task takes a run stopped at its step limit as
                 // the failure it always was.
-                (Ok(ended), _) => ended.completed().map_err(SummaryError::from),
+                (Ok(ended), _) => ended.completed(),
                 (Err(error), _) => Err(error),
             };
             match sent {
                 Ok(reply) if reply.length_capped => {
                     unusable_reply = true;
-                    break Err(AttemptError::Failed(format!(
-                        "the reply hit its output limit (child {})",
-                        child.session.session
-                    )));
+                    break Err(AttemptError::Failed {
+                        error: format!(
+                            "the reply hit its output limit (child {})",
+                            child.session.session
+                        ),
+                        request_specific: false,
+                    });
                 }
                 Ok(reply) => match task.accepts(&reply.text) {
                     Ok(()) => {
@@ -686,16 +693,19 @@ async fn run_inner<C: RunnerClient + Router>(
                     }
                     Err(problem) => {
                         unusable_reply = true;
-                        break Err(AttemptError::Failed(format!(
-                            "the reply can't be used: {problem} (child {})",
-                            child.session.session
-                        )));
+                        break Err(AttemptError::Failed {
+                            error: format!(
+                                "the reply can't be used: {problem} (child {})",
+                                child.session.session
+                            ),
+                            request_specific: false,
+                        });
                     }
                 },
                 Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => {
                     break Err(AttemptError::Wait(wait));
                 }
-                Err(SummaryError::Failed(error)) if retry < MAX_RETRIES && retryable(&error) => {
+                Err(error) if retry < MAX_RETRIES && error.retryable() => {
                     let used = batch_usage(usage);
                     if budget_spent(job.remaining_tokens, used) {
                         report(Outcome::Failed, &reports).await;
@@ -714,11 +724,19 @@ async fn run_inner<C: RunnerClient + Router>(
                         request_specific: false,
                     });
                 }
-                Err(SummaryError::Failed(error) | SummaryError::PaidThenWait { error, .. }) => {
-                    break Err(AttemptError::Failed(format!(
-                        "{error} (child {})",
-                        child.session.session
-                    )))
+                Err(
+                    error @ (SummaryError::Failed(_)
+                    | SummaryError::PaidThenWait { .. }
+                    | SummaryError::RunFailed(_)),
+                ) => {
+                    let suffix = format!(" (child {})", child.session.session);
+                    let request_specific = error
+                        .failure_policy_text()
+                        .is_some_and(|text| request_refusal(&format!("{text}{suffix}")));
+                    break Err(AttemptError::Failed {
+                        error: format!("{error}{suffix}"),
+                        request_specific,
+                    });
                 }
             }
         };
@@ -728,8 +746,11 @@ async fn run_inner<C: RunnerClient + Router>(
                 reply.usage = batch_usage(reply.usage);
                 return Ok(reply);
             }
-            Err(AttemptError::Failed(error)) => {
-                only_request_failures &= request_refusal(&error);
+            Err(AttemptError::Failed {
+                error,
+                request_specific,
+            }) => {
+                only_request_failures &= request_specific;
                 report(Outcome::Failed, &reports).await;
                 total = batch_usage(usage);
                 paid_failure = Some(error);
@@ -864,11 +885,7 @@ async fn finalize<C: RunnerClient>(
             Ok((reply, usable))
         }
         Err(SummaryError::AccountWait(wait) | SummaryError::NeverRan(wait)) => Err(wait),
-        Err(
-            SummaryError::Failed(error)
-            | SummaryError::Uncertain(error)
-            | SummaryError::PaidThenWait { error, .. },
-        ) => Ok((
+        Err(error) => Ok((
             Reply {
                 text: String::new(),
                 length_capped: false,

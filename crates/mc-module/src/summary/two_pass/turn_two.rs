@@ -334,7 +334,7 @@ impl Carrier {
                 &mut observed,
             )
             .await
-            .and_then(|ended| ended.completed().map_err(SummaryError::from));
+            .and_then(|ended| ended.completed());
             let error = match &result {
                 Ok(reply) if reply.length_capped => Some("output_limit"),
                 Ok(_) => None,

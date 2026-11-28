@@ -29,6 +29,7 @@ pub(crate) enum Ends {
     /// step asked for a tool call the limit cut off.
     StepCapped(u64),
     Error(&'static str),
+    Result(Box<RunResult>),
     /// Ends with routing's full capacity (`concurrency_full`) until this
     /// reset, the way an llm-runner 0.8.51 runner ends a queued run.
     Full(u64),
@@ -305,6 +306,7 @@ impl RunnerClient for Client {
             .pop_front()
             .expect("a scripted run end");
         Ok(match ends {
+            Ends::Result(result) => *result,
             Ends::Reply(text) => completed(text, None),
             Ends::Spent(text, tokens) => {
                 let mut result = completed(text, None);
@@ -529,6 +531,68 @@ fn job() -> TaskRun<'static> {
         reader: None,
         remaining_tokens: u64::MAX,
         attribution: None,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn interrupted_run_reason_reaches_the_nightly_task_error() {
+    for reason in [Some("runner_shutdown"), None] {
+        let mut answer = json!({"run_id": "run", "state": "interrupted"});
+        if let Some(reason) = reason {
+            answer["reason"] = json!(reason);
+        }
+        let result = serde_json::from_value(answer).unwrap();
+        let client = Client::new(&["p/a"], &[Ends::Result(Box::new(result))]);
+        let task = Task { fits: true };
+        let job = job();
+        let (result, log) = crate::test_log::logged_async(run(&client, &job, &task)).await;
+        let expected = reason.unwrap_or("no reason given");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            format!("the run ended interrupted: {expected} (child mc-dream:17:0.0)")
+        );
+        assert!(
+            log.lines()
+                .any(|line| line.contains("a child run ended without completing")
+                    && line.contains(expected)),
+            "{log}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_reason_does_not_change_nightly_retry_or_request_refusal() {
+    for reason in [
+        None,
+        Some("timeout"),
+        Some("rate_limit_429"),
+        Some("runner_shutdown"),
+        Some("invalid_request_error: prompt refused"),
+    ] {
+        let mut result = RunResult::new("run", states::ERROR);
+        result.reason = reason.map(str::to_owned);
+        let client = Client::new(&["p/a"], &[Ends::Result(Box::new(result))]);
+        let error = run(&client, &job(), &Task { fits: true })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                TaskError::Failed {
+                    request_specific: false,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(client.children().len(), 1);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the run ended error: {} (child mc-dream:17:0.0)",
+                reason.unwrap_or("no reason given")
+            )
+        );
     }
 }
 
@@ -1151,7 +1215,7 @@ async fn a_run_ended_at_its_step_limit_is_a_failure_or_a_capped_run_by_caller() 
         .err()
         .expect("a run stopped at its step limit fails a caller that takes none");
     assert!(
-        matches!(&error, SummaryError::Failed(reason) if reason == "the run ended max_steps: "),
+        matches!(&error, SummaryError::Failed(reason) if reason == "the run ended max_steps: no reason given"),
         "{error}"
     );
     // Its tokens still count.
@@ -1164,7 +1228,11 @@ async fn a_run_ended_at_its_step_limit_is_a_failure_or_a_capped_run_by_caller() 
     assert_eq!(ended.reply.steps, Some(7));
     assert!(!ended.reply.length_capped);
     assert_eq!(
-        ended.completed().err().as_deref(),
-        Some("the run ended max_steps: ")
+        ended
+            .completed()
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+        Some("the run ended max_steps: no reason given")
     );
 }
