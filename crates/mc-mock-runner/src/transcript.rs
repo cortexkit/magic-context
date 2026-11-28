@@ -144,11 +144,12 @@ impl Transcript {
             .into_iter()
             .enumerate()
             .map(|(index, (seal, body))| {
-                let tag = is_numbered(&role, &body).then(|| {
+                let mut part = part(format!("{mid}:p{index}"), None, seal, body);
+                part.tag = is_numbered(&role, &part).then(|| {
                     next_tag += 1;
                     next_tag - 1
                 });
-                part(format!("{mid}:p{index}"), tag, seal, body)
+                part
             })
             .collect();
         let mut entry = Entry::new(self.entries.len() as u64 + 1, mid, role, written_at, parts);
