@@ -307,8 +307,10 @@ pub(crate) fn plan(
         floor: &floor_scores,
     };
     let mut chosen = search(summaries, ranked, budget, costs, options);
-    // The search ends over the budget only when nothing fits at any
-    // stretch, so at the smallest.
+    // The search ends over the budget only when it ended at the smallest
+    // stretch, which it never tries, and that plan is over. A wider stretch
+    // could still fit: forms of one summary need not cost less the shorter
+    // they are, so the total need not grow with the stretch.
     if chosen.2 as f64 > budget {
         let (forms, groups, total) = step_down(summaries, chosen.1, budget, costs, options);
         chosen = (chosen.0, forms, total, groups);

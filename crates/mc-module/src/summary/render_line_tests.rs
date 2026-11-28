@@ -1083,11 +1083,77 @@ fn past_the_plan_cap_the_oldest_steps_down_until_the_body_fits() {
         rendered.text
     );
     assert!(!rendered.items.is_empty());
-    // What is left is the newest of what the last plan showed.
-    let oldest_left = rendered.items.iter().map(|item| item.0).min().unwrap();
-    assert!(rendered.plan.forms[..oldest_left]
-        .iter()
-        .all(|&form| form == NOT_SHOWN));
+    // The steps took the oldest first: what is left is the two newest
+    // summaries, each a section of its own.
+    let left: Vec<usize> = rendered.items.iter().map(|item| item.0).collect();
+    assert_eq!(left, [298, 299]);
+}
+
+/// Rows with mixed scripts, uneven forms, days that change every seven rows
+/// and are missing for one week in four, and most scores at 1.
+fn uneven_rows(count: usize, style: usize) -> Vec<DecayRenderCompartment> {
+    (0..count)
+        .map(|i| {
+            let day = ["2026-11-01", "2026-11-02"][i / 7 % 2].to_owned();
+            let dates = if i / 7 % 4 == 3 { None } else { Some(day) };
+            let start_message = (5 * i + 1) as i64;
+            let word = [
+                "data path ",
+                "見える文章 ",
+                "🔍 store ",
+                " </debug> ",
+                " FOO_; ",
+                "μ = \"x\" ",
+            ][i % 6];
+            let tail = [
+                " ordinary", "···", "。", "///", "}", "\"", "!", ">", "</tag>",
+            ][i % 9];
+            DecayRenderCompartment {
+                start_message,
+                end_message: start_message + 4,
+                title: format!("Work {style} {i}{}{tail}", word.repeat((i + style) % 5)),
+                content: String::new(),
+                start_date: dates.clone(),
+                end_date: dates,
+                p1: Some(word.repeat((i + 3) % 31 + 70) + tail),
+                p2: Some(word.repeat((7 * i + style) % 19 + 30) + tail),
+                p3: Some(word.repeat((11 * i + style) % 14 + 10) + tail),
+                p4: Some(word.repeat((17 * i + style) % 9 + 3) + tail),
+                importance: Some(if i % 8 < 5 {
+                    1
+                } else {
+                    70 + ((i * 11 + style) % 30) as i32
+                }),
+                legacy: Some(0),
+            }
+        })
+        .collect()
+}
+
+/// Past the plan cap, the oldest summary steps down first: when no three
+/// sections fit once joined, the two newest are what is left.
+#[test]
+fn past_the_plan_cap_the_newest_two_sections_are_left() {
+    let rows = uneven_rows(120, 8);
+    let options = super::line::Options {
+        fill: true,
+        reference_scale: false,
+        day_headers: false,
+        ..Default::default()
+    };
+    let budget = 900;
+    let count = |text: &str| {
+        if text.matches("\n\n").count() >= 2 {
+            budget + 1
+        } else {
+            text.chars().count().div_ceil(4)
+        }
+    };
+    let rendered = render_history_with(&rows, budget as f64, count, options);
+    assert_eq!(rendered.plans, BODY_PLANS);
+    assert!(count(&rendered.text) <= budget);
+    let left: Vec<usize> = rendered.items.iter().map(|item| item.0).collect();
+    assert_eq!(left, [118, 119]);
 }
 
 /// What the title fill costs at its worst, with the exact Claude counter:

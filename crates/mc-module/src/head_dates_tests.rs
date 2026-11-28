@@ -418,8 +418,9 @@ fn days_from_the_nearest_message_wait_for_a_fold() {
 
 /// What dating costs a fold of 3,800 summaries when half of them have no
 /// time at either boundary message (only messages inside them do): the
-/// first fold after a start, which looks each of those up by the nearest
-/// timed message, and a later one, which finds them kept.
+/// first fold after a start and a later one. Both look those days up by
+/// the nearest timed message in SQLite; nothing found that way is kept, so
+/// the two measure the same work with the database's pages warm or not.
 #[test]
 #[ignore = "a measurement; run with --release --ignored --nocapture"]
 fn nearest_message_dating_time() {
