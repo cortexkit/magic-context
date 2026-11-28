@@ -2,7 +2,8 @@
 //! replies are scripted too, so a run is deterministic and a scenario states
 //! exactly how much reasoning, text and tool output each step produces.
 
-use cortexkit_role_compaction::part::ToolStatus;
+use cortexkit_role_compaction::part::{Part, ToolStatus};
+use cortexkit_role_compaction::read::Role;
 use cortexkit_role_compaction::rules::ProviderRules;
 use cortexkit_role_compaction::setup::ModelRef;
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,12 @@ pub enum Step {
     },
     /// The host removes every message from this ordinal on, as an undo does.
     Revert { ordinal: u64 },
+    /// Store exactly these parts without sending a model request. The test
+    /// marks which ones the host would leave out of requests.
+    Record { role: Role, parts: Vec<Part> },
+    /// Settle a stored running call that never ran. Refuse the script step
+    /// if the call or a later number is already visible in a sent request.
+    SettleOmitted { call_id: String },
     /// The session's tool set changes: a tool is added, removed or renamed,
     /// or its description or schema changes. The tool definitions come
     /// before the messages, so the cached prefix is gone. On a route whose

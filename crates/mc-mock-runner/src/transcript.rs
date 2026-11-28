@@ -181,6 +181,102 @@ impl Transcript {
         self.entries.last().expect("just pushed")
     }
 
+    /// Append explicitly scripted parts, assigning tag numbers as for a
+    /// model reply. The provider's Setup decides whether the test can
+    /// mark parts as omitted.
+    pub(crate) fn append_recorded(
+        &mut self,
+        role: Role,
+        mut parts: Vec<Part>,
+        omission_declared: bool,
+        written_at: u64,
+    ) {
+        let mid = format!("msg{:05}", self.next_mid);
+        self.next_mid += 1;
+        let mut next_tag = self.next_tag();
+        for part in &mut parts {
+            part.omitted &= omission_declared;
+            if part.omitted {
+                part.tokens = None;
+            }
+            part.digest =
+                cortexkit_role_compaction::part::body_digest(part.seal.clone(), &part.body);
+            part.tag = is_numbered(&role, part).then(|| {
+                let next = next_tag;
+                next_tag += 1;
+                next
+            });
+        }
+        self.entries.push(Entry::new(
+            self.entries.len() as u64 + 1,
+            mid,
+            role,
+            written_at,
+            parts,
+        ));
+    }
+
+    /// Finalize an unexecuted call, then recount only the affected suffix.
+    /// The undeclared path keeps the original number and settles normally.
+    pub(crate) fn settle_omitted(
+        &mut self,
+        call_id: &str,
+        omission_declared: bool,
+        rendered: impl Fn(&str, &str) -> bool,
+    ) -> Result<u64, String> {
+        let (entry, at) = self
+            .entries
+            .iter()
+            .enumerate()
+            .find_map(|(i, entry)| {
+                entry.parts.iter().position(|part| {
+                matches!(&part.body, PartBody::Tool(tool) if tool.call_id == call_id)
+            }).map(|at| (i, at))
+            })
+            .ok_or_else(|| format!("no stored tool call {call_id}"))?;
+        let part = &self.entries[entry].parts[at];
+        let PartBody::Tool(mut tool) = part.body.clone() else {
+            unreachable!("matched a tool")
+        };
+        if tool.status != ToolStatus::Running || part.omitted {
+            return Err(format!("stored tool call {call_id} is not running"));
+        }
+        if omission_declared
+            && self.entries[entry..]
+                .iter()
+                .enumerate()
+                .any(|(offset, row)| {
+                    row.parts[if offset == 0 { at } else { 0 }..]
+                        .iter()
+                        .any(|part| rendered(&row.mid, &part.id))
+                })
+        {
+            return Err(format!(
+                "cannot omit {call_id}: its number or a later number was already rendered"
+            ));
+        }
+        tool.status = ToolStatus::Error;
+        let lost_number = omission_declared && part.tag.is_some();
+        let tag = part.tag.filter(|_| !omission_declared);
+        let mut settled = self::part(
+            part.id.clone(),
+            tag,
+            part.seal.clone(),
+            PartBody::Tool(tool),
+        );
+        settled.omitted = omission_declared;
+        self.entries[entry].parts[at] = settled;
+        for (offset, row) in self.entries[entry..].iter_mut().enumerate() {
+            if lost_number {
+                for part in &mut row.parts[if offset == 0 { at + 1 } else { 0 }..] {
+                    part.tag = part.tag.map(|tag| tag - 1);
+                }
+            }
+            row.digest = entry_digest(row.role.clone(), row.notice.as_ref(), &row.parts);
+        }
+        Ok(self.entries[entry].ordinal)
+    }
+
     /// Record a tool's result on the newest message, the only one that may
     /// still change, with any text delivered after it.
     pub fn complete_tool(

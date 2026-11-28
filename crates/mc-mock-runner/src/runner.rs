@@ -6,7 +6,7 @@
 //! and never across a call to the provider, so the provider can call back
 //! while the runner waits on it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
@@ -335,6 +335,7 @@ struct State {
     /// with datetime slots, such as ck-mc's clock note.
     template_datetime: bool,
     provider_entry_speaks_for: bool,
+    provider_omission: bool,
     /// The provider declared `compaction-signed-floor/v1`, so Setup and
     /// conditions name the signed floor.
     provider_signed_floor: bool,
@@ -369,6 +370,10 @@ struct State {
     seq: u64,
     /// The newest entry the provider was sent, and its checksum then.
     notified: Option<(u64, cortexkit_role_compaction::Digest)>,
+    /// Scripted settlement may update a call older than the newest notice.
+    notice_from: Option<u64>,
+    /// Stored parts whose assigned number has actually been sent to a model.
+    rendered_numbers: HashMap<String, HashSet<String>>,
     now: u64,
     last_send: Option<u64>,
     last_prompt_tokens: Option<u64>,
@@ -947,6 +952,7 @@ impl<P: Provider> Runner<P> {
             temperature: false,
             template_datetime: false,
             provider_entry_speaks_for: false,
+            provider_omission: false,
             provider_signed_floor: false,
             signed_floor: None,
             tools_revision: 0,
@@ -967,6 +973,8 @@ impl<P: Provider> Runner<P> {
             responder: crate::child::scripted_summarizer(),
             seq: 0,
             notified: None,
+            notice_from: None,
+            rendered_numbers: HashMap::new(),
             last_send: None,
             last_prompt_tokens: None,
             last_prompt_view: None,
@@ -1017,6 +1025,7 @@ impl<P: Provider> Runner<P> {
                 cortexkit_role_compaction::provides_entry_speaks_for(&provides);
             state.provider_signed_floor =
                 cortexkit_role_compaction::provides_signed_floor(&provides);
+            state.provider_omission = cortexkit_role_compaction::provides_omitted_parts(&provides);
             let mut request = SetupRequest::new(
                 state.config.preset.clone(),
                 state.config.model.clone(),
@@ -1105,6 +1114,25 @@ impl<P: Provider> Runner<P> {
                     self.notice().await;
                     true
                 }
+                Step::Record { role, parts } => {
+                    if self.host.lock().setup_due {
+                        if let Err(error) = self.setup().await {
+                            self.report.call_errors.push(error);
+                            return;
+                        }
+                    }
+                    {
+                        let mut state = self.host.lock();
+                        let enabled = state.compaction && state.provider_omission;
+                        let now = state.now;
+                        state
+                            .transcript
+                            .append_recorded(role.clone(), parts.clone(), enabled, now);
+                    }
+                    self.notice().await;
+                    true
+                }
+                Step::SettleOmitted { call_id } => self.settle_omitted(call_id).await,
                 Step::ChangeTools => {
                     let mut state = self.host.lock();
                     state.tools_revision += 1;
@@ -1140,6 +1168,36 @@ impl<P: Provider> Runner<P> {
         if self.host.lock().notice_owed {
             self.notice().await;
         }
+    }
+
+    async fn settle_omitted(&mut self, call_id: &str) -> bool {
+        let result = {
+            let mut state = self.host.lock();
+            let enabled = state.compaction && state.provider_omission;
+            let State {
+                transcript,
+                rendered_numbers,
+                ..
+            } = &mut *state;
+            let result = transcript.settle_omitted(call_id, enabled, |mid, id| {
+                rendered_numbers
+                    .get(mid)
+                    .is_some_and(|parts| parts.contains(id))
+            });
+            if let Ok(from_ordinal) = result {
+                state.notice_from = Some(from_ordinal);
+                if enabled {
+                    state.events.push(Event::TranscriptChanged { from_ordinal });
+                }
+            }
+            result
+        };
+        if let Err(error) = result {
+            self.report.refusals.push(error);
+            return false;
+        }
+        self.notice().await;
+        true
     }
 
     async fn await_condition(
@@ -1258,8 +1316,9 @@ impl<P: Provider> Runner<P> {
         }
 
         let (completion, highest_tag, rendered_view) = {
-            let state = self.host.lock();
+            let mut state = self.host.lock();
             let messages = state.render();
+            note_rendered_numbers(&messages, &mut state.rendered_numbers);
             let highest_tag = messages
                 .iter()
                 .flat_map(|message| &message.parts)
@@ -1692,16 +1751,20 @@ impl<P: Provider> Runner<P> {
             // An empty transcript, after a revert of every message, still
             // gets a notice, with no newest entry (compaction contract W4.1).
             let newest = state.transcript.cursor();
+            let from = state.notice_from.take();
             let entries: Vec<Entry> = state
                 .transcript
                 .entries()
                 .iter()
-                .filter(|entry| match &state.notified {
-                    None => true,
-                    Some((ordinal, digest)) => {
-                        entry.ordinal > *ordinal
-                            || (entry.ordinal == *ordinal && &entry.digest != digest)
-                    }
+                .filter(|entry| {
+                    from.is_some_and(|from| entry.ordinal >= from)
+                        || match &state.notified {
+                            None => true,
+                            Some((ordinal, digest)) => {
+                                entry.ordinal > *ordinal
+                                    || (entry.ordinal == *ordinal && &entry.digest != digest)
+                            }
+                        }
                 })
                 .map(|entry| {
                     let mut compact = entry.clone();
@@ -1752,6 +1815,42 @@ impl<P: Provider> Runner<P> {
                 }
             }
             Err(error) => self.report.call_errors.push(error),
+        }
+    }
+}
+
+fn note_rendered_numbers(
+    messages: &[RenderedMessage],
+    sent: &mut HashMap<String, HashSet<String>>,
+) {
+    use cortexkit_compaction_view::tags::{empty_result_label, tag_numbers_in};
+
+    for message in messages {
+        let view::Source::Entry { mid, .. } = &message.source else {
+            continue;
+        };
+        for part in &message.parts {
+            let Some(tag) = part.tag else { continue };
+            let final_text = message.final_text.contains(&part.id);
+            let number_sent = match &part.body {
+                PartBody::Text { text } => !final_text || tag_numbers_in(text).contains(&tag),
+                PartBody::Tool(tool) if final_text => tool
+                    .output
+                    .as_ref()
+                    .is_some_and(|text| tag_numbers_in(text).contains(&tag)),
+                PartBody::Tool(tool) => tool.output.is_some() || empty_result_label(tool).is_some(),
+                _ => false,
+            };
+            if number_sent {
+                let parts = if let Some(parts) = sent.get_mut(mid) {
+                    parts
+                } else {
+                    sent.entry(mid.clone()).or_default()
+                };
+                if !parts.contains(&part.id) {
+                    parts.insert(part.id.clone());
+                }
+            }
         }
     }
 }

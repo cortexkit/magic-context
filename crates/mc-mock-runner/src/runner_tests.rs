@@ -39,6 +39,7 @@ fn once(mut decide: impl FnMut(&Host) -> Option<Vec<Edit>> + Send + 'static) -> 
 /// ride with whatever `on_ride` returns.
 struct TestProvider {
     entry_speaks_for: Mutex<bool>,
+    omission: bool,
     /// Declare `compaction-signed-floor/v1`.
     signed_floor: Mutex<bool>,
     host: Mutex<Option<Host>>,
@@ -55,6 +56,7 @@ impl TestProvider {
     fn new() -> Self {
         Self {
             entry_speaks_for: Mutex::new(false),
+            omission: false,
             signed_floor: Mutex::new(false),
             host: Mutex::new(None),
             on_notice: Mutex::new(None),
@@ -85,6 +87,12 @@ impl TestProvider {
 impl Provider for TestProvider {
     async fn compaction_provides(&self) -> Result<Vec<String>, CallError> {
         let mut provides = Vec::new();
+        if self.omission {
+            provides.extend([
+                cortexkit_role_compaction::COMPACTION_PROVIDES.into(),
+                cortexkit_role_compaction::COMPACTION_OMITTED_PARTS_PROVIDES.into(),
+            ]);
+        }
         if *self.entry_speaks_for.lock().unwrap() {
             provides.push(cortexkit_role_compaction::COMPACTION_ENTRY_SPEAKS_FOR_PROVIDES.into());
         }
@@ -147,6 +155,9 @@ impl Provider for TestProvider {
         Ok(UserEdit::default())
     }
 }
+
+#[path = "omission_tests.rs"]
+mod omission_tests;
 
 fn anthropic_bound() -> ProviderRules {
     ProviderRules::new(SignedParts::Bound, EditCost::Suffix)
