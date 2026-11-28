@@ -1,18 +1,21 @@
 use super::*;
 
-fn with_lifecycle_store<F: std::future::Future<Output = ()>>(
+pub(super) fn with_lifecycle_store<F: std::future::Future<Output = ()>>(
     name: &str,
-    run: impl FnOnce(std::path::PathBuf) -> F,
+    run: impl FnOnce(std::path::PathBuf, AppReaderExits) -> F,
 ) {
     let dir = scratch(name);
+    let exits = AppReaderExits::default();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    runtime.block_on(run(dir.clone()));
+    runtime.block_on(run(dir.clone(), exits.clone()));
     // In-process worker tasks can still hold the stores after the assertions.
     // Drop the runtime before removing their scratch files.
     drop(runtime);
+    // The app reader runs outside Tokio, so runtime shutdown cannot join it.
+    exits.wait_for_all();
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -33,13 +36,14 @@ fn lifecycle_a_tool_before_setup_restores_compaction_but_not_notice_readiness() 
     with_lifecycle_store("tool-before-setup", tool_before_setup);
 }
 
-async fn tool_before_setup(dir: std::path::PathBuf) {
+async fn tool_before_setup(dir: std::path::PathBuf, exits: AppReaderExits) {
     let mut runner = start_full(
         config("worker", Kind::OpenAi, free()),
         Settings::default(),
         Some(dir.clone()),
     )
     .await;
+    runner.provider().observe_app_reader_exits(&exits);
     runner
         .play(&[
             user("Review the module."),
@@ -121,7 +125,7 @@ fn lifecycle_a_keep_called_before_restart_lands_on_the_next_notice() {
     with_lifecycle_store("pending-keep", keep_before_restart);
 }
 
-async fn keep_before_restart(dir: std::path::PathBuf) {
+async fn keep_before_restart(dir: std::path::PathBuf, exits: AppReaderExits) {
     let settings = Settings {
         protected_tokens: Some(0),
         ..Settings::default()
@@ -132,6 +136,7 @@ async fn keep_before_restart(dir: std::path::PathBuf) {
         Some(dir.clone()),
     )
     .await;
+    runner.provider().observe_app_reader_exits(&exits);
     runner
         .play(&[
             user("Review the module."),
@@ -171,13 +176,14 @@ fn lifecycle_an_unchanged_job_retries_a_failed_state_save() {
     with_lifecycle_store("retry-save", retry_state_save);
 }
 
-async fn retry_state_save(dir: std::path::PathBuf) {
+async fn retry_state_save(dir: std::path::PathBuf, exits: AppReaderExits) {
     let mut runner = start_full(
         config("worker", Kind::OpenAi, free()),
         Settings::default(),
         Some(dir.clone()),
     )
     .await;
+    runner.provider().observe_app_reader_exits(&exits);
     runner
         .play(&[user("Review the module."), read_file(50), read_file(50)])
         .await;

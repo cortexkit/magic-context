@@ -394,6 +394,40 @@ impl RunnerClient for HostClient {
     }
 }
 
+type AppReaderExit = std::sync::mpsc::Receiver<()>;
+
+#[derive(Clone, Default)]
+struct AppReaderExits(Arc<Mutex<Vec<AppReaderExit>>>);
+
+impl AppReaderExits {
+    fn observe(&self, module: &Module<HostClient>) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(module.observe_app_reader_exit());
+    }
+
+    fn wait_for_all(self) {
+        use std::sync::mpsc::RecvTimeoutError;
+
+        const WAIT_SECONDS: u64 = 30;
+        let exits = std::mem::take(&mut *self.0.lock().unwrap());
+        assert!(!exits.is_empty(), "no mc-app-read exit was registered");
+        for (index, exit) in exits.into_iter().enumerate() {
+            let reader = index + 1;
+            match exit.recv_timeout(std::time::Duration::from_secs(WAIT_SECONDS)) {
+                Ok(()) => {}
+                Err(RecvTimeoutError::Timeout) => {
+                    panic!("mc-app-read #{reader} did not exit within {WAIT_SECONDS} s");
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("mc-app-read #{reader}'s signal was dropped without firing");
+                }
+            }
+        }
+    }
+}
+
 /// ck-mc in process, as the runner's routes for one session reach it: every
 /// call concerns `route`, which a real transport takes from the route.
 struct InProcess {
@@ -408,11 +442,27 @@ struct InProcess {
     pre_user: bool,
     /// Crash after a keep call is saved but before its next notice.
     restart_after_keep: Mutex<bool>,
+    reader_exits: Mutex<Option<AppReaderExits>>,
 }
 
 impl InProcess {
     fn module(&self) -> Module<HostClient> {
         self.module.lock().unwrap().clone()
+    }
+
+    fn observe_app_reader_exits(&self, exits: &AppReaderExits) {
+        let mut registered = self.reader_exits.lock().unwrap();
+        assert!(registered.is_none(), "mc-app-read exits already registered");
+        exits.observe(&self.module.lock().unwrap());
+        *registered = Some(exits.clone());
+    }
+
+    fn replace_module(&self, module: Module<HostClient>) {
+        let exits = self.reader_exits.lock().unwrap();
+        if let Some(exits) = &*exits {
+            exits.observe(&module);
+        }
+        *self.module.lock().unwrap() = module;
     }
 
     fn new_module(
@@ -447,14 +497,20 @@ impl InProcess {
     /// Restart ck-mc on the stores in `dir` instead of its own, as after a
     /// crash that left them as they are there.
     fn restart_from(&self, dir: &std::path::Path) {
-        *self.module.lock().unwrap() =
-            Self::new_module(self.client.clone(), self.settings.clone(), Some(dir));
+        self.replace_module(Self::new_module(
+            self.client.clone(),
+            self.settings.clone(),
+            Some(dir),
+        ));
     }
 
     /// Restart ck-mc with different settings, as after a config edit.
     fn restart_with(&self, settings: Settings) {
-        *self.module.lock().unwrap() =
-            Self::new_module(self.client.clone(), settings, self.stores.as_deref());
+        self.replace_module(Self::new_module(
+            self.client.clone(),
+            settings,
+            self.stores.as_deref(),
+        ));
     }
 }
 
@@ -696,6 +752,7 @@ async fn start_with_client(
         stores,
         pre_user,
         restart_after_keep: Mutex::new(false),
+        reader_exits: Mutex::new(None),
     };
     let runner = Runner::start(config, provider).await.unwrap();
     *runner.provider().client.host.lock().unwrap() = Some(runner.host().clone());

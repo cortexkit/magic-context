@@ -221,12 +221,15 @@ async fn embeddings() -> mc_module::embedding::Provider {
 
 // Run on Linux: cargo test --locked --release -p mc-module --features context-db-timing \
 // --test scenarios write_lock_budget::werni_sized_writes_stay_within_budget -- --ignored --nocapture
-#[tokio::test]
+#[test]
 #[ignore = "release-mode large-store lock measurement; command above"]
-async fn werni_sized_writes_stay_within_budget() {
+fn werni_sized_writes_stay_within_budget() {
+    lifecycle_scenarios::with_lifecycle_store("write-lock-budget", measure_werni_sized_writes);
+}
+
+async fn measure_werni_sized_writes(dir: std::path::PathBuf, exits: AppReaderExits) {
     use cortexkit_role_compaction::read::{Cursor, Role};
     use mc_module::move_in::{move_in, MoveRequest};
-    let dir = scratch("write-lock-budget");
     let provider = embeddings().await;
     seed(&dir, &provider.model_id());
     {
@@ -342,6 +345,7 @@ async fn werni_sized_writes_stay_within_budget() {
     *client.entorhinal.lock().unwrap() = Some(context);
     let mut runner =
         start_with_client(client, config, settings, Some(dir.clone()), false, |_| {}).await;
+    runner.provider().observe_app_reader_exits(&exits);
     runner
         .provider()
         .module()
@@ -477,5 +481,4 @@ async fn werni_sized_writes_stay_within_budget() {
     measurements.check();
     drop(runner);
     drop(conn);
-    std::fs::remove_dir_all(dir).unwrap();
 }
