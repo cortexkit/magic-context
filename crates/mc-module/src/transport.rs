@@ -3107,9 +3107,10 @@ mod config_tests {
         }
 
         let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_str().unwrap();
         let child = Child {
             session: SessionRef::new("broca", "broca", "child"),
-            project_root: Some("/work/lab".into()),
+            project_root: Some(root.into()),
         };
         for name in [
             "cache_policy",
@@ -3134,7 +3135,7 @@ mod config_tests {
                 (ops::RUN_CANCEL, json!("ack")),
                 (ops::SESSION_RETRACT, json!("retracted")),
             ]);
-            let worker = WorkerScope::new("/work/lab", "project", "run").unwrap();
+            let worker = WorkerScope::new(root, "project", "run").unwrap();
             assert!(
                 !LAB_WORKER_SCOPE
                     .scope(worker, probe(&client, &child, name))
