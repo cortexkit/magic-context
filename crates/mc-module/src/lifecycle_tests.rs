@@ -60,6 +60,9 @@ mod host_frame_list_tests;
 #[path = "notes_tokens_tests.rs"]
 mod notes_tokens_tests;
 
+#[path = "broca_plan_note_writer_tests.rs"]
+mod broca_plan_note_writer_tests;
+
 #[path = "reminder_delivery_tests.rs"]
 mod reminder_delivery_tests;
 

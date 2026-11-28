@@ -1,0 +1,1 @@
+{"result":{"usage":{"steps":2,"unreported_steps":2,"by_model":[{"provider":"anthropic","model":"claude-opus-5-5","steps":2,"unreported_steps":2}]},"run_id":"run-sid-Y4pXlr9zJyaENTg4naAWW4","state":"completed","final_message":{"ordinal":6,"mid":"gf72116c1175f249e.29","text":"Second answer."}}}
