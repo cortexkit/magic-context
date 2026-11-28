@@ -202,6 +202,7 @@ pub fn manifest_for(module_id: &str, agent_data: bool) -> ModuleManifest {
     let mut claims = vec![
         subc_protocol::peer::OBSERVED_PEER_CAPABILITY.to_owned(),
         COMPACTION_PROVIDES.to_owned(),
+        cortexkit_role_compaction::COMPACTION_OMITTED_PARTS_PROVIDES.to_owned(),
         cortexkit_role_compaction::COMPACTION_ENTRY_SPEAKS_FOR_PROVIDES.to_owned(),
         cortexkit_role_compaction::COMPACTION_HOST_PARTS_PROVIDES.to_owned(),
         cortexkit_role_compaction::COMPACTION_HOST_FRAME_PROVIDES.to_owned(),
@@ -3529,6 +3530,17 @@ mod app_read_tests {
         };
         request.identity.harness = "opencode".into();
         assert_eq!(app_admission(&request).err().unwrap().code, "not_permitted");
+    }
+
+    #[test]
+    fn the_manifest_declares_omitted_parts_once_beside_compaction() {
+        let manifest = serde_json::to_value(super::manifest("magic-context")).unwrap();
+        let claims = manifest["capabilities"]["provides"].as_array().unwrap();
+        let omitted = "compaction-omitted-parts/v1";
+        assert_eq!(claims.iter().filter(|claim| *claim == omitted).count(), 1);
+        assert!(claims
+            .windows(2)
+            .any(|pair| pair[0] == "compaction-provider/v2" && pair[1] == omitted));
     }
 
     #[test]
