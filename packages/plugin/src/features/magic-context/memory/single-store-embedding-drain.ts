@@ -1,6 +1,9 @@
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
-import { embedUnembeddedMemoriesForProjectOutcome } from "../project-embedding-registry";
+import {
+    countUnembeddedMemoriesForProject,
+    embedUnembeddedMemoriesForProjectOutcome,
+} from "../project-embedding-registry";
 
 /**
  * Embed the memories another writer put into `memories` without an embedding.
@@ -79,7 +82,7 @@ export async function drainSingleStoreEmbeddingWatermarks(db: Database): Promise
                 // The batch may have been the last one. Asking again costs one query when
                 // nothing is pending, and lets the mark advance on this pass rather than the
                 // next; the provider is only called again if rows really remain.
-                if (countUnembeddedBelow(db, watermark.project_path) === 0) {
+                if (countUnembeddedMemoriesForProject(db, watermark.project_path) === 0) {
                     outcome = await embedUnembeddedMemoriesForProjectOutcome(
                         db,
                         watermark.project_path,
@@ -103,18 +106,6 @@ export async function drainSingleStoreEmbeddingWatermarks(db: Database): Promise
         );
     }
     return embedded;
-}
-
-function countUnembeddedBelow(db: Database, projectPath: string): number {
-    const row = db
-        .prepare(
-            `SELECT COUNT(*) AS count FROM memories
-              WHERE project_path = ?
-                AND status IN ('active', 'permanent')
-                AND NOT EXISTS (SELECT 1 FROM memory_embeddings WHERE memory_id = memories.id)`,
-        )
-        .get(projectPath) as { count?: number } | undefined;
-    return typeof row?.count === "number" ? row.count : 0;
 }
 
 function advanceEmbeddedWatermark(db: Database, projectPath: string, upTo: number): void {

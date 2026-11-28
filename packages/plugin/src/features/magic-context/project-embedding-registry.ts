@@ -2885,15 +2885,30 @@ function isUnembeddedMemoryRow(row: unknown): row is UnembeddedMemoryRow {
     );
 }
 
+const UNEMBEDDED_MEMORIES_FOR_PROJECT = `FROM memories m
+    WHERE m.project_path = ? AND m.status IN ('active', 'permanent')
+      AND NOT EXISTS (
+          SELECT 1 FROM memory_embeddings me WHERE me.memory_id = m.id AND me.model_id = ?
+      )`;
+
 function getLoadUnembeddedMemoriesStatement(db: Database): PreparedStatement {
     let stmt = loadUnembeddedMemoriesStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "SELECT m.id AS id, m.content AS content, m.normalized_hash AS normalized_hash FROM memories m LEFT JOIN memory_embeddings me ON m.id = me.memory_id AND me.model_id = ? WHERE m.project_path = ? AND m.status = 'active' AND me.memory_id IS NULL LIMIT ?",
+            `SELECT m.id, m.content, m.normalized_hash ${UNEMBEDDED_MEMORIES_FOR_PROJECT} LIMIT ?`,
         );
         loadUnembeddedMemoriesStatements.set(db, stmt);
     }
     return stmt;
+}
+
+export function countUnembeddedMemoriesForProject(db: Database, projectIdentity: string): number {
+    const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
+    if (!snapshot?.enabled) return 0;
+    const row = db
+        .prepare(`SELECT COUNT(*) AS count ${UNEMBEDDED_MEMORIES_FOR_PROJECT}`)
+        .get(projectIdentity, snapshot.modelId) as { count: number };
+    return row.count;
 }
 
 /**
@@ -2906,7 +2921,7 @@ function getLoadUnembeddedMemoriesStatement(db: Database): PreparedStatement {
 export type EmbedMemoriesOutcome =
     /** Embedding is not enabled for this project, so nothing was attempted. */
     | { kind: "disabled" }
-    /** No active memory in this project is missing a vector for the current model. */
+    /** No active or permanent memory in this project is missing a vector for the current model. */
     | { kind: "done" }
     /** A batch ran; `count` rows were saved. More rows may still be pending. */
     | { kind: "embedded"; count: number }
@@ -2936,7 +2951,7 @@ export async function embedUnembeddedMemoriesForProjectOutcome(
 
     const normalizedBatchSize = Math.max(1, Math.floor(batchSize));
     const memories = getLoadUnembeddedMemoriesStatement(db)
-        .all(snapshot.modelId, projectIdentity, normalizedBatchSize)
+        .all(projectIdentity, snapshot.modelId, normalizedBatchSize)
         .filter(isUnembeddedMemoryRow);
     if (memories.length === 0) return { kind: "done" };
 

@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
@@ -8,6 +8,8 @@ import { runMigrations } from "../migrations";
 import {
     _resetProjectEmbeddingRegistryForTests,
     _setTestProviderFactoryForProject,
+    embedUnembeddedMemoriesForProject,
+    getProjectEmbeddingSnapshot,
     registerProjectEmbedding,
 } from "../project-embedding-registry";
 import { initializeDatabase } from "../storage-db";
@@ -16,7 +18,8 @@ import {
     drainSingleStoreEmbeddingWatermarks,
     getPendingEmbeddingWatermarks,
 } from "./single-store-embedding-drain";
-import { insertMemory } from "./storage-memory";
+import { insertMemory, updateMemoryStatus } from "./storage-memory";
+import { loadAllEmbeddings, saveEmbedding } from "./storage-memory-embeddings";
 
 function openDb(): Database {
     const db = new Database(":memory:");
@@ -163,6 +166,97 @@ describe("single-store embedding drain under a provider outage", () => {
                 .get(PROJECT) as { count: number }
         ).count;
     }
+
+    test("the drain embeds permanent memories with only an old model before advancing the mark", async () => {
+        const db = openDb();
+        const embedBatch = spyOn(OutageProvider.prototype, "embedBatch");
+        try {
+            const id = seedModuleWrittenMemories(db, 1)[0]!;
+            updateMemoryStatus(db, id, "permanent");
+            saveEmbedding(db, id, new Float32Array([1, 1]), "old-model");
+            const modelId = getProjectEmbeddingSnapshot(PROJECT)!.modelId;
+            OutageProvider.failing = false;
+
+            expect(getPendingEmbeddingWatermarks(db)).toHaveLength(1);
+            expect(loadAllEmbeddings(db, PROJECT, modelId).has(id)).toBe(false);
+
+            const embedded = await drainSingleStoreEmbeddingWatermarks(db);
+            expect({
+                embedded,
+                hasCurrentVector: loadAllEmbeddings(db, PROJECT, modelId).has(id),
+                pending: getPendingEmbeddingWatermarks(db).length,
+            }).toEqual({ embedded: 1, hasCurrentVector: true, pending: 0 });
+            expect(embedBatch).toHaveBeenCalledTimes(1);
+        } finally {
+            embedBatch.mockRestore();
+            closeQuietly(db);
+        }
+    });
+
+    test("batch selection, remaining work and completion agree on which memories need a vector", async () => {
+        const db = openDb();
+        const embedBatch = spyOn(OutageProvider.prototype, "embedBatch");
+        try {
+            const ids = seedModuleWrittenMemories(db, 13);
+            const missingIds = ids.slice(0, 11);
+            const archivedId = ids[11]!;
+            const currentId = ids[12]!;
+            const modelId = getProjectEmbeddingSnapshot(PROJECT)!.modelId;
+            const currentVector = new Float32Array([2, 2]);
+            for (const [index, id] of missingIds.entries()) {
+                if (index % 2 === 0) updateMemoryStatus(db, id, "permanent");
+                saveEmbedding(db, id, new Float32Array([1, 1]), "old-model");
+            }
+            updateMemoryStatus(db, archivedId, "archived");
+            saveEmbedding(db, currentId, currentVector, modelId);
+            OutageProvider.failing = false;
+
+            expect(await drainSingleStoreEmbeddingWatermarks(db)).toBe(10);
+            expect(embedBatch).toHaveBeenCalledTimes(1);
+            expect(getPendingEmbeddingWatermarks(db)).toHaveLength(1);
+
+            expect(await drainSingleStoreEmbeddingWatermarks(db)).toBe(1);
+            expect(getPendingEmbeddingWatermarks(db)).toEqual([]);
+
+            const current = loadAllEmbeddings(db, PROJECT, modelId);
+            expect([...current.keys()]).toEqual([...missingIds, currentId]);
+            expect(current.has(archivedId)).toBe(false);
+            expect(current.get(currentId)?.embedding).toEqual(currentVector);
+            expect(await drainSingleStoreEmbeddingWatermarks(db)).toBe(0);
+            expect(embedBatch).toHaveBeenCalledTimes(2);
+            expect(embedBatch.mock.calls.map(([texts]) => texts.length)).toEqual([10, 1]);
+        } finally {
+            embedBatch.mockRestore();
+            closeQuietly(db);
+        }
+    });
+
+    test("project maintenance can backfill a permanent memory after the watermark has advanced", async () => {
+        const db = openDb();
+        const embedBatch = spyOn(OutageProvider.prototype, "embedBatch");
+        try {
+            const id = seedModuleWrittenMemories(db, 1)[0]!;
+            updateMemoryStatus(db, id, "permanent");
+            saveEmbedding(db, id, new Float32Array([1, 1]), "old-model");
+            db.prepare(
+                "UPDATE memory_embedding_watermarks SET embedded_memory_id = written_memory_id WHERE project_path = ?",
+            ).run(PROJECT);
+            const modelId = getProjectEmbeddingSnapshot(PROJECT)!.modelId;
+            OutageProvider.failing = false;
+
+            expect(await drainSingleStoreEmbeddingWatermarks(db)).toBe(0);
+            expect(embedBatch).toHaveBeenCalledTimes(0);
+            expect(loadAllEmbeddings(db, PROJECT, modelId).has(id)).toBe(false);
+
+            expect(await embedUnembeddedMemoriesForProject(db, PROJECT)).toBe(1);
+            expect(loadAllEmbeddings(db, PROJECT, modelId).has(id)).toBe(true);
+            expect(await embedUnembeddedMemoriesForProject(db, PROJECT)).toBe(0);
+            expect(embedBatch).toHaveBeenCalledTimes(1);
+        } finally {
+            embedBatch.mockRestore();
+            closeQuietly(db);
+        }
+    });
 
     test("an outage leaves the mark pending, and the drain embeds the rows once the provider is back", async () => {
         const db = openDb();
