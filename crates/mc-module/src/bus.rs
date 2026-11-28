@@ -901,8 +901,8 @@ impl Bus {
         self.current.subscribe()
     }
 
-    /// Start closing any retired socket immediately on module shutdown, and
-    /// finish the close before the runtime that owns the socket exits.
+    /// Start closing all retired sockets immediately on module shutdown,
+    /// and await their closes before the runtime exits.
     pub async fn close_retiring(&self) {
         self.retirements.finish().await;
     }

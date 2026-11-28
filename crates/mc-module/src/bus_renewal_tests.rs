@@ -513,36 +513,52 @@ async fn a_failed_ack_on_the_current_binding_is_an_outage() {
 }
 
 #[tokio::test]
-async fn a_second_rotation_expedites_the_older_retirement() {
+async fn discarding_the_new_session_leaves_the_old_ack_in_its_grace() {
+    use run_ends::Cursor as _;
     let Some(server) = LocalNats::start().await else {
         return;
     };
+    let jetstream = run_end_stream(&server).await;
     let bus = local_bus(server.addr);
-    let first_holder = bus
-        .session()
+    let mut reader = bind_reader(&bus).await;
+    publish_run_end(&jetstream, "in-hand").await;
+    let delivery = reader.next().await.unwrap().unwrap();
+    assert_eq!(delivery.id.as_deref(), Some("in-hand"));
+
+    let (mut first, generation) = at_renewal(&bus, server.addr).await;
+    assert_eq!(generation, 2);
+    let second = bus.session().await.unwrap();
+    let holder = second.connection.as_ref().unwrap().clone();
+    let mut second_state = holder.connection_state();
+    second.discard();
+
+    // Give an incorrectly expedited close a turn to reach the real socket.
+    // This observes half a second of the four-second grace before the ack.
+    let went_early = tokio::time::timeout(
+        Duration::from_millis(500),
+        first.wait_for(|state| *state == NatsConnectionState::Closed),
+    )
+    .await
+    .is_ok();
+    reader
+        .ack()
         .await
-        .unwrap()
-        .connection
-        .as_ref()
-        .unwrap()
-        .clone();
-    let (mut first, second_generation) = at_renewal(&bus, server.addr).await;
-    assert_eq!(second_generation, 2);
-    let second_holder = bus
-        .session()
+        .expect("discarding the next session must not interrupt this ack");
+    assert!(!went_early, "the older connection lost its grace");
+    let stream = jetstream
+        .get_stream(&account().streams().event)
         .await
-        .unwrap()
-        .connection
-        .as_ref()
-        .unwrap()
-        .clone();
-    assert_eq!(*first.borrow(), NatsConnectionState::Connected);
-    let (mut second, third_generation) = at_renewal(&bus, server.addr).await;
-    assert_eq!(third_generation, 3);
-    closed(&mut first, Duration::from_secs(2)).await;
-    assert_eq!(*second.borrow(), NatsConnectionState::Connected);
-    closed(&mut second, Duration::from_secs(6)).await;
-    drop((first_holder, second_holder));
+        .unwrap();
+    let consumer: async_nats::jetstream::consumer::PullConsumer =
+        stream.get_consumer(run_ends::DURABLE).await.unwrap();
+    assert_eq!(
+        consumer.get_info().await.unwrap().ack_floor.stream_sequence,
+        1
+    );
+
+    closed(&mut first, Duration::from_secs(15)).await;
+    closed(&mut second_state, Duration::from_secs(15)).await;
+    drop(holder);
 }
 
 #[derive(Default)]
@@ -805,7 +821,7 @@ async fn a_closed_marker_with_no_live_replacement_backs_off_instead_of_polling_a
     // Install and discard the replacement without letting the marker see it.
     second.discard();
     assert_eq!(*bus.generations().borrow(), None);
-    closed(&mut first, Duration::from_secs(2)).await;
+    closed(&mut first, Duration::from_secs(15)).await;
 
     assert!(tokio::time::timeout(Duration::from_secs(2), raw.next())
         .await
@@ -860,7 +876,7 @@ async fn a_replacement_ending_before_its_snapshot_retries_after_backoff_if_none_
     let (third, generation) = bus.session_with_generation().await.unwrap();
     assert_eq!(generation, 3);
     third.discard();
-    closed(&mut second, Duration::from_secs(2)).await;
+    closed(&mut second, Duration::from_secs(15)).await;
     bucket.put(KEY, b"two".as_slice().into()).await.unwrap();
     let resumed = tokio::time::Instant::now();
     gate.resume.notify_one();
