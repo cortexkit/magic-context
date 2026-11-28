@@ -109,7 +109,7 @@ interface InFlightAttempt {
     settled: Promise<void>;
 }
 
-const DEFAULT_DISPOSE_DRAIN_MS = 2_000;
+export const DEFAULT_DISPOSE_DRAIN_MS = 2_000;
 
 class HiddenWorkTimeout extends Error {
     constructor(timeoutMs: number) {
@@ -168,17 +168,17 @@ function setupBudget(
     };
 }
 
-/** Resolves when `work` settles or `ms` elapses, whichever is first. */
-async function settleWithin(work: Promise<unknown>, ms: number): Promise<void> {
+/** Reports whether `work` settled before `ms` elapsed. */
+export async function settleWithin(work: Promise<unknown>, ms: number): Promise<boolean> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-        await Promise.race([
+        return await Promise.race([
             work.then(
-                () => undefined,
-                () => undefined,
+                () => true,
+                () => true,
             ),
-            new Promise<void>((resolve) => {
-                timer = setTimeout(resolve, Math.max(0, ms));
+            new Promise<boolean>((resolve) => {
+                timer = setTimeout(() => resolve(false), Math.max(0, ms));
             }),
         ]);
     } finally {

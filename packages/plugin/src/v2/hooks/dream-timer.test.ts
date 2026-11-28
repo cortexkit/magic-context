@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, jest, spyOn, test } from "bun:test";
 import { join } from "node:path";
 import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
@@ -12,6 +12,7 @@ import {
 } from "../../plugin/dream-timer";
 import { _resetHarnessForTesting } from "../../shared/harness";
 import * as logger from "../../shared/logger";
+import { MagicContextRpcServer } from "../../shared/rpc-server";
 import { Database } from "../../shared/sqlite";
 import { isolatedTestGitEnv } from "../../shared/test-git-env";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
@@ -21,6 +22,8 @@ import { V2StoreReader, V2StoreReaderPool } from "../store-reader";
 import * as commands from "./commands";
 import { registerContext } from "./context";
 import { findV2DreamParentSession } from "./dream-timer";
+import * as embeddings from "./embedding-lifecycle";
+import * as backfill from "./session-project-backfill";
 import * as storageGate from "./storage-gate";
 import type { V2Context } from "./types";
 
@@ -93,6 +96,160 @@ function mockConfig(dreamer: { disable: boolean }, gitIndexing = false) {
 }
 
 describe("OpenCode 2 dream schedule timer registration", () => {
+    test("normal disposal logs only the class of a failing step and still closes the pool", async () => {
+        mockConfig({ disable: false });
+        const lines = spyOn(logger, "log");
+        const create = hiddenCompletion.createV2HiddenCompletionExecutor;
+        const hidden = spyOn(
+            hiddenCompletion,
+            "createV2HiddenCompletionExecutor",
+        ).mockImplementation(async (...args) => {
+            const executor = await create(...args);
+            executor.dispose = async () => {
+                throw new TypeError("private host detail");
+            };
+            return executor;
+        });
+        const pool = spyOn(V2StoreReaderPool.prototype, "closeWhenIdle");
+        try {
+            const duties = await registerContext(fakeHost(projectDirectory()));
+            await expect(duties?.dispose()).resolves.toBeUndefined();
+            expect(pool).toHaveBeenCalledTimes(1);
+            expect(
+                lines.mock.calls.filter(([line]) => String(line).includes("cleanup failed")),
+            ).toEqual([["[magic-context] v2 hidden cleanup failed (TypeError)"]]);
+        } finally {
+            pool.mockRestore();
+            hidden.mockRestore();
+            lines.mockRestore();
+        }
+    });
+
+    test("normal disposal leaves the scheduled backfill in place", async () => {
+        mockConfig({ disable: false });
+        jest.useFakeTimers();
+        setBootQuietPeriodForTests(Date.now());
+        const run = spyOn(backfill, "runV2SessionProjectBackfill").mockImplementation(
+            () => new Promise(() => {}),
+        );
+        try {
+            const duties = await registerContext(fakeHost(projectDirectory()));
+            await duties?.dispose();
+            expect(run).not.toHaveBeenCalled();
+            jest.advanceTimersByTime(BOOT_QUIET_MS);
+            expect(run).toHaveBeenCalledTimes(1);
+        } finally {
+            run.mockRestore();
+            setBootQuietPeriodForTests(null);
+            jest.useRealTimers();
+        }
+    });
+
+    test("failed setup waits for usage to join before stopping RPC, releasing embeddings and rejecting", async () => {
+        mockConfig({ disable: false });
+        const host = fakeHost(projectDirectory());
+        const usageAborted = Promise.withResolvers<void>();
+        const finishUsage = Promise.withResolvers<void>();
+        let workers = 0;
+        host.event.subscribe = async function* ({ signal }) {
+            const usage = ++workers === 2;
+            const ended = Promise.withResolvers<void>();
+            signal.addEventListener("abort", () => ended.resolve(), { once: true });
+            await ended.promise;
+            if (usage) {
+                usageAborted.resolve();
+                await finishUsage.promise;
+            }
+        };
+        const stop = spyOn(MagicContextRpcServer.prototype, "stop");
+        const createScope = embeddings.createV2EmbeddingScope;
+        let releaseCount = 0;
+        const scope = spyOn(embeddings, "createV2EmbeddingScope").mockImplementation((...args) => {
+            const owned = createScope(...args);
+            const dispose = owned.dispose;
+            owned.dispose = () => {
+                releaseCount++;
+                return dispose();
+            };
+            return owned;
+        });
+        const failure = new Error("command registration rejected");
+        const register = spyOn(commands, "registerV2Commands").mockRejectedValue(failure);
+        const opening = registerContext(host);
+        let rejected = false;
+        void opening.catch(() => {
+            rejected = true;
+        });
+        try {
+            await usageAborted.promise;
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            expect(rejected).toBe(false);
+            expect(stop).not.toHaveBeenCalled();
+            expect(releaseCount).toBe(0);
+            finishUsage.resolve();
+            await expect(opening).rejects.toBe(failure);
+            expect(stop).toHaveBeenCalledTimes(1);
+            expect(releaseCount).toBe(1);
+        } finally {
+            finishUsage.resolve();
+            await opening.catch(() => {});
+            register.mockRestore();
+            scope.mockRestore();
+            stop.mockRestore();
+        }
+    });
+
+    test("failed setup waits at most two seconds for a running backfill", async () => {
+        mockConfig({ disable: false });
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        setBootQuietPeriodForTests(0);
+        const ready = Promise.withResolvers<void>();
+        const registration = Promise.withResolvers<boolean>();
+        const register = spyOn(commands, "registerV2Commands").mockImplementation(() => {
+            ready.resolve();
+            return registration.promise;
+        });
+        const run = spyOn(backfill, "runV2SessionProjectBackfill").mockImplementation(
+            () => new Promise(() => {}),
+        );
+        const pool = spyOn(V2StoreReaderPool.prototype, "closeWhenIdle");
+        const lines = spyOn(logger, "log");
+        const opening = registerContext(fakeHost(projectDirectory()));
+        let failure: unknown;
+        void opening.catch((error) => {
+            failure = error;
+        });
+        try {
+            await ready.promise;
+            jest.advanceTimersByTime(1);
+            expect(run).toHaveBeenCalledTimes(1);
+            const original = new Error("command registration rejected");
+            registration.reject(original);
+            const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+            await flush();
+            jest.advanceTimersByTime(1_999);
+            await flush();
+            expect(failure).toBeUndefined();
+            expect(pool).not.toHaveBeenCalled();
+            jest.advanceTimersByTime(1);
+            await flush();
+            expect(failure).toBe(original);
+            expect(pool).toHaveBeenCalledTimes(1);
+            expect(
+                lines.mock.calls.filter(([line]) =>
+                    String(line).includes("backfill still running"),
+                ),
+            ).toEqual([["[magic-context] v2 backfill still running after setup cleanup"]]);
+        } finally {
+            lines.mockRestore();
+            pool.mockRestore();
+            run.mockRestore();
+            register.mockRestore();
+            setBootQuietPeriodForTests(null);
+            jest.useRealTimers();
+        }
+    });
+
     test("normal disposal interrupts hidden runs before joining subscription workers", async () => {
         mockConfig({ disable: false });
         const host = fakeHost(projectDirectory());

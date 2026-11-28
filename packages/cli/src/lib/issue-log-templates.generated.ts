@@ -1694,6 +1694,7 @@ const TEMPLATE_DATA = [
 "[magic-context] hook init: pending-marker rehydration failed:",
 "[magic-context] host stall profiler disabled: sampling failed",
 "[magic-context] host stall profiler: enable-file check failed",
+"[magic-context] v2 backfill still running after setup cleanup",
 "clone-inheritance: skipped dest=unknown reason=missing-parent",
 "event message.updated: no assistant info extracted from event",
 "outgoing fit: over-window-proof; attempting emergency reclaim",

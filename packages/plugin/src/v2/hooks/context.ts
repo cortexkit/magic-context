@@ -228,6 +228,8 @@ import { createHiddenChildSweeper, HIDDEN_CHILD_SWEEP_INTERVAL_MS } from "../hid
 import {
     createLateHiddenExecutor,
     createV2HiddenCompletionExecutor,
+    DEFAULT_DISPOSE_DRAIN_MS,
+    settleWithin,
     type V2HiddenCompletionExecutor,
 } from "../hidden-completion";
 import { HiddenModelActivity } from "../hidden-model-activity";
@@ -1777,7 +1779,10 @@ async function setupContext(
         cleanup.backfill = (failedSetup) => {
             if (!failedSetup) return;
             clearTimeout(timer);
-            return running;
+            if (!running) return;
+            return settleWithin(running, DEFAULT_DISPOSE_DRAIN_MS).then((joined) => {
+                if (!joined) log("[magic-context] v2 backfill still running after setup cleanup");
+            });
         };
     }
     const readAllForConversion = (sessionID: string) =>
