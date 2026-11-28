@@ -1359,6 +1359,10 @@ impl Store {
 }
 
 #[cfg(test)]
+#[path = "store_commit_probe.rs"]
+mod commit_probe;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
