@@ -5,13 +5,36 @@ finished=0
 home=
 cleanup() {
     local status=$?
-    local cleanup_status
+    local cleanup_status=0 first_rm=0 fallback=not-needed
     if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
         printf '%s\n' "$0: exited before successful completion" >&2
         status=1
     fi
     if [ -n "$home" ]; then
-        rm -rf -- "$home" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
+        home_inventory > "$logs/home-before-cleanup.tsv" || true
+        native_cleanup inspect > "$logs/native-before-cleanup.log" 2>&1 ||
+            printf '%s\n' 'Failed to collect native Windows cleanup evidence.' >&2
+        rm -rf -- "$home" > "$logs/cleanup-rm.log" 2>&1 || first_rm=$?
+        cleanup_status=$first_rm
+        if [ "$first_rm" -ne 0 ]; then
+            cat "$logs/cleanup-rm.log" >&2
+            home_inventory > "$logs/home-after-failed-cleanup.tsv" || true
+            fallback=0
+            native_cleanup remove-system-profile > "$logs/native-cleanup-fallback.log" 2>&1 || fallback=$?
+            if [ "$fallback" -eq 0 ]; then
+                cleanup_status=0
+                rm -rf -- "$home" >> "$logs/cleanup-rm.log" 2>&1 || cleanup_status=$?
+                cat "$logs/native-cleanup-fallback.log"
+            else
+                cat "$logs/native-cleanup-fallback.log" >&2
+            fi
+        fi
+        printf 'initial_rm_exit\tnative_fallback_exit\tcleanup_exit\n%s\t%s\t%s\n' \
+            "$first_rm" "$fallback" "$cleanup_status" > "$logs/cleanup-result.tsv"
+        if [ "$cleanup_status" -ne 0 ]; then
+            cat "$logs/cleanup-rm.log" >&2
+            [ "$status" -ne 0 ] || status=$cleanup_status
+        fi
     fi
     exit "$status"
 }
@@ -21,6 +44,36 @@ logs=target/windows-rust-logs
 mkdir -p "$logs"
 printf 'command\texit\tseconds\toutcome\n' > "$logs/results.tsv"
 status=0
+
+home_inventory() {
+    # Include the native AppData tree under USERPROFILE, not just $LOCALAPPDATA.
+    # Do not follow links out of the disposable home or read file contents.
+    LC_ALL=C find -P "$home" -mindepth 1 -maxdepth 8 -printf '%P\t%y\t%s\t%T@\n' \
+        2>> "$logs/home-inventory-errors.log" | LC_ALL=C sort
+}
+
+home_changes() {
+    local label=$1 rc=0
+    if home_inventory > "$logs/home-current.tsv"; then
+        diff -u --label previous --label "$label" "$logs/home-previous.tsv" "$logs/home-current.tsv" \
+            >> "$logs/home-changes.diff" || rc=$?
+        if [ "$rc" -gt 1 ]; then
+            printf 'Could not compare home inventory after %s (exit %s).\n' "$label" "$rc" >&2
+        fi
+        mv -f -- "$logs/home-current.tsv" "$logs/home-previous.tsv" ||
+            printf 'Could not save home inventory after %s.\n' "$label" >&2
+    else
+        printf 'Could not read home inventory after %s.\n' "$label" >&2
+    fi
+}
+
+native_cleanup() {
+    # This diagnostic may fail independently of the test and cleanup outcomes.
+    bounded 30s powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+        -File "$(cygpath -am scripts/ci/rust-windows-cleanup.ps1)" \
+        -Mode "$1" -StartedAt "$run_started" -Workspace "$(cygpath -am "$PWD")" \
+        -ScratchHome "$(cygpath -am "$home")"
+}
 
 record() {
     local label=$1 output start rc outcome
@@ -44,6 +97,7 @@ record() {
     printf '%s\t%s\t%s\t%s\n' "$label" "$rc" "$((SECONDS - start))" "$outcome" >> "$logs/results.tsv"
     printf '%s: %s (exit %s in %ss; %s)\n' "$label" "$outcome" "$rc" "$((SECONDS - start))" "$output"
     if (( rc != 0 )); then status=1; fi
+    if [ -n "$home" ]; then home_changes "$label"; fi
 }
 
 bounded() {
@@ -89,6 +143,7 @@ record fixture-eol bounded 2m git ls-files --eol -- \
 # disposable data and config directories (including Windows fallbacks).
 export CARGO_HOME=${CARGO_HOME:-$USERPROFILE/.cargo}
 export RUSTUP_HOME=${RUSTUP_HOME:-$USERPROFILE/.rustup}
+run_started=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 home=$(mktemp -d "$(cygpath -u "$RUNNER_TEMP")/mc-windows.XXXXXX")
 HOME=$(cygpath -am "$home")
 export HOME
@@ -96,6 +151,9 @@ export USERPROFILE=$HOME
 export XDG_DATA_HOME=$HOME/data XDG_CONFIG_HOME=$HOME/config
 export LOCALAPPDATA=$HOME/local APPDATA=$HOME/roaming
 mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$LOCALAPPDATA" "$APPDATA"
+home_inventory > "$logs/home-previous.tsv" || true
+cp -- "$logs/home-previous.tsv" "$logs/home-at-start.tsv"
+printf '%s\n' '# Home path, type, bytes and mtime; each diff is labeled by the preceding command.' > "$logs/home-changes.diff"
 
 live=(--features "agent-data,managed-settings,memory-replica")
 record module-default-build bounded 18m cargo build --locked -p mc-module
