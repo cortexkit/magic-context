@@ -393,6 +393,7 @@ fn ride_an_expired_cache_never_folds_the_head() {
         "{}",
         m1_text(&view)
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -417,6 +418,7 @@ fn assert_ride_folds_and_lands_queued_drops(cause: RideCause, scratch_name: &str
     assert!(touches(&view, "old", "p"), "{view:?}");
     session.accept(view);
     assert!(!session.queued.contains(&("old".into(), "p".into())));
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -483,7 +485,9 @@ fn ride_a_forgotten_cache_adds_nothing_to_an_over_limit_ride() {
             "no emergency drop with {cause:?}: {view:?}"
         );
         assert_eq!(m0(&view), Some(served), "{cause:?} folded m[0]");
+        drop(alone);
         std::fs::remove_dir_all(alone_dir).unwrap();
+        drop(both);
         std::fs::remove_dir_all(both_dir).unwrap();
 
         // A worker whose spent emergency episode has nothing left to drop:

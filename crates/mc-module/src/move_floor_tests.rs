@@ -277,6 +277,7 @@ async fn move_floor_a_moved_session_never_publishes_a_view_without_a_cut() {
             let view = view.expect("a session that never moved publishes");
             assert_eq!(cut_through(&view), None);
         }
+        drop(session);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

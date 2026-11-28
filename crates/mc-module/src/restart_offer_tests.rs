@@ -191,6 +191,7 @@ async fn restart_a_view_offered_again_keeps_the_bytes_it_was_sealed_with() {
             .save(&handed.route.session, &handed.session.durable())
             .unwrap();
     }
+    drop((handed.session, handed.store));
     std::fs::remove_dir_all(&handed.dir).unwrap();
 }
 
@@ -215,6 +216,7 @@ async fn restart_a_refused_offer_logs_the_policy_members_it_carried() {
         handed.session.unconfirmed.is_empty(),
         "a refused view is rolled back"
     );
+    drop((handed.session, handed.store));
     std::fs::remove_dir_all(&handed.dir).unwrap();
 }
 
@@ -297,5 +299,6 @@ async fn restart_a_view_saved_without_its_policy_members_is_rebuilt_not_offered_
             .is_none(),
         "a view differing from the runner's in policy alone was built"
     );
+    drop((handed.session, handed.store));
     std::fs::remove_dir_all(&handed.dir).unwrap();
 }
