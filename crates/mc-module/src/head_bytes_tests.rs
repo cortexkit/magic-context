@@ -415,3 +415,94 @@ fn a_baseline_from_the_decay_curve_build_replays_byte_identical_until_a_fold() {
     drop(restored);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn a_baseline_with_group_counts_replays_byte_identical_until_a_fold() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let path = dir.join("sessions.db");
+    let store = crate::store::Store::open(&path).unwrap();
+    let (mut session, mut settings) = head(dir);
+    settings.history_budget_percentage = 0.005;
+    for sequence in 4..=48 {
+        add_summary(
+            &session,
+            sequence,
+            "We read the parser and kept its diagnostics stable.",
+        );
+    }
+    let entries = || {
+        (1..=200).map(|n| {
+            let mut entry = text(n, &format!("m{n}"));
+            entry.written_at = 1_772_323_200_000 + n;
+            entry
+        })
+    };
+    session.load_summaries();
+
+    // Capture the saved baseline and the runner's view from a build whose
+    // day headings still include counts.
+    if let Some(path) = std::env::var_os("MC_HEAD_BYTES_WITH_COUNTS_OUT") {
+        session.index = crate::index::Index::starting_at(1);
+        session.index.extend(entries());
+        let state = record(
+            "baseline with day counts",
+            &mut session,
+            &settings,
+            &store,
+            dir,
+        );
+        assert!(session
+            .baseline
+            .as_ref()
+            .unwrap()
+            .m0
+            .contains(" summaries\n- "));
+        std::fs::write(path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+        return;
+    }
+    let old: Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/head-bytes-with-group-counts.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    write_stored(&path, &old["stored"]);
+    session.restore(store.load(&session.key).unwrap());
+    session.latest = Some(serde_json::from_str(old["view"].as_str().unwrap()).unwrap());
+    session.latest_unknown = false;
+    // Restore the fixture's dated transcript so a later fold can date every summary.
+    session.index = crate::index::Index::starting_at(1);
+    session.index.extend(entries());
+    session.index_ready = true;
+
+    let old_m0 = session.baseline.as_ref().unwrap().m0.clone();
+    assert!(old_m0.contains(" summaries\n- "));
+    assert!(!session.head_shape_changed(&settings));
+    let replayed = record("no rebuild", &mut session, &settings, &store, dir);
+    assert!(replayed["view"].is_null());
+    assert_eq!(replayed["baseline"], old["baseline"]);
+    assert_eq!(
+        serde_json::to_string(session.latest.as_ref().unwrap()).unwrap(),
+        old["view"].as_str().unwrap()
+    );
+
+    session.fold_due = true;
+    let folded = record("fold", &mut session, &settings, &store, dir);
+    let new_m0 = &session.baseline.as_ref().unwrap().m0;
+    assert!(
+        new_m0
+            .lines()
+            .zip(new_m0.lines().skip(1))
+            .any(|(heading, first)| {
+                heading.starts_with("## ")
+                    && heading.ends_with(" · 2026-03-01")
+                    && first.starts_with("- ")
+            }),
+        "the fold must render a day heading without a count: {new_m0}"
+    );
+    assert!(!new_m0.contains(" summaries\n- "));
+    assert!(folded["view"].is_string());
+}

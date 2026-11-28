@@ -109,8 +109,8 @@ pub(crate) trait Costs {
     fn piece(&mut self, index: usize, form: u8) -> u64;
     /// Summary `index` as one line under a day heading.
     fn group_line(&mut self, index: usize) -> u64;
-    /// A day heading. Its text shows only its first and last title and how
-    /// many there are ([`Heading`]), so that is all its cost may depend on.
+    /// A day heading. Its text depends only on the first and last members
+    /// ([`Heading`]), so that is all its cost may depend on.
     fn group_header(&mut self, heading: Heading) -> u64;
     /// What joining two pieces into the block adds to its count, per joint.
     fn joint(&mut self) -> f64 {
@@ -535,11 +535,7 @@ impl<'s, 'd> TitleFill<'s, 'd> {
                 let alone = costs.piece(first, TITLE) as i64 - costs.group_line(first) as i64;
                 (alone, 1)
             } else {
-                let heading = Heading {
-                    first,
-                    last,
-                    count: length,
-                };
+                let heading = Heading { first, last };
                 (costs.group_header(heading) as i64, length + 1)
             }
         };
@@ -906,13 +902,11 @@ pub(crate) fn day_groups(summaries: &[Summary], forms: &[u8]) -> Vec<Vec<usize>>
     groups
 }
 
-/// A day heading over a run of titles: its first and last title and how
-/// many there are, which is all its text shows.
+/// A day heading over a run of titles, identified by the members at its endpoints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Heading {
     pub first: usize,
     pub last: usize,
-    pub count: usize,
 }
 
 impl Heading {
@@ -921,7 +915,6 @@ impl Heading {
         Self {
             first: members[0],
             last: members[members.len() - 1],
-            count: members.len(),
         }
     }
 }

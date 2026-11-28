@@ -1175,7 +1175,7 @@ fn the_title_fill_looks_costs_up_a_linear_number_of_times() {
 }
 
 /// Costs given per summary, with a day heading whose cost depends on what it
-/// shows (its first and last title and how many) and a joint that can be a
+/// shows (the first and last member) and a joint that can be a
 /// fraction, so that a wrong heading or piece count shows in the total.
 struct Varied {
     forms: Vec<[u64; 5]>,
@@ -1191,7 +1191,7 @@ impl Costs for Varied {
         self.lines[index]
     }
     fn group_header(&mut self, heading: Heading) -> u64 {
-        ((heading.first * 7 + heading.last * 3 + heading.count * 5) % 13 + 1) as u64
+        ((heading.first * 7 + heading.last * 3) % 13 + 1) as u64
     }
     fn joint(&mut self) -> f64 {
         self.joint

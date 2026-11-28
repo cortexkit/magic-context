@@ -71,54 +71,47 @@ fn titles_of_one_day_share_a_heading_that_reads_back_as_the_same_ranges() {
         let mut lines = section.lines();
         let heading = lines.next().unwrap();
         let rest: Vec<&str> = lines.collect();
-        let group = heading
-            .strip_suffix(" summaries")
-            .and_then(|head| head.rsplit_once(" · "))
-            .and_then(|(head, count)| Some((head, count.parse::<usize>().ok()?)))
-            .filter(|(_, count)| {
-                *count == rest.len() && rest.iter().all(|line| line.starts_with("- "))
-            });
-        match group {
-            Some((head, count)) => {
-                groups += 1;
-                assert!(count >= 2);
-                let (range, day) = head.strip_prefix("## ").unwrap().split_once(" · ").unwrap();
-                let (start, end) = range.split_once('-').unwrap();
-                let members: Vec<&DecayRenderCompartment> = (0..count)
-                    .map(|_| {
-                        let (index, tier, _) = items.next().unwrap();
-                        assert_eq!(*tier, TITLE);
-                        &comps[*index]
-                    })
-                    .collect();
-                // The heading spans the run; each line names its own start
-                // and title, in order.
-                assert_eq!(start.parse::<i64>().unwrap(), members[0].start_message);
-                assert_eq!(end.parse::<i64>().unwrap(), members[count - 1].end_message);
-                for (line, member) in rest.iter().zip(&members) {
-                    assert_eq!(member.start_date.as_deref(), Some(day));
-                    let (at, title) = line.strip_prefix("- ").unwrap().split_once(": ").unwrap();
-                    assert_eq!(at.parse::<i64>().unwrap(), member.start_message);
-                    assert_eq!(
-                        title,
-                        member.title.replace('<', "&lt;").replace('>', "&gt;")
-                    );
-                }
-                // Each line's stretch ends before the next line's start.
-                for pair in members.windows(2) {
-                    assert!(pair[0].end_message < pair[1].start_message);
-                }
+        if rest.len() >= 2 && rest.iter().all(|line| line.starts_with("- ")) {
+            groups += 1;
+            let members: Vec<&DecayRenderCompartment> = rest
+                .iter()
+                .map(|_| {
+                    let (index, tier, _) = items.next().unwrap();
+                    assert_eq!(*tier, TITLE);
+                    &comps[*index]
+                })
+                .collect();
+            let first = members[0];
+            let last = members.last().unwrap();
+            let day = first.start_date.as_deref().unwrap();
+            // The heading spans the run; each line names its own start
+            // and title, in order.
+            assert_eq!(
+                heading,
+                format!("## {}-{} · {day}", first.start_message, last.end_message)
+            );
+            for (line, member) in rest.iter().zip(&members) {
+                assert_eq!(member.start_date.as_deref(), Some(day));
+                let (at, title) = line.strip_prefix("- ").unwrap().split_once(": ").unwrap();
+                assert_eq!(at.parse::<i64>().unwrap(), member.start_message);
+                assert_eq!(
+                    title,
+                    member.title.replace('<', "&lt;").replace('>', "&gt;")
+                );
             }
-            None => {
-                let (index, tier, _) = items.next().unwrap();
-                let c = &comps[*index];
-                assert_eq!(section, render_compartment_at_tier(c, *tier));
-                assert!(heading.starts_with(&format!("## {}-{}", c.start_message, c.end_message)));
-                if *tier == TITLE {
-                    // A title alone keeps today's heading.
-                    single_titles += 1;
-                    assert_eq!(section, heading);
-                }
+            // Each line's stretch ends before the next line's start.
+            for pair in members.windows(2) {
+                assert!(pair[0].end_message < pair[1].start_message);
+            }
+        } else {
+            let (index, tier, _) = items.next().unwrap();
+            let c = &comps[*index];
+            assert_eq!(section, render_compartment_at_tier(c, *tier));
+            assert!(heading.starts_with(&format!("## {}-{}", c.start_message, c.end_message)));
+            if *tier == TITLE {
+                // A title alone keeps its own heading.
+                single_titles += 1;
+                assert_eq!(section, heading);
             }
         }
     }
@@ -142,10 +135,7 @@ fn the_items_add_up_to_the_blocks_pieces() {
     let mut grouped = 0;
     for section in rendered.text.split("\n\n") {
         let lines: Vec<&str> = section.lines().collect();
-        if lines.len() > 1
-            && lines[1..].iter().all(|line| line.starts_with("- "))
-            && lines[0].ends_with(" summaries")
-        {
+        if lines.len() >= 3 && lines[1..].iter().all(|line| line.starts_with("- ")) {
             for (n, line) in lines[1..].iter().enumerate() {
                 let expected = chars(line) + if n == 0 { chars(lines[0]) } else { 0 };
                 assert_eq!(items.next().unwrap().2, expected as u64);
@@ -682,7 +672,9 @@ fn a_later_render_counts_only_what_no_earlier_one_counted() {
     // heading, which are counted each render.
     let pieces = std::cell::Cell::new(0usize);
     let count = |text: &str| {
-        if !text.contains("\n\n") && !(text.starts_with("## ") && text.ends_with(" summaries")) {
+        let day_heading =
+            text.starts_with("## ") && !text.contains('\n') && text.matches(" · ").count() == 1;
+        if !(text.contains("\n\n") || day_heading) {
             pieces.set(pieces.get() + 1);
         }
         chars(text)

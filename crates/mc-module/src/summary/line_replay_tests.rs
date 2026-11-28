@@ -454,8 +454,7 @@ fn the_line_replay_reports_both_renderers_on_a_generated_store() {
     assert_eq!(report.matches("  line   | ").count(), 2);
     assert!(block.starts_with("<session-history>\n## "));
     assert!(block.ends_with("\n</session-history>"));
-    // Titles of one day share a heading.
-    assert!(block.contains(" summaries\n- "));
+    assert!(has_day_group(&block));
     // The stores are only read.
     assert_eq!(
         (
@@ -792,9 +791,21 @@ fn two_folds_of_the_same_store_give_the_same_bytes() {
         super::head::fold_with(&inputs, &Default::default(), None)
     };
     let (first, second) = (fold(), fold());
-    assert!(first.m0.contains(" summaries\n- "));
+    assert!(has_day_group(&first.m0));
     assert_eq!(first.m0, second.m0);
     assert_eq!(first.summary_items, second.summary_items);
+}
+
+/// A day heading has two or more title lines immediately below it.
+fn has_day_group(text: &str) -> bool {
+    text.lines()
+        .zip(text.lines().skip(1).zip(text.lines().skip(2)))
+        .any(|(head, (first, second))| {
+            head.starts_with("## ")
+                && head.matches(" · ").count() == 1
+                && first.starts_with("- ")
+                && second.starts_with("- ")
+        })
 }
 
 /// How much of each of those six budgets a fold uses, on the realistic

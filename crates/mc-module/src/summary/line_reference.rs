@@ -118,7 +118,7 @@ impl Costs for Trial {
         1 + mix(self.salt + index as u64) % 19
     }
     fn group_header(&mut self, heading: Heading) -> u64 {
-        let shown = heading.first + heading.count * 7 + heading.last * 19;
+        let shown = heading.first + heading.last * 19;
         1 + mix(self.salt + shown as u64) % 53
     }
     fn joint(&mut self) -> f64 {

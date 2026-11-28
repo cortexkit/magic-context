@@ -294,11 +294,10 @@ pub(super) fn group_header(rows: &[&DecayRenderCompartment], heading: Heading) -
     let first = rows[heading.first];
     let last = rows[heading.last];
     format!(
-        "## {}-{} · {} · {} summaries",
+        "## {}-{} · {}",
         first.start_message,
         last.end_message,
-        summary_day(first).unwrap_or_default(),
-        heading.count
+        summary_day(first).unwrap_or_default()
     )
 }
 
