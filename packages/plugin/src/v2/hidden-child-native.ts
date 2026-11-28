@@ -181,7 +181,7 @@ export function createNativeHiddenChildren(
         const start = () => host.create(input);
         const removeLate = ({ id }: Awaited<ReturnType<typeof start>>) => {
             if (!id || !budget) return;
-            // The child was never admitted, but the sweep needs its ID if removal fails.
+            // The child was created before it was recorded as live, but the sweep needs its ID if removal fails.
             void retireLate(id, directory, Date.now(), budget.cleanupMs);
         };
         const created = await (budget?.work(start, removeLate) ?? start());
