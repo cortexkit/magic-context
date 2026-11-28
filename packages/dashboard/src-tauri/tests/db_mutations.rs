@@ -299,6 +299,83 @@ fn bulk_archive_memory_status_queues_one_mutation_per_memory_without_epoch_bumps
 }
 
 #[test]
+fn bulk_restore_mixed_selection_changes_and_bumps_only_actually_changed_rows() {
+    let mut conn = make_db();
+    // a1: no-op (active -> active); a2: archived -> active (changes).
+    let a1 = insert_memory(&conn, "git:project-a", "active");
+    let a2 = insert_memory(&conn, "git:project-a", "archived");
+    // b1: permanent -> active (changes).
+    let b1 = insert_memory(&conn, "git:project-b", "permanent");
+    // c1: no-op, and the only selected row on its path (path must not bump).
+    let c1 = insert_memory(&conn, "git:project-c", "active");
+    seed_project_state(&conn, "git:project-a", 4, 0);
+    seed_project_state(&conn, "git:project-b", 6, 0);
+    seed_project_state(&conn, "git:project-c", 3, 0);
+
+    let affected =
+        db::bulk_update_memory_status(&mut conn, &[a1, a2, b1, c1], "active").expect("restore");
+
+    // affected counts matched rows, not changed ones: the UPDATE has no status
+    // predicate, so all four selected rows are written even though two of them
+    // keep their status.
+    assert_eq!(affected, 4);
+    for id in [a1, a2, b1, c1] {
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM memories WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("status");
+        assert_eq!(status, "active");
+    }
+    // Only the paths whose rows actually transitioned bump the epoch; the
+    // all-no-op path (git:project-c) must not bust it.
+    assert_eq!(memory_epoch(&conn, "git:project-a"), 5);
+    assert_eq!(memory_epoch(&conn, "git:project-b"), 7);
+    assert_eq!(memory_epoch(&conn, "git:project-c"), 3);
+    // A restore never queues memory mutations (unlike archive).
+    assert!(mutation_log_rows(&conn).is_empty());
+}
+
+#[test]
+fn bulk_make_permanent_mixed_selection_changes_and_bumps_only_actually_changed_rows() {
+    let mut conn = make_db();
+    // a1: active -> permanent (changes); a2: permanent -> permanent (no-op).
+    let a1 = insert_memory(&conn, "git:project-a", "active");
+    let a2 = insert_memory(&conn, "git:project-a", "permanent");
+    // b1: archived -> permanent (changes).
+    let b1 = insert_memory(&conn, "git:project-b", "archived");
+    // c1: permanent -> permanent (no-op), and the only selected row on its path.
+    let c1 = insert_memory(&conn, "git:project-c", "permanent");
+    seed_project_state(&conn, "git:project-a", 4, 0);
+    seed_project_state(&conn, "git:project-b", 6, 0);
+    seed_project_state(&conn, "git:project-c", 3, 0);
+    let ids = [a1, a2, b1, c1];
+
+    let affected =
+        db::bulk_update_memory_status(&mut conn, &ids, "permanent").expect("bulk permanent");
+
+    assert_eq!(affected, 4);
+    for id in ids {
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM memories WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("status");
+        assert_eq!(status, "permanent");
+    }
+    // Same no-op guard as the restore-to-active path: only the paths whose
+    // rows actually transitioned bump the epoch.
+    assert_eq!(memory_epoch(&conn, "git:project-a"), 5);
+    assert_eq!(memory_epoch(&conn, "git:project-b"), 7);
+    assert_eq!(memory_epoch(&conn, "git:project-c"), 3);
+    assert!(mutation_log_rows(&conn).is_empty());
+}
+
+#[test]
 fn bulk_delete_memories_queues_one_delete_per_memory_without_epoch_bumps() {
     let mut conn = make_db();
     let a1 = insert_memory(&conn, "git:project-a", "active");
