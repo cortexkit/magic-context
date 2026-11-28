@@ -106,6 +106,8 @@ pub(crate) struct Client {
     pub(crate) asked: Mutex<Vec<(String, Option<String>)>>,
     /// Overrides for a lab's exact provider/preset requests, including errors.
     pub(crate) lab_catalogs: Option<LabCatalogs>,
+    pub(crate) lab_guidance_requests: Mutex<Vec<(String, String)>>,
+    pub(crate) lab_guidance_missing: bool,
     pub(crate) lab_catalog_projects: Mutex<Vec<Option<String>>>,
     pub(crate) lab_send_projects: Mutex<Vec<Option<String>>>,
     pub(crate) lab_scopes: Option<std::sync::Arc<ChildScopes>>,
@@ -152,6 +154,8 @@ impl Client {
             no_reader_preset: Vec::new(),
             asked: Mutex::default(),
             lab_catalogs: None,
+            lab_guidance_requests: Mutex::default(),
+            lab_guidance_missing: false,
             lab_catalog_projects: Mutex::default(),
             lab_send_projects: Mutex::default(),
             lab_scopes: None,
@@ -273,6 +277,29 @@ impl RunnerClient for Client {
                 tool
             })
             .collect();
+        Ok(answer)
+    }
+    async fn lab_tool_catalog(
+        &self,
+        child: &Child,
+        provider: &str,
+        preset: &str,
+    ) -> Result<cortexkit_role_tool_provider::catalog::CatalogAnswer, ClientError> {
+        use cortexkit_role_tool_provider::catalog::{system_text_digest, SystemTextAnswer};
+
+        self.lab_guidance_requests
+            .lock()
+            .unwrap()
+            .push((provider.to_owned(), preset.to_owned()));
+        let mut answer = self.tool_catalog(child, provider, Some(preset)).await?;
+        if answer.system_text.is_none() && !self.lab_guidance_missing {
+            let text = "Reader guidance from the fixture.";
+            answer.system_text = Some(
+                SystemTextAnswer::new(system_text_digest(text), "a".repeat(64))
+                    .with_text(text)
+                    .with_tool_names(answer.tools.iter().map(|t| &t.name)),
+            );
+        }
         Ok(answer)
     }
     async fn child_session_retention(&self, _: &Child) -> Option<SessionRetention> {

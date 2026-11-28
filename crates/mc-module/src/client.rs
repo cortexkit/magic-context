@@ -176,6 +176,18 @@ pub trait RunnerClient: Send + Sync + 'static {
     > + Send {
         async { Err(ClientError::new("no code-reading tools")) }
     }
+    /// The dreamer lab fetches guidance and tool definitions together so the
+    /// guidance describes the same set of tools.
+    fn lab_tool_catalog(
+        &self,
+        _child: &Child,
+        _provider: &str,
+        _preset: &str,
+    ) -> impl Future<
+        Output = Result<cortexkit_role_tool_provider::catalog::CatalogAnswer, ClientError>,
+    > + Send {
+        async { Err(ClientError::new("no lab catalog guidance")) }
+    }
     /// What this child runner allows a `retention_policy` to ask for, when it
     /// declares the `session_retention` group. Older or undiscoverable
     /// runners receive no new send member.

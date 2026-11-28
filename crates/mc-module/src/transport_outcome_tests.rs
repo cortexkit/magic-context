@@ -4,6 +4,44 @@
 
 use super::*;
 
+#[tokio::test]
+async fn paired_lab_catalog_leaves_plain_catalog_request_bytes_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let scopes = Arc::new(ChildScopes::new("test-catalog"));
+    scopes.set_publisher(Arc::new(crate::child_scopes::tests::Recorder::default()));
+    let mut client = SubcRunnerClient::new(dir.path().join("connection.json"), scopes);
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    client.captured_catalogs = Some(requests.clone());
+    let child = Child {
+        session: SessionRef::new("test-runner", "test", "lab"),
+        project_root: Some(dir.path().to_str().unwrap().to_owned()),
+    };
+
+    client
+        .tool_catalog(&child, "aft", Some("reader"))
+        .await
+        .unwrap();
+    client
+        .lab_tool_catalog(&child, "aft", "reader")
+        .await
+        .unwrap();
+    client
+        .tool_catalog(&child, "prefrontal", None)
+        .await
+        .unwrap();
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests[0],
+        br#"{"arguments":{"params":{},"preset":"reader"},"name":"tool.catalog"}"#
+    );
+    assert_eq!(requests[1], br#"{"arguments":{"params":{},"preset":"reader","system_text":{"params":{},"preset":"reader"}},"name":"tool.catalog"}"#);
+    assert_eq!(
+        requests[2],
+        br#"{"arguments":{"params":{}},"name":"tool.catalog"}"#
+    );
+}
+
 #[test]
 fn outcome_a_lost_answer_says_the_request_may_have_arrived() {
     let error = call_error(

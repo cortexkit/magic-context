@@ -316,6 +316,8 @@ pub struct SubcRunnerClient {
     run_ends: Arc<crate::run_ends::RunEnds>,
     #[cfg(test)]
     child_call_replies: std::collections::BTreeMap<&'static str, Value>,
+    #[cfg(test)]
+    captured_catalogs: Option<Arc<std::sync::Mutex<Vec<Vec<u8>>>>>,
 }
 
 /// ck-mc's connection to the daemon as a consumer, made on first use and
@@ -408,6 +410,8 @@ impl SubcRunnerClient {
             run_ends: Arc::default(),
             #[cfg(test)]
             child_call_replies: Default::default(),
+            #[cfg(test)]
+            captured_catalogs: None,
         }
     }
 
@@ -515,6 +519,21 @@ impl SubcRunnerClient {
         params: &P,
         scope: Option<ScopeSelector>,
     ) -> Result<Vec<u8>, ClientError> {
+        #[cfg(test)]
+        if let Some(catalogs) = self
+            .captured_catalogs
+            .as_ref()
+            .filter(|_| method == cortexkit_role_tool_provider::ops::TOOL_CATALOG)
+        {
+            catalogs
+                .lock()
+                .unwrap()
+                .push(request_body(role.0, method, params));
+            return Ok(serde_json::to_vec(
+                &cortexkit_role_tool_provider::catalog::CatalogAnswer::default(),
+            )
+            .unwrap());
+        }
         let consumer = self.consumer().await.map_err(ClientError::new)?;
         let target = route_target(role.0, &session.runner);
         let options = CallOptions {
@@ -890,6 +909,46 @@ impl RunnerClient for SubcRunnerClient {
             )
             .await?;
         // A tool provider's answer is the bare object, never wrapped.
+        serde_json::from_slice(&reply)
+            .map_err(|error| ClientError::new(format!("tool.catalog answer: {error}")))
+    }
+
+    async fn lab_tool_catalog(
+        &self,
+        child: &Child,
+        provider: &str,
+        preset: &str,
+    ) -> Result<cortexkit_role_tool_provider::catalog::CatalogAnswer, ClientError> {
+        use cortexkit_role_tool_provider::catalog::{CatalogRequest, SystemTextItem};
+
+        let root = child.project_root.as_deref().ok_or_else(|| {
+            ClientError::new("tool.catalog: the run has no project folder to read in")
+        })?;
+        let scope = self
+            .child_scopes
+            .for_child(root)
+            .await
+            .map_err(|error| ClientError::new(format!("tool.catalog: child scope: {error}")))?;
+        let provider = SessionRef::new(
+            provider.to_owned(),
+            RUNNER_HOST_FAMILY.to_owned(),
+            child.session.session.clone(),
+        );
+        let request = CatalogRequest::default()
+            .with_preset(preset)
+            .with_system_text(SystemTextItem::default().with_preset(preset));
+        let reply = self
+            .call_raw(
+                &provider,
+                (
+                    cortexkit_role_tool_provider::ROLE,
+                    cortexkit_role_tool_provider::VERSION,
+                ),
+                cortexkit_role_tool_provider::ops::TOOL_CATALOG,
+                &request,
+                Some(scope),
+            )
+            .await?;
         serde_json::from_slice(&reply)
             .map_err(|error| ClientError::new(format!("tool.catalog answer: {error}")))
     }

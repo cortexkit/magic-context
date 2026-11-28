@@ -9,6 +9,7 @@ use super::*;
 use crate::context_db::ContextDb;
 use crate::dreamer::run::tests::{Client, Ends};
 
+mod guidance_tests;
 #[path = "history_tools_tests.rs"]
 mod history_tools;
 mod related_tests;
@@ -488,7 +489,7 @@ async fn lab_without_sidekick_keeps_its_send_and_request_bytes() {
         pins,
         [
             "d783f1e07f770e8c2cadcffddb512a7e81650db0dd661083b80121152caccbce",
-            "0c85d80ebcfacba3f9235cef8b818352e932a153c3e3db4d3860f8cbad152e42",
+            "d11f7d9b9f9f961da5b65eac78275f5ddbfab14a164ccb94bcb6aa418d1f46cd",
         ]
     );
 }

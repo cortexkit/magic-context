@@ -80,6 +80,7 @@ impl Persona {
         checkout_paths: &[String],
         context_text: &str,
         memories_text: &str,
+        tool_guidance: &BTreeMap<&str, String>,
     ) -> Result<(String, String), String> {
         context.tools = GrantMap(tools.clone());
         if tools.get("sidekick") == Some(&true) {
@@ -90,6 +91,14 @@ impl Persona {
                 ),
             );
         }
+        context = context.with_root(
+            "tool_guidance",
+            cortexkit_persona::Value::map(
+                tool_guidance
+                    .iter()
+                    .map(|(&provider, text)| (provider, cortexkit_persona::Value::string(text))),
+            ),
+        );
         let system = self
             .role
             .render(&context, &FragmentSources::new())
@@ -103,8 +112,13 @@ impl Persona {
             .keys()
             .map(|name| (name.as_str(), json!({"type":"boolean"})))
             .collect();
+        let guidance_properties: BTreeMap<_, _> = tool_guidance
+            .keys()
+            .map(|&provider| (provider, json!({"type":"string"})))
+            .collect();
         let shape = FactsShape::from_json_schema(&json!({"type":"object","properties":{
             "tools":{"type":"object","properties":properties},
+            "tool_guidance":{"type":"object","properties":guidance_properties},
             "checkout_paths":{"type":"array","items":{"type":"string"}},
             "context_text":{"type":"string"}, "memories_text":{"type":"string"}
         }}))
@@ -116,7 +130,7 @@ impl Persona {
                 "first-message",
                 &json!({
                     "tools":tools, "checkout_paths":checkout_paths, "context_text":context_text,
-                    "memories_text":memories_text,
+                    "memories_text":memories_text, "tool_guidance":tool_guidance,
                 }),
                 RenderLimits::default(),
             )

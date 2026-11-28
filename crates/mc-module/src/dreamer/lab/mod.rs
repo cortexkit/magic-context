@@ -13,7 +13,7 @@ mod spec;
 mod tests;
 mod verdicts;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -25,7 +25,7 @@ use cortexkit_persona::{
 };
 use cortexkit_role_compaction::setup::ModelRef;
 use cortexkit_role_routing::select::SelectRequest;
-use cortexkit_role_tool_provider::catalog::{self, composition_digest};
+use cortexkit_role_tool_provider::catalog::{self, composition_digest, CatalogAnswer};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -42,6 +42,7 @@ use super::{plan, run};
 use spec::{Route, Spec, Tool};
 
 static RUNS: AtomicU64 = AtomicU64::new(0);
+const AFT_PROVIDER: &str = "aft";
 const OWN_NAMES: [&str; 5] = [
     "git_read",
     "memory_search",
@@ -454,15 +455,27 @@ impl Lab {
             .map(|name| (name.into(), false))
             .collect();
         let mut reader_tools = Vec::new();
+        let mut tool_guidance = BTreeMap::from([
+            (AFT_PROVIDER, String::new()),
+            (plan::SIDEKICK_PROVIDER, String::new()),
+        ]);
+        let mut tool_guidance_digests = None;
         let mut providers = BTreeMap::new();
         let mut tool_items = Vec::new();
         if let Some(reader) = reader {
             let preset = plan::reader_preset();
-            let catalog = client
-                .tool_catalog(child, reader, Some(preset))
-                .await
-                .map_err(|e| e.to_string())?;
+            let catalog = if reader == AFT_PROVIDER {
+                client.lab_tool_catalog(child, reader, preset).await
+            } else {
+                client.tool_catalog(child, reader, Some(preset)).await
+            }
+            .map_err(|e| e.to_string())?;
             let definitions = plan::reader_tools(reader, &catalog)?;
+            if reader == AFT_PROVIDER {
+                let (text, digests) = reader_guidance(reader, preset, &catalog, &definitions)?;
+                tool_guidance.insert(AFT_PROVIDER, text.to_owned());
+                tool_guidance_digests = Some(json!({(AFT_PROVIDER): digests}));
+            }
             for tool in &definitions {
                 tools.insert(tool.name.clone(), true);
             }
@@ -552,6 +565,7 @@ impl Lab {
                 &checkout_paths,
                 &owned.context,
                 &owned.memories.text,
+                &tool_guidance,
             )?;
             if system.trim().is_empty() || prompt.trim().is_empty() {
                 return Err("the lab system text and first message must not be empty".into());
@@ -578,6 +592,7 @@ impl Lab {
             system,
             prompt,
             reader_tools,
+            tool_guidance_digests,
             sidekick_offered,
             plan: PlanRun {
                 plan: plan.as_object().expect("lab plan object").clone(),
@@ -834,6 +849,7 @@ pub(super) struct Prepared {
     pub system: String,
     pub prompt: String,
     reader_tools: Vec<Value>,
+    tool_guidance_digests: Option<Value>,
     sidekick_offered: bool,
     pub plan: PlanRun,
 }
@@ -868,10 +884,12 @@ impl Observed {
         self.child = Some(child.clone());
         self.send = ObservedSend::default();
         self.sidekick_offered = prepared.sidekick_offered;
-        self.request = Some(
-            json!({"system_text":prepared.system, "first_message":prepared.prompt,
-            "lab_tools":lab_tools, "reader_tools_at_preflight":prepared.reader_tools}),
-        );
+        let mut request = json!({"system_text":prepared.system, "first_message":prepared.prompt,
+            "lab_tools":lab_tools, "reader_tools_at_preflight":prepared.reader_tools});
+        if let Some(digests) = &prepared.tool_guidance_digests {
+            request["tool_guidance_digests"] = digests.clone();
+        }
+        self.request = Some(request);
     }
 
     fn write_request(&mut self, out: &Path) -> Result<(), String> {
@@ -931,6 +949,44 @@ impl Observed {
                 "per_step_unavailable":"the runner's run result reports aggregate usage only"},
             "wall_time_ms":wall_time_ms,"ended":ended,"stop":stop,"missing_ids":missing,"error":error})
     }
+}
+
+fn reader_guidance<'a>(
+    provider: &str,
+    preset: &str,
+    answer: &'a CatalogAnswer,
+    tools: &[plan::ReaderTool],
+) -> Result<(&'a str, Value), String> {
+    let missing =
+        || format!("{provider} {preset} catalog did not return system_text.text guidance");
+    let guidance = answer.system_text.as_ref().ok_or_else(missing)?;
+    let text = guidance
+        .text
+        .as_deref()
+        .filter(|text| !text.is_empty())
+        .ok_or_else(missing)?;
+    let expected: BTreeSet<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
+    let actual: BTreeSet<_> = guidance
+        .tool_names
+        .iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    if expected != actual {
+        let missing = expected.difference(&actual).collect::<Vec<_>>();
+        let unexpected = actual.difference(&expected).collect::<Vec<_>>();
+        return Err(format!("{provider} {preset} catalog system_text.tool_names differs from the served tools: missing: {missing:?}; unexpected: {unexpected:?}"));
+    }
+    if catalog::system_text_digest(text) != guidance.item_digest {
+        return Err(format!(
+            "{provider} {preset} catalog system_text.item_digest does not match its text"
+        ));
+    }
+    Ok((
+        text,
+        json!({"item_digest":guidance.item_digest,"preflight_digest":guidance.preflight_digest,
+        "composition_digest":guidance.composition_digest}),
+    ))
 }
 
 fn composition_tools(mut tools: Vec<plan::ReaderTool>) -> Vec<Value> {
