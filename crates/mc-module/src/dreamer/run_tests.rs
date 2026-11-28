@@ -35,6 +35,10 @@ pub(crate) enum Ends {
     Full(u64),
     SpentFull(u64, u64),
     LabTools(Vec<serde_json::Value>),
+    LabRestart {
+        before: serde_json::Value,
+        after: serde_json::Value,
+    },
     /// The runner could not hand the prompt to its host, so no model ran.
     NeverRan,
 }
@@ -305,7 +309,12 @@ impl RunnerClient for Client {
             .unwrap()
             .pop_front()
             .expect("a scripted run end");
+        let (ends, restart) = match ends {
+            Ends::LabRestart { before, after } => (Ends::LabTools(vec![before]), Some(after)),
+            ends => (ends, None),
+        };
         Ok(match ends {
+            Ends::LabRestart { .. } => unreachable!("restart split into two steps"),
             Ends::Result(result) => *result,
             Ends::Reply(text) => completed(text, None),
             Ends::Spent(text, tokens) => {
@@ -363,7 +372,33 @@ impl RunnerClient for Client {
                             .push(serde_json::from_slice(&bytes).unwrap());
                     }
                 }
-                self.lab_result.clone().unwrap_or(result)
+                if let Some(after) = restart {
+                    let sends = self.sends.lock().unwrap();
+                    let request = serde_json::to_value(&sends.last().unwrap().1).unwrap();
+                    let mut ends = self.ends.lock().unwrap();
+                    if request["on_restart"] == "resume" {
+                        let mut paused = RunResult::new("run", states::PAUSED);
+                        paused.reason =
+                            Some(cortexkit_role_llm_runner::run::RunReason::Restart.into());
+                        ends.extend([
+                            Ends::Result(Box::new(paused)),
+                            Ends::Result(Box::new(RunResult::new("run", states::ACTIVE))),
+                            Ends::LabTools(vec![after]),
+                        ]);
+                    } else {
+                        let mut interrupted = RunResult::new("run", states::INTERRUPTED);
+                        interrupted.reason = Some(
+                            cortexkit_role_llm_runner::run::interrupt_reasons::RUNNER_SHUTDOWN
+                                .into(),
+                        );
+                        ends.push_back(Ends::Result(Box::new(interrupted)));
+                    }
+                    let mut active = RunResult::new("run", states::ACTIVE);
+                    active.usage = result.usage;
+                    active
+                } else {
+                    self.lab_result.clone().unwrap_or(result)
+                }
             }
             Ends::NeverRan => crate::summary::run::never_ran_tests::handover("nothing_written"),
             Ends::Error(message) => {

@@ -471,6 +471,11 @@ async fn lab_without_sidekick_keeps_its_send_and_request_bytes() {
     // The child ID includes a PID and wall clock; every other send byte is stable.
     assert_eq!(sent.send_id, sends[0].0.session.session);
     sent.send_id = "mc-dream:fixed:0.0".into();
+    // Restart opt-in is the only new send field; pin the rest to the old bytes.
+    assert_eq!(
+        sent.runner_params.remove("on_restart"),
+        Some(json!("resume"))
+    );
     let send = serde_json::to_vec(&sent).unwrap();
     let request = fs::read(fixture.out.join("request.json")).unwrap();
     let pins = [
@@ -1004,6 +1009,33 @@ async fn interrupted_run_reason_reaches_the_lab_artifact() {
             "{log}"
         );
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn lab_restart_resumes_same_run_and_completes_verdicts() {
+    let fixture = Fixture::new();
+    let before = verdict(7, "before restart");
+    let after = verdict(2, "after restart");
+    let client = fixture
+        .run(
+            fixture.spec_value(),
+            Ends::LabRestart {
+                before: submit(std::slice::from_ref(&before)),
+                after: submit(std::slice::from_ref(&after)),
+            },
+        )
+        .await;
+    let recorded = fixture.output("run.json");
+    assert_eq!(recorded["ended"], "complete", "{recorded}");
+    assert_eq!(recorded["missing_ids"], json!([]));
+    assert_eq!(recorded["stop"], "model_finished");
+    assert_eq!(recorded["error"], Value::Null);
+    assert_eq!(client.children().len(), 1);
+    assert_eq!(
+        client.lab_verdicts_after.lock().unwrap()[0],
+        json!([before])
+    );
+    assert_eq!(fixture.output("verdicts.json"), json!([before, after]));
 }
 
 #[tokio::test]

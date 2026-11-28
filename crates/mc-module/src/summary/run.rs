@@ -1045,9 +1045,20 @@ async fn call<C: RunnerClient>(
         plan: None,
         attribution: call_on.attribution,
     };
-    let reply = send_and_wait_inner(client, child, send_id, prompt, &how, usage, observed)
-        .await?
-        .completed()?;
+    let reply = send_and_wait_inner(
+        client,
+        child,
+        send_id,
+        prompt,
+        &how,
+        usage,
+        SendOptions {
+            observed,
+            ..SendOptions::default()
+        },
+    )
+    .await?
+    .completed()?;
     if reply.length_capped {
         return Err(CallError::Summary("the reply hit its output limit".into()));
     }
@@ -1197,7 +1208,16 @@ pub(crate) async fn send_and_wait_stepped<C: RunnerClient>(
     how: &Model<'_>,
     usage: &mut Option<StepUsage>,
 ) -> Result<Ended, SummaryError> {
-    send_and_wait_with_usage(client, child, send_id, prompt, how, usage, None).await
+    send_and_wait_with_usage(
+        client,
+        child,
+        send_id,
+        prompt,
+        how,
+        usage,
+        SendOptions::default(),
+    )
+    .await
 }
 
 /// What an experiment can prove about its send, independently of whether it
@@ -1226,7 +1246,50 @@ pub(crate) async fn send_and_wait_recorded<C: RunnerClient>(
     usage: &mut Option<StepUsage>,
     reported: &mut ObservedSend,
 ) -> Result<Ended, SummaryError> {
-    send_and_wait_with_usage(client, child, send_id, prompt, how, usage, Some(reported)).await
+    send_and_wait_with_usage(
+        client,
+        child,
+        send_id,
+        prompt,
+        how,
+        usage,
+        SendOptions {
+            observed: Some(reported),
+            ..SendOptions::default()
+        },
+    )
+    .await
+}
+
+/// Record the lab's send and let the runner continue the same run after a restart.
+pub(crate) async fn send_and_wait_lab<C: RunnerClient>(
+    client: &C,
+    child: &Child,
+    send_id: &str,
+    prompt: &str,
+    how: &Model<'_>,
+    usage: &mut Option<StepUsage>,
+    reported: &mut ObservedSend,
+) -> Result<Ended, SummaryError> {
+    send_and_wait_with_usage(
+        client,
+        child,
+        send_id,
+        prompt,
+        how,
+        usage,
+        SendOptions {
+            observed: Some(reported),
+            resume_on_restart: true,
+        },
+    )
+    .await
+}
+
+#[derive(Default)]
+struct SendOptions<'a> {
+    observed: Option<&'a mut ObservedSend>,
+    resume_on_restart: bool,
 }
 
 async fn send_and_wait_with_usage<C: RunnerClient>(
@@ -1236,9 +1299,9 @@ async fn send_and_wait_with_usage<C: RunnerClient>(
     prompt: &str,
     how: &Model<'_>,
     usage: &mut Option<StepUsage>,
-    reported: Option<&mut ObservedSend>,
+    options: SendOptions<'_>,
 ) -> Result<Ended, SummaryError> {
-    match send_and_wait_inner(client, child, send_id, prompt, how, usage, reported).await {
+    match send_and_wait_inner(client, child, send_id, prompt, how, usage, options).await {
         Ok(reply) => Ok(reply),
         Err(CallError::Summary(error)) => Err(error),
         Err(CallError::HostRefused(error)) => Err(error),
@@ -1255,7 +1318,10 @@ async fn send_and_wait_inner<C: RunnerClient>(
     prompt: &str,
     how: &Model<'_>,
     usage: &mut Option<StepUsage>,
-    mut reported: Option<&mut ObservedSend>,
+    SendOptions {
+        observed: mut reported,
+        resume_on_restart,
+    }: SendOptions<'_>,
 ) -> Result<Ended, CallError> {
     if tokio::time::Instant::now() >= how.deadline {
         return Err(TIMED_OUT.to_owned().into());
@@ -1308,6 +1374,12 @@ async fn send_and_wait_inner<C: RunnerClient>(
     request.cache = cache;
     request.retention_policy = retention_policy;
     request.runner_params = run_params(how, with_temperature);
+    if resume_on_restart {
+        // The runner owns the restart; its paused run stays in the same wait.
+        request
+            .runner_params
+            .insert("on_restart".into(), serde_json::json!("resume"));
+    }
     if !how.continuation {
         request.plan = how.plan.map(|plan| plan.plan.clone());
     }
