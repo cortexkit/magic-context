@@ -332,7 +332,7 @@ impl Window {
             let meaningful = trigger::is_meaningful_user(entry);
             let opens = meaningful || trigger::opens_tool_work(entry);
             let rendered = chunk::render_entry(entry, false);
-            let framed = crate::neutral::carried_host_frames(entry).next().is_some();
+            let framed = crate::neutral::has_carried_host_frames(entry);
             let body = rendered
                 .as_ref()
                 .filter(|_| !framed && counter.family().is_some())

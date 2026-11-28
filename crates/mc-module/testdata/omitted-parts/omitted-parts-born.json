@@ -1,0 +1,87 @@
+{
+  "checkpoint": 6,
+  "entries": [
+    {
+      "digest": "8c05e7225d1ffb4a9cf68182f903267ea97ae534fd134ddff0a22fec6c671c26",
+      "mid": "request",
+      "ordinal": 1,
+      "parts": [
+        {
+          "digest": "0449f0ff84608d182e0344597293da98ad79df0700e675199a59eda9ed9c4467",
+          "id": "question",
+          "kind": "text",
+          "tag": 7,
+          "text": "Read the example."
+        }
+      ],
+      "role": "user",
+      "written_at": 1700000000001
+    },
+    {
+      "digest": "cc7555d5f5db83404ade8398f22f935c35029d9d9adea16b4fd283c3ae8f3889",
+      "mid": "cut-reply",
+      "ordinal": 2,
+      "parts": [
+        {
+          "call_id": "never-ran",
+          "digest": "3f164d100bc3b2c99cfe8cc2cba3feb5590e350d4d90124ac1c16a2b4376b574",
+          "id": "never-ran",
+          "input": {
+            "path": "example.txt"
+          },
+          "kind": "tool",
+          "name": "read",
+          "omitted": true,
+          "status": "error"
+        },
+        {
+          "digest": "086692280f3772ba67df5ecd1cb83d633d6e064b4842ed7dd96682e97c0dc19e",
+          "id": "unused-tail",
+          "kind": "text",
+          "omitted": true,
+          "text": "I will read the file."
+        }
+      ],
+      "role": "assistant",
+      "written_at": 1700000000002
+    },
+    {
+      "digest": "0b85948555a0d6f63c8bed71601d788dfa5cce167ed5b48f7c13b6591f394a11",
+      "mid": "followup",
+      "ordinal": 3,
+      "parts": [
+        {
+          "digest": "75c220aaa196d3e9c7e89da7410a18e05d5e5b9435ddb538d36524cf92e27a68",
+          "id": "followup-text",
+          "kind": "text",
+          "tag": 8,
+          "text": "Try again."
+        }
+      ],
+      "role": "user",
+      "written_at": 1700000000003
+    },
+    {
+      "digest": "3e3afb6ffe28ce11651140f5d45aaee0bee931649ee61eca28a6b3e0a932335c",
+      "mid": "cut-final",
+      "ordinal": 4,
+      "parts": [
+        {
+          "call_id": "never-ran-either",
+          "digest": "9e7979ee2a807d6f4b0d8f463cb64871f6132ef7098844ad1400a95b45b52671",
+          "id": "never-ran-either",
+          "input": {
+            "path": "example.txt"
+          },
+          "kind": "tool",
+          "name": "read",
+          "omitted": true,
+          "status": "error"
+        }
+      ],
+      "role": "assistant",
+      "written_at": 1700000000004
+    }
+  ],
+  "protected_final": "followup"
+}

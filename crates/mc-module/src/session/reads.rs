@@ -211,6 +211,7 @@ impl Session {
     }
 
     pub(super) fn forget_missing(&mut self) {
+        self.forget_omitted();
         let index = &self.index;
         let mut removed = Vec::new();
         self.queued.retain(|key| {
@@ -234,6 +235,54 @@ impl Session {
             }
         }
         self.app_prune_stamps(removed);
+    }
+
+    pub(super) fn forget_omitted(&mut self) {
+        fn prune_keep(
+            kept: &mut Option<BTreeSet<lanes::PartKey>>,
+            carried: impl Fn(&lanes::PartKey) -> bool,
+        ) -> bool {
+            let Some(parts) = kept.as_mut().filter(|parts| !parts.is_empty()) else {
+                return false;
+            };
+            parts.retain(carried);
+            if parts.is_empty() {
+                *kept = None;
+                return true;
+            }
+            false
+        }
+
+        let index = &self.index;
+        let still_eligible = |(mid, part): &lanes::PartKey| {
+            index
+                .find(mid, part)
+                .is_none_or(|(_, part)| crate::neutral::carries_part(part))
+        };
+        self.queued.retain(still_eligible);
+        self.refused_once.retain(still_eligible);
+        self.image_outputs.retain(|key, _| still_eligible(key));
+        if prune_keep(&mut self.pending_keep, still_eligible) {
+            self.pending_keep_after = None;
+        }
+        // A refusal may restore waiting drops and keeps from an earlier
+        // offer. Forget these parts in the rollback copies as well.
+        for pending in &mut self.unconfirmed {
+            pending.covered.retain(still_eligible);
+            pending.cut_covered.retain(still_eligible);
+            pending.before.queued.retain(still_eligible);
+            pending.before.refused_once.retain(still_eligible);
+            if prune_keep(&mut pending.before.pending_keep, still_eligible) {
+                pending.before.pending_keep_after = None;
+            }
+        }
+        self.app.stamps.retain(|key, _| {
+            let keep = still_eligible(key);
+            if !keep {
+                self.app_projection.dirty.insert(key.0.clone());
+            }
+            keep
+        });
     }
 
     /// Read in full the tool results with images whose output the

@@ -151,6 +151,11 @@ impl Session {
             self.roll_back(oldest, false, None);
             return;
         }
+        let omitted = view_builder::OmittedTargets::of(self.index.entries());
+        if view.edits.iter().any(|edit| omitted.forbids(&edit.op)) {
+            self.roll_back(oldest, false, None);
+            return;
+        }
         if let StatedView::Now(applied) = applied {
             self.unconfirmed.last_mut().unwrap().reoffered_from = Some(applied.cloned());
         }

@@ -705,6 +705,7 @@ impl Session {
             }
         }
         self.settle_spent_reading(request.applied_view.as_ref());
+        self.forget_omitted();
         if let Some(view) = &self.latest {
             self.view_validation.prime(self.index.entries(), view);
         }

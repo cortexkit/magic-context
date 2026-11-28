@@ -1153,6 +1153,10 @@ fn refusal_part(refusal: &ViewRefusal) -> Option<lanes::PartKey> {
     // not a dropped part. Excluding it from later drops would not repair the
     // offending view, so the refusal cannot single out one dropped culprit.
     match refusal {
+        ViewRefusal::OmittedPart { mid, part } => {
+            tracing::info!(%mid, %part, "ck-mc: session: runner refused a view edit naming a part the host omitted");
+            Some((mid.clone(), part.clone()))
+        }
         ViewRefusal::UnknownPart { mid, part }
         | ViewRefusal::StalePart { mid, part }
         | ViewRefusal::BadField { mid, part, .. }

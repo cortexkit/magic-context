@@ -364,6 +364,43 @@ fn part_edit_target(op: &EditOp) -> Option<(&str, &str)> {
     }
 }
 
+/// Stored identities the host never renders. Cut and insert anchors still
+/// use their transcript positions; only drops and replacements are barred.
+#[derive(Default)]
+pub(crate) struct OmittedTargets<'a> {
+    parts: HashSet<(&'a str, &'a str)>,
+    entries: HashSet<&'a str>,
+}
+
+impl<'a> OmittedTargets<'a> {
+    pub(crate) fn of(entries: &'a [Entry]) -> Self {
+        let mut targets = Self::default();
+        for entry in entries {
+            let mut carried = false;
+            let mut omitted = false;
+            for part in crate::neutral::all_parts(entry) {
+                if crate::neutral::carries_part(part) {
+                    carried = true;
+                } else {
+                    omitted = true;
+                    targets.parts.insert((entry.mid.as_str(), part.id.as_str()));
+                }
+            }
+            if omitted && !carried {
+                targets.entries.insert(entry.mid.as_str());
+            }
+        }
+        targets
+    }
+
+    pub(crate) fn forbids(&self, op: &EditOp) -> bool {
+        match op {
+            EditOp::Drop { mid, part: None } => self.entries.contains(mid.as_str()),
+            _ => part_edit_target(op).is_some_and(|target| self.parts.contains(&target)),
+        }
+    }
+}
+
 pub(crate) fn next_view_with_riders(
     previous: Option<&View>,
     entries: &[Entry],
@@ -386,6 +423,12 @@ pub(crate) fn next_view_with_riders(
         .map(|view| view.edits.as_slice())
         .unwrap_or_default();
     let mut edits = edits_for_transcript(entries, previous_edits);
+    let omitted = OmittedTargets::of(entries);
+    edits.retain(|edit| !omitted.forbids(&edit.op));
+    let new_ops: Vec<_> = new_ops
+        .into_iter()
+        .filter(|op| !omitted.forbids(op))
+        .collect();
     let ordinal_of = |mid: &str| {
         entries
             .iter()
@@ -477,8 +520,10 @@ pub(crate) fn next_view_with_riders(
         let drops: Vec<_> = riders
             .parts
             .iter()
-            .filter(|(mid, _)| {
-                !new_cut.is_some_and(|cut| ordinal_of(mid).is_some_and(|ordinal| ordinal <= cut))
+            .filter(|(mid, part)| {
+                !omitted.parts.contains(&(mid.as_str(), part.as_str()))
+                    && !new_cut
+                        .is_some_and(|cut| ordinal_of(mid).is_some_and(|ordinal| ordinal <= cut))
             })
             .collect();
         if drops.is_empty() && !ordinary_view {

@@ -140,10 +140,24 @@ fn recovered_part(
     part: &cortexkit_role_compaction::part::Part,
     preview: Option<crate::count::Counter>,
 ) -> Option<String> {
+    let omitted = !crate::neutral::carries_part(part);
+    let label = |text| {
+        if omitted {
+            format!("(not sent to the model)\n{text}")
+        } else {
+            text
+        }
+    };
     let rendered = match preview {
         Some(counter) => render_part_preview(&part.body, counter),
         None => render_part_full(&part.body),
-    }?;
+    };
+    let rendered = match rendered {
+        Some(rendered) => rendered,
+        // Recovery does not expose reasoning text, even when it was unsent.
+        None if omitted => return Some("(not sent to the model)".into()),
+        None => return None,
+    };
     if let Some((_, words)) =
         crate::neutral::verified_host_frames(entry).find(|(id, _)| *id == part.id)
     {
@@ -151,14 +165,14 @@ fn recovered_part(
             Some(_) => truncate(words, 200),
             None => words.to_owned(),
         };
-        return Some(format!(
+        return Some(label(format!(
             "[stored text, including host wrapper]\n{rendered}\n[person's mid-turn words]\n{words}"
-        ));
+        )));
     }
-    Some(match crate::neutral::host_part(entry, part) {
+    Some(label(match crate::neutral::host_part(entry, part) {
         Some(fact) => format!("{}\n{rendered}", crate::neutral::host_label(fact)),
         None => rendered,
-    })
+    }))
 }
 
 fn truncate(value: &str, max: usize) -> String {

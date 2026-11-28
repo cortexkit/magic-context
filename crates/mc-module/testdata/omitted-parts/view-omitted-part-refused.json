@@ -1,0 +1,27 @@
+{
+  "answer": {
+    "answer": "refused",
+    "refusal": {
+      "code": "omitted_part",
+      "mid": "cut-reply",
+      "part": "never-ran"
+    }
+  },
+  "request": {
+    "method": "session.apply_view",
+    "params": {
+      "view": {
+        "checksum": "f62ca8a3efe6e4a7d7a47702eac0bd1cf98bb470402f774d5d4219a5934514e9",
+        "edits": [
+          {
+            "mid": "cut-reply",
+            "op": "drop",
+            "part": "never-ran",
+            "since": 1
+          }
+        ],
+        "version": 1
+      }
+    }
+  }
+}

@@ -130,6 +130,7 @@ impl Session {
             // must stay with it while the newest notice's pending count advances.
             self.notes.measured = previous_notes;
         }
+        let mut replace_from = None;
         for event in &notice.events {
             match event {
                 Event::TranscriptChanged { from_ordinal } => {
@@ -164,6 +165,17 @@ impl Session {
                         // read again from there.
                         self.cut = self.summarized_through();
                         self.index = Index::starting_at(self.cut.unwrap_or(1));
+                        replace_from = None;
+                    } else if self
+                        .index
+                        .cursor()
+                        .map_or(self.index.base(), |c| c.ordinal + 1)
+                        == *from_ordinal
+                    {
+                        // The prefix is contiguous. If the notice leaves out
+                        // its new suffix, read where the replacement begins,
+                        // or earlier if a held tool result may still change.
+                        replace_from = Some(self.index.changeable_from().unwrap_or(*from_ordinal));
                     }
                 }
                 Event::ViewRefused { .. } => {}
@@ -178,6 +190,7 @@ impl Session {
                         "ck-mc: session: unknown notice event; reading the transcript again"
                     );
                     self.index = Index::starting_at(self.cut.unwrap_or(1));
+                    replace_from = None;
                 }
             }
         }
@@ -242,7 +255,13 @@ impl Session {
                 self.clamp_bookmark_to(shared);
             }
         } else if extended == Extend::Gap || !self.index.ends_at(notice.newest.as_ref()) {
-            self.index_ready = self.sync(client, notice.newest.as_ref()).await;
+            self.index_ready = if let Some(from) = replace_from {
+                let after = from.checked_sub(1).filter(|after| *after > 0);
+                self.read_until_from(client, notice.newest.as_ref(), false, after)
+                    .await
+            } else {
+                self.sync(client, notice.newest.as_ref()).await
+            };
         } else if let Some(newest) = notice.newest.as_ref().filter(|_| omitted) {
             self.index_ready = self.sync_from_changeable(client, newest).await;
         }

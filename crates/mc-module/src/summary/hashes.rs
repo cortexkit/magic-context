@@ -46,6 +46,7 @@ fn hashes_in_value(value: &Value, into: &mut BTreeSet<String>) {
 pub fn by_ordinal(entries: &[Entry]) -> BTreeMap<u64, BTreeSet<String>> {
     entries
         .iter()
+        .filter(|entry| !crate::neutral::is_absent_from_request(entry))
         .map(|entry| {
             let mut hashes = BTreeSet::new();
             let mut frames = crate::neutral::carried_host_frames(entry).peekable();

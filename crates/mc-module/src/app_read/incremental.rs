@@ -40,6 +40,7 @@ struct PartInfo {
     id: String,
     kind: Kind,
     tag: Option<u64>,
+    omitted: bool,
     tokens: u64,
     bytes: Option<u64>,
     tool: Option<String>,
@@ -344,7 +345,7 @@ impl Session {
                 p.remove(ordinal);
             }
             p.positions.insert(entry.mid.clone(), ordinal);
-            let reasoning: Vec<_> = crate::neutral::all_parts(entry)
+            let reasoning: Vec<_> = crate::neutral::carried_parts(entry)
                 .filter(|part| matches!(part.body, PartBody::Reasoning { .. }))
                 .collect();
             let measure = lanes::reasoning_measure(entry, &reasoning);
@@ -395,24 +396,26 @@ impl Session {
                     .parts
                     .iter()
                     .zip(crate::neutral::all_parts(entry))
-                    .any(|(old, new)| old.runner_tokens != new.tokens)
+                    .any(|(old, new)| old.runner_tokens != new.tokens || old.omitted != new.omitted)
             {
                 let mut weights = reasoning_weights(&reasoning, measure.0).into_iter();
                 row.parts = crate::neutral::all_parts(entry)
                     .map(|part| {
-                        let (item_tokens, source) =
-                            if matches!(part.body, PartBody::Reasoning { .. }) {
-                                (
-                                    weights.next().expect("reasoning part weight"),
-                                    measured_source(measure.1),
-                                )
-                            } else {
-                                item_tokens(part, counter)
-                            };
+                        let (item_tokens, source) = if part.omitted {
+                            (0, Source::Counted)
+                        } else if matches!(part.body, PartBody::Reasoning { .. }) {
+                            (
+                                weights.next().expect("reasoning part weight"),
+                                measured_source(measure.1),
+                            )
+                        } else {
+                            item_tokens(part, counter)
+                        };
                         PartInfo {
                             id: part.id.clone(),
                             kind: kind(&part.body),
                             tag: part.tag,
+                            omitted: part.omitted,
                             tokens: if matches!(part.body, PartBody::Reasoning { .. }) {
                                 item_tokens
                             } else {
@@ -1088,24 +1091,29 @@ fn message(
     // the model never sees it: it counts like reasoning a view dropped.
     let floor = session.signed_floor().is_some_and(|floor| ordinal <= floor);
     for part in &cached.parts {
-        tagged += u64::from(part.tag.is_some());
+        tagged += u64::from(!part.omitted && part.tag.is_some());
         let key = (cached.mid.clone(), part.id.clone());
-        let removed = cut
+        let removed = !part.omitted
+            && (cut
+                || messages.contains(&cached.mid)
+                || dropped.contains(&key)
+                || (floor && part.signed && part.kind == Kind::Reasoning));
+        let queued = !part.omitted
+            && (session.queued.contains(&key)
+                || before.is_some_and(|queued| queued.contains(&key)));
+        let (tokens, source) = if part.omitted
+            || cut
             || messages.contains(&cached.mid)
-            || dropped.contains(&key)
-            || (floor && part.signed && part.kind == Kind::Reasoning);
-        let queued =
-            session.queued.contains(&key) || before.is_some_and(|queued| queued.contains(&key));
-        let (tokens, source) =
-            if cut || messages.contains(&cached.mid) || (removed && part.kind == Kind::Reasoning) {
-                (0, Source::Counted)
-            } else if let Some(replacement) = replacements.get(&key) {
-                (replacement.tokens, Source::Counted)
-            } else if removed {
-                (0, Source::Counted)
-            } else {
-                (part.item_tokens, part.source)
-            };
+            || (removed && part.kind == Kind::Reasoning)
+        {
+            (0, Source::Counted)
+        } else if let Some(replacement) = replacements.get(&key) {
+            (replacement.tokens, Source::Counted)
+        } else if removed {
+            (0, Source::Counted)
+        } else {
+            (part.item_tokens, part.source)
+        };
         let size = Size {
             bytes: part.bytes,
             tokens: part.tokens,
@@ -1126,7 +1134,7 @@ fn message(
         if !queued {
             session.app.stamps.remove(&key);
         }
-        if !removed {
+        if !removed && !part.omitted {
             if part.kind == Kind::Tool {
                 tool += part.tokens;
                 sources[1].add(part.tokens, source);
@@ -1152,17 +1160,31 @@ fn message(
             tool: part.tool.as_deref().map(Into::into),
         });
     }
-    let row = Typed::new(
+    let row = Row::Typed(Typed::new(
         tagged,
         parts,
         cached.user_origin.as_ref(),
         &cached.host_parts,
-    );
+    ));
+    // Only rows that need the additive field use the existing JSON form.
+    // Ordinary rows still use the same compact checkpoint layout.
+    let row = if cached.parts.iter().any(|part| part.omitted) {
+        let mut value = row.to_value(&cached.mid);
+        let items = value["items"].as_array_mut().expect("typed row items");
+        for (item, part) in items.iter_mut().zip(&cached.parts) {
+            if part.omitted {
+                item["omitted"] = json!(true);
+            }
+        }
+        Row::from(value)
+    } else {
+        row
+    };
     (
         Message {
             ordinal,
             at_ms: cached.at_ms,
-            row: Row::Typed(row),
+            row,
         },
         raw,
         tool,

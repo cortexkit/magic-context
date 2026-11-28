@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use crate::index::Index;
 use crate::injection::{self, Stripped};
 use crate::neutral::{
-    has_verified_host_frames, is_finished, is_known, is_unkept_notice,
+    has_carried_host_frames, is_finished, is_known, is_unkept_notice,
     protects_from_automatic_reclaim, protects_from_explicit_drop, without_tool_prefix,
 };
 use crate::spoken::is_person_facing_tool;
@@ -621,7 +621,7 @@ pub fn normalize_tool_name(name: &str) -> String {
 pub(crate) fn starts_user_turn(entry: &Entry) -> bool {
     entry.role == Role::User
         && entry.notice.is_none()
-        && !has_verified_host_frames(entry)
+        && !has_carried_host_frames(entry)
         && crate::neutral::carried_authored_parts(entry).any(|part| match &part.body {
             PartBody::Text { text } => !text.trim().is_empty(),
             PartBody::File(_) => true,
@@ -633,7 +633,7 @@ pub(crate) fn starts_user_turn(entry: &Entry) -> bool {
 /// own words. Only runner-marked user entries without a keep mark may lose
 /// text to the age sweep; kept notices can carry the person's own words.
 fn is_sweepable_notice(entry: &Entry) -> bool {
-    entry.role == Role::User && is_unkept_notice(entry) && !has_verified_host_frames(entry)
+    entry.role == Role::User && is_unkept_notice(entry) && !has_carried_host_frames(entry)
 }
 
 /// The highest tag number below which every tool output is far behind: three
@@ -649,7 +649,7 @@ pub fn far_behind_bookmark(context: &Context, usable_window: u64) -> u64 {
         usable_window,
         |entry, part| {
             matches!(&part.body, PartBody::Tool(tool) if !is_person_facing_tool(&tool.name))
-                && !has_verified_host_frames(entry)
+                && !has_carried_host_frames(entry)
         },
         starts_user_turn,
     )
@@ -667,7 +667,7 @@ pub fn notice_far_behind_bookmark(context: &Context, usable_window: u64) -> u64 
         // waiting for the person to speak; tools still count actionable turns.
         |entry| {
             entry.role == Role::User
-                && !has_verified_host_frames(entry)
+                && !has_carried_host_frames(entry)
                 && (entry.host_parts.is_empty()
                     || crate::neutral::carried_authored_parts(entry)
                         .next()
@@ -1172,7 +1172,7 @@ pub fn injected_text(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey, Sh
         .iter()
         // A notice is already a distinct instruction from the runner, not
         // injected framing inside a person's prompt. Keep it actionable.
-        .filter(|entry| entry.notice.is_none() && !has_verified_host_frames(entry))
+        .filter(|entry| entry.notice.is_none() && !has_carried_host_frames(entry))
         .flat_map(|entry| crate::neutral::carried_parts(entry).map(move |part| (entry, part)))
         .filter(|(entry, part)| {
             !in_tail(part, cutoff) && !context.edited.touches(&entry.mid, &part.id)

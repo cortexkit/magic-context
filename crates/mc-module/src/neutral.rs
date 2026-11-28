@@ -11,8 +11,8 @@ use cortexkit_role_compaction::read::{Entry, HostPart, Role};
 
 /// Whether the runner sends this part on a model request. An unnumbered
 /// part can still be carried; system text has no number, for example.
-pub(crate) fn carries_part(_part: &Part) -> bool {
-    true
+pub(crate) fn carries_part(part: &Part) -> bool {
+    !part.omitted
 }
 
 pub(crate) fn all_parts(entry: &Entry) -> std::slice::Iter<'_, Part> {
@@ -68,6 +68,10 @@ pub(crate) fn carried_host_frames(entry: &Entry) -> impl Iterator<Item = (&str, 
     verified_host_frames(entry).filter(|(id, _)| carried_parts(entry).any(|part| part.id == *id))
 }
 
+pub(crate) fn has_carried_host_frames(entry: &Entry) -> bool {
+    carried_host_frames(entry).next().is_some()
+}
+
 /// Parts eligible for attribution to the entry's user or assistant speaker.
 pub(crate) fn authored_parts(entry: &Entry) -> impl Iterator<Item = &Part> {
     all_parts(entry).filter(|part| host_part(entry, part).is_none())
@@ -92,11 +96,11 @@ pub(crate) fn is_kept_notice(entry: &Entry) -> bool {
 }
 
 pub(crate) fn protects_from_automatic_reclaim(entry: &Entry) -> bool {
-    is_kept_notice(entry) || has_verified_host_frames(entry)
+    is_kept_notice(entry) || has_carried_host_frames(entry)
 }
 
 pub(crate) fn protects_from_explicit_drop(entry: &Entry) -> bool {
-    is_kept_notice(entry) && !has_verified_host_frames(entry)
+    is_kept_notice(entry) && !has_carried_host_frames(entry)
 }
 
 pub(crate) fn is_unkept_notice(entry: &Entry) -> bool {

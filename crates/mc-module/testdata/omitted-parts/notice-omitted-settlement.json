@@ -1,0 +1,146 @@
+{
+  "after": {
+    "method": "compaction.notice",
+    "params": {
+      "conditions": {
+        "context_window": 32768,
+        "model": {
+          "model": "example-model",
+          "provider": "example-provider"
+        },
+        "output_reserve": 4096,
+        "rules": {
+          "history_edit_cost": "suffix",
+          "signed_parts": "none"
+        }
+      },
+      "entries": [
+        {
+          "digest": "3392dc1f30c8420f871387df82e2c83ccad62e8be67b21262ecd0a56648c0de4",
+          "mid": "reply",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "d1be3f2e6c12bcdb2ab20e01e428b29e17d7c3402b7a9737b31269abfb9784ad",
+              "id": "preface",
+              "kind": "text",
+              "tag": 2,
+              "text": "I can check."
+            },
+            {
+              "call_id": "pending",
+              "digest": "98f22e0ebec3e50d8193959bc11b9cc62a8f7d885a271c46cc5c663a05efc6b8",
+              "id": "pending",
+              "input": {
+                "path": "example.txt"
+              },
+              "kind": "tool",
+              "name": "read",
+              "omitted": true,
+              "status": "error"
+            }
+          ],
+          "role": "assistant",
+          "written_at": 1700000000002
+        },
+        {
+          "digest": "1bedc801adf8ed0124c7d5270ab89f89734f8b92644197c5db2fb6cfc048139a",
+          "mid": "queued",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "9d14ad05774fdc10ee925ffa936c03fb08501e97d1360fadfb4518e72a27df94",
+              "id": "queued-text",
+              "kind": "text",
+              "tag": 3,
+              "text": "Use the sample instead."
+            }
+          ],
+          "role": "user",
+          "written_at": 1700000000003
+        }
+      ],
+      "events": [
+        {
+          "event": "transcript_changed",
+          "from_ordinal": 2
+        }
+      ],
+      "newest": {
+        "digest": "1bedc801adf8ed0124c7d5270ab89f89734f8b92644197c5db2fb6cfc048139a",
+        "mid": "queued",
+        "ordinal": 3
+      },
+      "seq": 2
+    }
+  },
+  "before": {
+    "method": "compaction.notice",
+    "params": {
+      "conditions": {
+        "context_window": 32768,
+        "model": {
+          "model": "example-model",
+          "provider": "example-provider"
+        },
+        "output_reserve": 4096,
+        "rules": {
+          "history_edit_cost": "suffix",
+          "signed_parts": "none"
+        }
+      },
+      "entries": [
+        {
+          "digest": "d85b9198b512f11cea3ecfa1fe18b4134d04fed1cb5e22f4536587623bd55751",
+          "mid": "reply",
+          "ordinal": 2,
+          "parts": [
+            {
+              "digest": "d1be3f2e6c12bcdb2ab20e01e428b29e17d7c3402b7a9737b31269abfb9784ad",
+              "id": "preface",
+              "kind": "text",
+              "tag": 2,
+              "text": "I can check."
+            },
+            {
+              "call_id": "pending",
+              "digest": "7b14ce600128d1f871c7d6916e43505c77975ea5116e7c43d4e96fed7ce48cf3",
+              "id": "pending",
+              "input": {
+                "path": "example.txt"
+              },
+              "kind": "tool",
+              "name": "read",
+              "status": "running",
+              "tag": 3
+            }
+          ],
+          "role": "assistant",
+          "written_at": 1700000000002
+        },
+        {
+          "digest": "a8f043b6ea1bd7bd2ffebbda77b40d4c7b4df708880ec3af064918aebb3457e6",
+          "mid": "queued",
+          "ordinal": 3,
+          "parts": [
+            {
+              "digest": "9d14ad05774fdc10ee925ffa936c03fb08501e97d1360fadfb4518e72a27df94",
+              "id": "queued-text",
+              "kind": "text",
+              "tag": 4,
+              "text": "Use the sample instead."
+            }
+          ],
+          "role": "user",
+          "written_at": 1700000000003
+        }
+      ],
+      "newest": {
+        "digest": "a8f043b6ea1bd7bd2ffebbda77b40d4c7b4df708880ec3af064918aebb3457e6",
+        "mid": "queued",
+        "ordinal": 3
+      },
+      "seq": 1
+    }
+  }
+}

@@ -97,6 +97,16 @@ mod reach_tests;
 #[cfg(test)]
 mod attribution_tests {
     #[test]
+    fn omission_does_not_hide_stored_text_from_the_message_index() {
+        let vector: serde_json::Value = serde_json::from_str(include_str!(
+            "../../testdata/omitted-parts/omitted-parts-born.json"
+        ))
+        .unwrap();
+        let entry = serde_json::from_value(vector["entries"][1].clone()).unwrap();
+        assert_eq!(super::content_of(&entry), "I will read the file.");
+    }
+
+    #[test]
     fn host_frame_search_reprojects_the_held_system_row_as_user_words() {
         use cortexkit_role_compaction::{
             part::{Part, PartBody},

@@ -71,7 +71,7 @@ pub fn is_meaningful_user(entry: &Entry) -> bool {
     entry.role == Role::User
         && !crate::neutral::is_unkept_notice(entry)
         && entry.speaks_for.is_none()
-        && crate::neutral::carried_host_frames(entry).next().is_none()
+        && !crate::neutral::has_carried_host_frames(entry)
         && !super::chunk::is_relayed_wake(
             &crate::neutral::carried_authored_parts(entry)
                 .filter_map(|part| match &part.body {
@@ -92,7 +92,7 @@ pub fn is_meaningful_user(entry: &Entry) -> bool {
 }
 
 pub(super) fn opens_tool_work(entry: &Entry) -> bool {
-    crate::neutral::carried_host_frames(entry).next().is_none()
+    !crate::neutral::has_carried_host_frames(entry)
         && crate::neutral::carried_authored_parts(entry)
             .any(|part| matches!(part.body, PartBody::Tool(_)))
 }

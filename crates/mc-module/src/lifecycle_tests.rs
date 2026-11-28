@@ -143,6 +143,8 @@ mod render_failed_contract_tests;
 
 #[path = "numbers_unknown_contract_tests.rs"]
 mod numbers_unknown_contract_tests;
+#[path = "omitted_parts_tests.rs"]
+mod omitted_parts_tests;
 
 #[path = "fork_call_tests.rs"]
 mod fork_call_tests;
