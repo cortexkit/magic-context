@@ -313,7 +313,10 @@ function deletedSessionMergeFixture(count = 48): {
     return { store, source, target, directories };
 }
 
-/** A repository whose memories sit under its root, recorded in one folder by a session and a sidecar. */
+/**
+ * A repository whose memories sit under its root. One folder is recorded for it twice:
+ * by a session, and by the identity file the plugin writes when it resolves a folder to git.
+ */
 function rewrittenRootFixture(name: string): {
     store: Store;
     directory: string;
