@@ -1242,3 +1242,190 @@ fn exact_summary_counts_keep_the_same_block_start_and_shape_after_omission() {
     };
     assert_eq!(scan(&marked), scan(&twin));
 }
+
+#[test]
+fn omitted_authored_text_does_not_make_host_bookkeeping_age_a_notice() {
+    use cortexkit_role_compaction::read::{HostPart, NoticeOrigin};
+    let old = row(1, Role::User, vec![line("notice", 1, "Old reminder")])
+        .with_notice(NoticeOrigin::new("runner").with_keep(false));
+    let mut host = row(
+        4,
+        Role::User,
+        vec![
+            line("host", 4, "Host bookkeeping"),
+            omit(line("raw-text", 0, "Cut authored fragment")),
+        ],
+    );
+    host.host_parts.push(HostPart::new("host"));
+    let entries = [
+        old,
+        text(2, "First newer turn"),
+        text(3, "Second newer turn"),
+        host,
+    ];
+    on_both(&entries, |entries| {
+        select(entries, |context| {
+            let bookmark = lanes::notice_far_behind_bookmark(context, 0);
+            assert_eq!(bookmark, 0);
+            bookmark
+        })
+    });
+}
+
+#[test]
+fn a_leading_omitted_row_cannot_spend_the_first_messages_image_protection() {
+    let entries = [
+        row(1, Role::Assistant, vec![omit(line("cut", 0, "Cut reply"))]),
+        row(
+            2,
+            Role::User,
+            vec![
+                line("task", 1, "Describe the image"),
+                Part::new(
+                    "first-image",
+                    PartBody::File(FileMedia::inline("image/png", Some(300))),
+                ),
+            ],
+        ),
+        row(3, Role::Assistant, vec![line("answer", 2, "A chart")]),
+    ];
+    let mut index = Index::default();
+    index.extend(entries);
+    let mut context = lanes::Context {
+        index: &index,
+        edited: &lanes::Edited::default(),
+        protected_tools: &BTreeMap::new(),
+        keep_first_message: true,
+        signed_floor: None,
+    };
+    let images = lanes::Images {
+        outputs: &BTreeMap::new(),
+        watermark: 2,
+        cutoff: None,
+        over_limit: false,
+        skip: &[],
+    };
+    assert!(lanes::answered_images(&context, &images).1.is_empty());
+    context.keep_first_message = false;
+    assert_eq!(
+        lanes::answered_images(&context, &images).1,
+        [("m2".into(), "first-image".into())]
+    );
+}
+
+#[test]
+fn exact_summary_header_has_no_range_for_a_single_carried_entry() {
+    let entries = [
+        row(1, Role::User, vec![omit(line("cut", 0, "Unsent"))]),
+        row(2, Role::User, vec![line("kept", 1, "Please run the test")]),
+    ];
+    on_both(&entries, |entries| {
+        let counter = crate::count::Counter::for_model(Some("anthropic/claude-opus-5-5"));
+        assert!(counter.family().is_some());
+        let mut window = Window::default();
+        let mut counts = chunk::CountCache::default();
+        window.sync(entries, 1, None, 1, counter, &mut counts);
+        window
+            .scan(entries, 1, 3, 500, counter, &mut counts)
+            .unwrap()
+    });
+}
+
+#[test]
+fn bounded_history_can_back_up_across_several_omitted_tail_entries() {
+    use cortexkit_role_compaction::tokens::PartTokens;
+    let weighed = |id, tag| {
+        let mut part = line(id, tag, "Carried history");
+        part.tokens = Some(PartTokens::count(30_000));
+        part
+    };
+    let entries = [
+        row(1, Role::Assistant, vec![weighed("old", 1)]),
+        row(2, Role::Assistant, vec![weighed("new", 2)]),
+        row(3, Role::Assistant, vec![omit(line("cut", 0, "Unsent"))]),
+        row(4, Role::Assistant, vec![omit(line("cut", 0, "Unsent"))]),
+    ];
+    on_both(&entries, |entries| {
+        let counter = crate::count::Counter::for_model(None);
+        let mut window = Window::default();
+        window.sync(
+            entries,
+            1,
+            None,
+            1,
+            counter,
+            &mut chunk::CountCache::default(),
+        );
+        let until = window.bounded(entries, 1, 0, true, u64::MAX);
+        assert_eq!(until, 2);
+        until
+    });
+}
+
+#[test]
+fn semantic_tail_snap_can_use_a_tool_beside_an_omitted_frame() {
+    use super::omitted_twin_checks::{framed_text, materialize, Slot};
+    let slots = [
+        Slot {
+            role: Role::Assistant,
+            parts: vec![(line("old", 0, "Older reply"), false)],
+            notice: None,
+        },
+        Slot {
+            role: Role::User,
+            parts: vec![
+                (framed_text("Cut wrapper"), true),
+                (call("visible", 0, "read", ToolStatus::Completed), false),
+            ],
+            notice: None,
+        },
+        Slot {
+            role: Role::Assistant,
+            parts: vec![(line("tail", 0, "Tail"), false)],
+            notice: None,
+        },
+        Slot {
+            role: Role::Assistant,
+            parts: vec![(line("last", 0, "Newest"), false)],
+            notice: None,
+        },
+    ];
+    let (marked, _, twin) = materialize(&slots, false);
+    for entries in [marked, twin] {
+        assert_eq!(
+            crate::summary::trigger::tail_start(&entries, semantic_tail_weight, 1, 100, true),
+            2
+        );
+    }
+}
+
+#[test]
+fn semantic_tail_snap_does_not_treat_an_omitted_tool_as_an_opening() {
+    let entries = [
+        row(1, Role::Assistant, vec![line("old", 1, "Older reply")]),
+        row(
+            2,
+            Role::Assistant,
+            vec![
+                line("visible", 2, "No tool here"),
+                omit(call("cut", 0, "read", ToolStatus::Error)),
+            ],
+        ),
+        row(3, Role::Assistant, vec![line("tail", 3, "Tail")]),
+        row(4, Role::Assistant, vec![line("last", 4, "Newest")]),
+    ];
+    on_both(&entries, |entries| {
+        let start =
+            crate::summary::trigger::tail_start(entries, semantic_tail_weight, 1, 100, true);
+        assert_eq!(start, 3);
+        start
+    });
+}
+
+fn semantic_tail_weight(entry: &Entry) -> u64 {
+    match entry.ordinal {
+        1 => 30_000,
+        3 => 1_000,
+        _ => 5,
+    }
+}
