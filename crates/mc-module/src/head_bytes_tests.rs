@@ -414,7 +414,7 @@ fn a_baseline_from_the_decay_curve_build_replays_byte_identical_until_a_fold() {
     restored.fold_due = true;
     record("fold", &mut restored, &settings, &store, &dir);
     assert_ne!(history(&restored.baseline.as_ref().unwrap().m0), block);
-    drop(restored);
+    drop((restored, session, store));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
