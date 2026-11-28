@@ -1869,13 +1869,8 @@ export class PiSubagentRunner implements SubagentRunner {
 			let sawAgentEnd = false;
 			let preserveDrainedResult = false;
 			let parseError: string | null = null;
-			// Tool-invocation count for the grounding gate (refresh-primers:
-			// 0 tool calls = closed-book paraphrase, rejected). Derived at settle
-			// from the accumulated assistant message CONTENT (toolCall parts) via
-			// countToolCalls — NOT from a discrete tool-event, since Pi's --print
-			// stdout has no reliable tool-completion event name. The authoritative
-			// source is agent_end's full message array when present, else the
-			// accumulated message_end messages.
+			// Use the final transcript for tool outcomes when available, otherwise
+			// the accumulated message_end messages.
 			let agentEndMessages: unknown[] | null = null;
 
 			// Terminal-drain state. Set when we detect the final assistant
@@ -2440,7 +2435,9 @@ export class PiSubagentRunner implements SubagentRunner {
 							curateMemoryToolCalls: extractCurateMemoryToolCalls(messages),
 						};
 					const completedToolCalls = extractCompletedToolCalls(messages).filter(
-						(call) => call.name === "ctx_memory",
+						(call) =>
+							options.agent === "dreamer-primer-investigator" ||
+							call.name === "ctx_memory",
 					);
 					return completedToolCalls.length ? { completedToolCalls } : {};
 				};

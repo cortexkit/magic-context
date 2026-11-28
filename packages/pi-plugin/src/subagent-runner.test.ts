@@ -2151,13 +2151,9 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		});
 	});
 
-	it("counts toolCall content parts from assistant message_end into toolCallCount (grounding gate)", async () => {
-		// The grounding gate (refresh-primers) treats toolCallCount === 0 as a
-		// closed-book paraphrase and refuses to commit. The count is derived from
-		// `toolCall` CONTENT parts on assistant message_end turns — NOT a tool
-		// event name. Pi has no `tool_result_end` (its real tool event is
-		// `tool_execution_end`), so content-part counting is robust to event-name
-		// drift. (Confirmed against Pi source via the PI peer.)
+	it("counts toolCall content parts from assistant message_end into toolCallCount", async () => {
+		// This count tracks attempted calls, not results, so it comes from the
+		// assistant's transcript parts rather than tool execution events.
 		const child = createMockChild();
 		const { runner } = runnerWith(child);
 
@@ -2244,6 +2240,52 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 			],
 			durationMs: expect.any(Number),
 			meta: { stderr: undefined },
+		});
+	});
+
+	it("retains only the primer investigator's completed read results", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+		const result = runner.run({
+			...baseOptions,
+			agent: "dreamer-primer-investigator",
+		});
+		const calls = ["failed", "pending", "image-only"].map((id) => ({
+			type: "toolCall",
+			id,
+			name: "read",
+			arguments: { path: `${id}.png` },
+		}));
+		for (const message of [
+			{ role: "assistant", content: calls, stopReason: "toolUse" },
+			{
+				role: "toolResult",
+				toolCallId: "failed",
+				toolName: "read",
+				isError: true,
+				content: [{ type: "text", text: "Permission denied" }],
+			},
+			{
+				role: "toolResult",
+				toolCallId: "image-only",
+				toolName: "read",
+				isError: false,
+				content: [{ type: "image", data: "eA==", mimeType: "image/png" }],
+			},
+			{
+				role: "assistant",
+				content: [{ type: "text", text: '{"answer":"Found it."}' }],
+				stopReason: "stop",
+			},
+		])
+			child.writeStdoutLine({ type: "message_end", message });
+		child.emitClose(0);
+		expect(await result).toMatchObject({
+			ok: true,
+			toolCallCount: 3,
+			completedToolCalls: [
+				{ name: "read", arguments: { path: "image-only.png" } },
+			],
 		});
 	});
 

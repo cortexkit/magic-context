@@ -83,6 +83,17 @@ export function extractToolResultBodyTokens(parts: unknown[]): number {
     return tokens;
 }
 
+/** OpenCode and the Pi dreamer adapter mark a returned, successful result as completed. */
+export function hasCompletedToolCall(parts: unknown[]): boolean {
+    return parts.some((part) => {
+        if (part === null || typeof part !== "object") return false;
+        const p = part as Record<string, unknown>;
+        if (p.type !== "tool" || typeof p.tool !== "string") return false;
+        const state = p.state as Record<string, unknown> | null;
+        return !!state && typeof state === "object" && state.status === "completed";
+    });
+}
+
 /** Extract compact tool-call summaries from message parts.
  *  Returns lines like "TC: Fix lint errors", "TC: read(src/index.ts)" or
  *  "TC: shell(git status --short)". */

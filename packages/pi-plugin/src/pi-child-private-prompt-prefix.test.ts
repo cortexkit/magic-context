@@ -11,19 +11,21 @@ import { __wakePlaneTest } from "@magic-context/core/features/magic-context/smar
 import { addNote } from "@magic-context/core/features/magic-context/storage-notes";
 import {
 	createPrimer,
+	getActivePrimers,
 	insertPrimerCandidates,
 } from "@magic-context/core/features/magic-context/storage-primers";
 import { reviewUserMemories } from "@magic-context/core/features/magic-context/user-memory/review-user-memories";
 import { insertUserMemoryCandidates } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
 import { _resetKeepSubagentsForTesting } from "@magic-context/core/shared/keep-subagents";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
-import { buildArgs } from "./subagent-runner";
+import { __test as dreamerTest } from "./dreamer";
+import { buildArgs, extractCompletedToolCalls } from "./subagent-runner";
 import { createTestDb } from "./test-utils.test";
 
 const sourceText = "@skill://name";
 type PromptRequest = { body: { parts: Array<{ text: string }> } };
 
-function captureClient(answer: string, toolRead = false) {
+function captureClient(answer: string, toolParts: unknown[] = []) {
 	const requests: PromptRequest[] = [];
 	const client = {
 		backgroundSessionsAreHidden: true,
@@ -37,23 +39,7 @@ function captureClient(answer: string, toolRead = false) {
 				data: [
 					{
 						info: { role: "assistant", finish: "stop", time: { created: 1 } },
-						parts: [
-							...(toolRead
-								? [
-										{
-											type: "tool",
-											tool: "read",
-											callID: "read-1",
-											state: {
-												status: "completed",
-												input: { filePath: "/src/name.ts" },
-												output: "Read source.",
-											},
-										},
-									]
-								: []),
-							{ type: "text", text: answer },
-						],
+						parts: [...toolParts, { type: "text", text: answer }],
 					},
 				],
 			}),
@@ -109,7 +95,10 @@ async function withLease(
 	}
 }
 
-it("Pi refresh-primer prompt puts fixed text before a leading raw transcript mention", () =>
+it.each([
+	"failed",
+	"image-only",
+] as const)("Pi refresh-primer after a %s read puts fixed text before a leading raw transcript mention", (outcome) =>
 	withLease(async (lease) => {
 		const project = "/fixture";
 		const now = Date.now();
@@ -131,13 +120,37 @@ it("Pi refresh-primer prompt puts fixed text before a leading raw transcript men
 		createPrimer(lease.db, {
 			projectPath: project,
 			question: "How is the name handled?",
+			answer: "The old path.",
 			totalSupport: 1,
 			lastObservedAt: now,
 			sourceCandidateIds: [candidateId],
 		});
+		const completed = extractCompletedToolCalls([
+			{
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "read-1",
+						name: "read",
+						arguments: { path: "/src/name.png" },
+					},
+				],
+			},
+			{
+				role: "toolResult",
+				toolCallId: "read-1",
+				toolName: "read",
+				isError: outcome === "failed",
+				content:
+					outcome === "failed"
+						? [{ type: "text", text: "File not found" }]
+						: [{ type: "image", data: "eA==", mimeType: "image/png" }],
+			},
+		]);
 		const { client, requests } = captureClient(
 			'{"answer":"See /src/name.ts."}',
-			true,
+			dreamerTest.syntheticToolParts(1, completed),
 		);
 		const result = await refreshPrimers({
 			...lease,
@@ -160,7 +173,10 @@ it("Pi refresh-primer prompt puts fixed text before a leading raw transcript men
 						}
 					: null,
 		});
-		expect(result.refreshed).toBe(1);
+		expect(getActivePrimers(lease.db, project)[0]?.answer).toBe(
+			outcome === "failed" ? "The old path." : "See /src/name.ts.",
+		);
+		expect(result.refreshed).toBe(outcome === "failed" ? 0 : 1);
 		expectPiPrefix(requests);
 	}));
 

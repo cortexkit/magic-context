@@ -7,7 +7,7 @@ import {
     setRawMessageProvider,
     withRawSessionMessageCache,
 } from "../../../hooks/magic-context/read-session-chunk";
-import { extractToolCallSummaries } from "../../../hooks/magic-context/read-session-formatting";
+import { hasCompletedToolCall } from "../../../hooks/magic-context/read-session-formatting";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
@@ -136,22 +136,14 @@ Return valid JSON only, no markdown fencing:
 { "answer": "..." }`;
 }
 
-/**
- * Grounding gate: the investigation must have actually USED its tools. A run
- * that made zero tool calls is a pure paraphrase of the orientation — exactly
- * the "stale re-summary" failure the open-book redesign exists to prevent — so
- * its answer is NOT committed (keep-existing). Counts any tool call in the run
- * (robust against part-shape drift; reuses the battle-tested summary extractor).
- */
-function investigationToolCallCount(messages: unknown[]): number {
-    if (!Array.isArray(messages)) return 0;
-    let count = 0;
-    for (const message of messages) {
-        if (message === null || typeof message !== "object") continue;
+/** Without a successful result, a refresh has no new evidence to replace the stored answer. */
+function hasInvestigationEvidence(messages: unknown[]): boolean {
+    if (!Array.isArray(messages)) return false;
+    return messages.some((message) => {
+        if (message === null || typeof message !== "object") return false;
         const parts = (message as { parts?: unknown }).parts;
-        if (Array.isArray(parts)) count += extractToolCallSummaries(parts).length;
-    }
-    return count;
+        return Array.isArray(parts) && hasCompletedToolCall(parts);
+    });
 }
 
 function parseAnswer(messages: unknown[], fallback: string): string {
@@ -271,8 +263,7 @@ async function refreshOnePrimer(
                 messages: run.completion.messages ?? [],
             });
             const answer = run.validated.trim();
-            if (!answer || investigationToolCallCount(run.completion.messages ?? []) === 0)
-                return false;
+            if (!answer || !hasInvestigationEvidence(run.completion.messages ?? [])) return false;
             runLeaseGuardedWrite(args.db, args.holderId, args.leaseKey, () => {
                 updatePrimerAnswer(args.db, primer.id, answer);
             });
@@ -344,11 +335,9 @@ async function refreshOnePrimer(
         const answer = run.validated.trim();
         if (!answer) return false;
 
-        // Grounding gate: a run that used no tools is a paraphrase, not an
-        // investigation — keep the existing answer rather than commit it.
-        if (investigationToolCallCount(run.output) === 0) {
+        if (!hasInvestigationEvidence(run.output)) {
             log(
-                `[dreamer] refresh-primers: primer #${primer.id} answer not committed (no investigation tool calls)`,
+                `[dreamer] refresh-primers: primer #${primer.id} answer not committed (no successful investigation tool results)`,
             );
             return false;
         }

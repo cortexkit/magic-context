@@ -763,9 +763,7 @@ function createPiDreamerClient(
 					dreamSession.messages = [
 						makeMessage("user", [{ type: "text", text: userMessage }]),
 						makeMessage("assistant", [
-							// Synthetic tool parts first so investigationToolCallCount
-							// (refresh-primers grounding gate) sees the agent's tool use,
-							// then the final answer text when the runner produced one.
+							// Keep result statuses so refresh can distinguish completed calls from attempts.
 							...syntheticToolParts(
 								result.toolCallCount ?? 0,
 								result.completedToolCalls,
@@ -941,7 +939,7 @@ type SyntheticPart =
 /**
  * Rebuild tool parts for the shared executor. Completed calls retain their
  * tool identity and result status; the remaining count becomes generic parts
- * for read-only grounding gates that only need to know whether tools were used.
+ * that represent attempts, not evidence of success.
  */
 function syntheticToolParts(
 	count: number,
