@@ -169,7 +169,7 @@ impl Edited {
             .entries()
             .iter()
             .filter(|entry| self.messages.contains(&entry.mid))
-            .flat_map(|entry| entry.parts.iter().filter_map(|part| part.tag));
+            .flat_map(|entry| crate::neutral::carried_parts(entry).filter_map(|part| part.tag));
         parts.chain(messages).max().unwrap_or(0)
     }
 }
@@ -442,9 +442,7 @@ fn transcript_end_mid(index: &Index) -> Option<&str> {
         .entries()
         .iter()
         .rev()
-        .find(|entry| {
-            !entry.parts.is_empty() && entry.role != cortexkit_role_compaction::read::Role::System
-        })
+        .find(|entry| crate::neutral::has_carried_parts(entry) && entry.role != Role::System)
         .map(|entry| entry.mid.as_str())
 }
 
@@ -454,9 +452,7 @@ fn transcript_end_mid(index: &Index) -> Option<&str> {
 /// stays a call; earlier calls of the same message may go whole.
 fn ends_transcript(entry: &Entry, part: &Part, newest_mid: Option<&str>) -> bool {
     Some(entry.mid.as_str()) == newest_mid
-        && entry
-            .parts
-            .iter()
+        && crate::neutral::carried_parts(entry)
             .rev()
             .find(|candidate| matches!(candidate.body, PartBody::Tool(_)))
             .is_some_and(|last| last.id == part.id)
@@ -464,10 +460,7 @@ fn ends_transcript(entry: &Entry, part: &Part, newest_mid: Option<&str>) -> bool
 
 fn final_without_call(entry: &Entry, newest_mid: Option<&str>) -> bool {
     Some(entry.mid.as_str()) == newest_mid
-        && !entry
-            .parts
-            .iter()
-            .any(|part| matches!(part.body, PartBody::Tool(_)))
+        && !crate::neutral::carried_parts(entry).any(|part| matches!(part.body, PartBody::Tool(_)))
 }
 
 fn small_recent_call(tool: &ToolPart, tag: u64, recent: &[u64]) -> bool {
@@ -629,7 +622,7 @@ pub(crate) fn starts_user_turn(entry: &Entry) -> bool {
     entry.role == Role::User
         && entry.notice.is_none()
         && !has_verified_host_frames(entry)
-        && crate::neutral::authored_parts(entry).any(|part| match &part.body {
+        && crate::neutral::carried_authored_parts(entry).any(|part| match &part.body {
             PartBody::Text { text } => !text.trim().is_empty(),
             PartBody::File(_) => true,
             _ => false,
@@ -676,7 +669,9 @@ pub fn notice_far_behind_bookmark(context: &Context, usable_window: u64) -> u64 
             entry.role == Role::User
                 && !has_verified_host_frames(entry)
                 && (entry.host_parts.is_empty()
-                    || crate::neutral::authored_parts(entry).next().is_some())
+                    || crate::neutral::carried_authored_parts(entry)
+                        .next()
+                        .is_some())
         },
     )
 }
@@ -1751,7 +1746,7 @@ pub(crate) fn emergency_drop_excluding(
 /// The last indexed `ctx_keep` call, which bounds the reach of its edit.
 pub(crate) fn keep_call(index: &Index) -> Option<&Entry> {
     index.entries().iter().rev().find(|entry| {
-        entry.parts.iter().any(|part| {
+        crate::neutral::carried_parts(entry).any(|part| {
             matches!(&part.body,
                 PartBody::Tool(tool) if normalize_tool_name(&tool.name) == "ctx_keep")
         })
@@ -1781,11 +1776,11 @@ pub(crate) fn keep_drops_with_notice_marks(
     let Some(call) = keep_call(context.index) else {
         return Vec::new();
     };
+    let first_mid = crate::neutral::first_request_entry(entries).map(|e| e.mid.as_str());
     let mut drops = Vec::new();
-    for (position, entry) in entries
+    for entry in entries
         .iter()
         .take_while(|entry| entry.ordinal < call.ordinal)
-        .enumerate()
     {
         // A runner that can't mark a notice as the person's own words
         // (`notice_keep`) may relay them in any notice, so leave every notice
@@ -1795,13 +1790,13 @@ pub(crate) fn keep_drops_with_notice_marks(
                 .notice
                 .as_ref()
                 .is_some_and(|notice| notice.sender != crate::MODULE_ID);
-        if (position == 0 && context.keep_first_message)
+        if (context.keep_first_message && Some(entry.mid.as_str()) == first_mid)
             || protects_from_automatic_reclaim(entry)
             || (entry.role == Role::User && (entry.notice.is_none() || may_be_user_notice))
         {
             continue;
         }
-        for part in &entry.parts {
+        for part in crate::neutral::carried_parts(entry) {
             let key = (entry.mid.clone(), part.id.clone());
             if kept.contains(&key) || in_tail(part, cutoff) {
                 continue;

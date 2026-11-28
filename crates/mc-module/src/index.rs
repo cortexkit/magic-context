@@ -457,9 +457,7 @@ impl Index {
     /// The entry and part that carry tag number `tag`.
     pub fn find_tag(&self, tag: u64) -> Option<(&Entry, &Part)> {
         self.entries.iter().find_map(|entry| {
-            entry
-                .parts
-                .iter()
+            crate::neutral::carried_parts(entry)
                 .find(|part| part.tag == Some(tag))
                 .map(|part| (entry, part))
         })
@@ -468,7 +466,7 @@ impl Index {
     /// The entry and part with these ids.
     pub fn find(&self, mid: &str, part: &str) -> Option<(&Entry, &Part)> {
         let entry = self.at(*self.positions.get(mid)?)?;
-        let part = entry.parts.iter().find(|candidate| candidate.id == part)?;
+        let part = crate::neutral::all_parts(entry).find(|candidate| candidate.id == part)?;
         Some((entry, part))
     }
 
@@ -477,7 +475,7 @@ impl Index {
         self.entries
             .iter()
             .rev()
-            .flat_map(|entry| entry.parts.iter().rev())
+            .flat_map(|entry| crate::neutral::carried_parts(entry).rev())
             .filter(|part| matches!(part.body, PartBody::Tool(_)))
             .filter_map(|part| part.tag)
             .take(count)

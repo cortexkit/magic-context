@@ -639,9 +639,7 @@ impl Session {
         let find = |tag: u64| {
             self.index.find_tag(tag).or_else(|| {
                 archived.iter().find_map(|entry| {
-                    entry
-                        .parts
-                        .iter()
+                    crate::neutral::carried_parts(entry)
                         .find(|part| part.tag == Some(tag))
                         .map(|part| (entry, part))
                 })
@@ -689,7 +687,8 @@ impl Session {
                 conflicts.join("; ")
             ));
         }
-        let first_mid = self.index.entries().first().map(|entry| entry.mid.clone());
+        let first_mid = crate::neutral::first_request_entry(self.index.entries())
+            .map(|entry| entry.mid.clone());
         let edited = self.edited(self.cut);
         let stamped = selected.len();
         let mut added = false;

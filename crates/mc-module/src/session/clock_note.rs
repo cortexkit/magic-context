@@ -54,12 +54,13 @@ impl Session {
             .entries()
             .iter()
             .rev()
-            .find(|entry| entry.role != cortexkit_role_compaction::read::Role::System)
+            .find(|entry| {
+                entry.role != cortexkit_role_compaction::read::Role::System
+                    && !crate::neutral::is_absent_from_request(entry)
+            })
             .is_some_and(|entry| {
                 entry.role == cortexkit_role_compaction::read::Role::Assistant
-                    && entry
-                        .parts
-                        .iter()
+                    && crate::neutral::carried_parts(entry)
                         .any(|part| matches!(part.body, PartBody::Tool(_)))
             })
     }

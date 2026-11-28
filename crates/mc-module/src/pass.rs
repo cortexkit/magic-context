@@ -268,16 +268,14 @@ pub(crate) fn heavy_signed_turn_in_view(
     entries[turn_start..]
         .iter()
         .rev()
-        .filter(|entry| entry.role == Role::Assistant && !entry.parts.is_empty())
+        .filter(|entry| entry.role == Role::Assistant && crate::neutral::has_carried_parts(entry))
         .take(HEAVY_REASONING_WINDOW_STEPS)
         .filter(|entry| !signed_floor.is_some_and(|floor| entry.ordinal <= floor))
         .any(|entry| {
             // The step's usage is an aggregate; we can't tell how much of
             // it belongs to a surviving signed block after a partial drop.
             let all_signed_removed = edited.is_some_and(|edited| {
-                let mut signed = entry
-                    .parts
-                    .iter()
+                let mut signed = crate::neutral::carried_parts(entry)
                     .filter(|part| {
                         part.seal == cortexkit_role_compaction::part::Seal::Signed
                             && matches!(

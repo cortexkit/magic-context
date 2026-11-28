@@ -55,7 +55,7 @@ impl Session {
             // landing; the summary may repeat what those messages still show
             // until the runner finishes or fails the call.
             let running = entries[..=end].iter().position(|entry| {
-                entry.parts.iter().any(|part| match &part.body {
+                crate::neutral::carried_parts(entry).any(|part| match &part.body {
                     PartBody::Tool(tool) => !crate::neutral::is_finished(&tool.status),
                     _ => false,
                 })
@@ -68,14 +68,24 @@ impl Session {
                 // user or tool turn; entries with no parts render nothing.
                 let last = entries
                     .iter()
-                    .rposition(|entry| !entry.parts.is_empty() && entry.role != Role::System)
-                    .or_else(|| entries.iter().rposition(|entry| !entry.parts.is_empty()))
-                    .unwrap_or(entries.len() - 1);
-                if end >= last {
-                    let before = last.checked_sub(1)?;
-                    return Some((entries[before].ordinal, entries[before].mid.clone()));
-                }
-                return Some((entries[end].ordinal, through));
+                    .rposition(|entry| {
+                        entry.role != Role::System && crate::neutral::has_carried_parts(entry)
+                    })
+                    .or_else(|| entries.iter().rposition(crate::neutral::has_carried_parts))
+                    .or_else(|| {
+                        entries
+                            .iter()
+                            .rposition(|entry| !crate::neutral::is_absent_from_request(entry))
+                    })?;
+                let limit = if end >= last {
+                    last.checked_sub(1)?
+                } else {
+                    end
+                };
+                let endpoint = entries[..=limit]
+                    .iter()
+                    .rfind(|entry| !crate::neutral::is_absent_from_request(entry))?;
+                return Some((endpoint.ordinal, endpoint.mid.clone()));
             };
             tracing::info!(
                 session = %self.key.session,
@@ -84,8 +94,10 @@ impl Session {
             );
             // With nothing held before the running call, no new cut: the
             // view carries the cut the runner has now.
-            let before = running.checked_sub(1)?;
-            Some((entries[before].ordinal, entries[before].mid.clone()))
+            let before = entries[..running]
+                .iter()
+                .rfind(|entry| !crate::neutral::is_absent_from_request(entry))?;
+            Some((before.ordinal, before.mid.clone()))
         });
         if let Some((_, through)) = &cut {
             ops.push(EditOp::Cut {
@@ -609,7 +621,7 @@ impl Session {
     pub(super) fn clamp_bookmark_to(&mut self, count: usize) {
         let held = self.index.entries()[..count]
             .iter()
-            .flat_map(|entry| entry.parts.iter())
+            .flat_map(crate::neutral::carried_parts)
             .filter_map(|part| part.tag)
             .max()
             .unwrap_or(0);

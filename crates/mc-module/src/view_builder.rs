@@ -174,7 +174,7 @@ impl ValidationCache {
                 "view.max_text_bytes",
                 entries
                     .iter()
-                    .flat_map(|e| &e.parts)
+                    .flat_map(crate::neutral::carried_parts)
                     .filter_map(|p| match &p.body {
                         cortexkit_role_compaction::part::PartBody::Text { text } => {
                             Some(text.len() as u64)
@@ -233,13 +233,14 @@ impl ValidationCache {
         let final_turn = entries
             .iter()
             .rev()
-            .find(|e| !e.parts.is_empty())
+            .find(|e| crate::neutral::has_carried_parts(e))
             .map(|e| e.ordinal);
         let final_non_system = entries
             .iter()
             .rev()
             .find(|e| {
-                !e.parts.is_empty() && e.role != cortexkit_role_compaction::read::Role::System
+                crate::neutral::has_carried_parts(e)
+                    && e.role != cortexkit_role_compaction::read::Role::System
             })
             .map(|e| e.ordinal);
         let touched: Vec<_> = entries
@@ -251,8 +252,7 @@ impl ValidationCache {
                     || Some(e.ordinal) == final_non_system
                     || candidate.built_through.as_ref() == Some(&e.mid)
                     || floor.mid() == Some(e.mid.as_str())
-                    || e.parts
-                        .iter()
+                    || crate::neutral::carried_parts(e)
                         .any(|part| part.seal == cortexkit_role_compaction::part::Seal::Signed)
             })
             .cloned()
