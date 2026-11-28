@@ -195,7 +195,7 @@ fn submit(entries: &[Value]) -> Value {
 }
 
 fn verdict(id: i64, note: &str) -> Value {
-    json!({"id":id,"verdict":"keep","life":"long","proof":"none","evidence":[],"note":note})
+    json!({"id":id,"verdict":"keep","confidence":80,"life":"long","proof":"none","evidence":[],"note":note})
 }
 
 fn live_contents_except_attribution(path: &Path) -> BTreeMap<(String, String), Vec<String>> {
@@ -488,7 +488,7 @@ async fn lab_without_sidekick_keeps_its_send_and_request_bytes() {
         pins,
         [
             "d783f1e07f770e8c2cadcffddb512a7e81650db0dd661083b80121152caccbce",
-            "00ac158c4dcd8c427227879797864d29d6ef610e1360365171e61c54782e7bb2",
+            "5c7055802be61e109e0599105f084b2d68c6ba983df8b92030eca6d7c0caa811",
         ]
     );
 }
@@ -1946,7 +1946,7 @@ async fn lab_review_merge_requires_an_active_project_destination_outside_or_insi
            VALUES (?1,'project','p','swe:architecture','ARCHITECTURE',?1,?1,1,1,1,1,?2)", params![id,status]).unwrap();
     }
     drop(conn);
-    let merge = |into| json!({"id":7,"verdict":"merge","into":into,"new_text":"updated","life":"long","proof":"none","evidence":[],"note":"merge test","reasoning":"Checked that the destination is active in the project."});
+    let merge = |into| json!({"id":7,"verdict":"merge","confidence":80,"into":into,"new_text":"updated","life":"long","proof":"none","evidence":[],"note":"merge test","reasoning":"Checked that the destination is active in the project."});
     let client = fixture
         .run(
             fixture.spec_value(),

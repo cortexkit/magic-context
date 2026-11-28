@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 
 pub(super) type Verdicts = BTreeMap<i64, Recorded>;
@@ -217,6 +217,8 @@ pub(super) fn write_json(out: &Path, name: &str, value: &impl Serialize) -> Resu
 struct Entry {
     id: i64,
     verdict: Verdict,
+    #[serde(rename = "confidence", deserialize_with = "confidence")]
+    _confidence: u64,
     into: Option<i64>,
     new_text: Option<String>,
     #[serde(rename = "life")]
@@ -227,6 +229,13 @@ struct Entry {
     note: String,
     reasoning: Option<String>,
     confirmed: Option<bool>,
+}
+
+fn confidence<'de, D: Deserializer<'de>>(de: D) -> Result<u64, D::Error> {
+    Value::deserialize(de)?
+        .as_u64()
+        .filter(|n| (1..=100).contains(n))
+        .ok_or_else(|| serde::de::Error::custom("confidence must be an integer from 1 to 100"))
 }
 
 impl Entry {
@@ -346,10 +355,11 @@ pub(super) fn schema(confirm_record_removals: bool, labelled_history: bool) -> V
         "type":"object", "additionalProperties":false, "required":["verdicts"],
         "properties":{"verdicts":{"type":"array","minItems":1,"description":"List of one or more verdict objects to record for lab memories.","items":{
             "type":"object","additionalProperties":false,
-            "required":["id","verdict","life","proof","evidence","note"],
+            "required":["id","verdict","confidence","life","proof","evidence","note"],
             "properties":{
                 "id":{"type":"integer","description":"Numeric ID of the lab memory being reviewed."},
                 "verdict":{"type":"string","enum":["keep","shorten","rewrite","merge","end","retire","unsure"],"description":"Decision for the memory, from the listed choices."},
+                "confidence":{"type":"integer","minimum":1,"maximum":100,"description":"How sure you are that this verdict is right."},
                 "into":{"type":"integer","description":"Surviving memory ID, for merge only."},
                 "new_text":{"type":"string","description":"Revised text, for shorten, rewrite and merge only."},
                 "life":{"type":"string","enum":["short","long"],"description":"Expected useful life of the memory, either short or long."},

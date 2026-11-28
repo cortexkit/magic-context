@@ -485,6 +485,55 @@ fn answer(results: &[Value], index: usize) -> &str {
 }
 
 #[tokio::test]
+async fn submit_requires_integer_confidence_from_one_to_one_hundred() {
+    let fixture = Fixture::new();
+    let spec = fixture.spec_value();
+    let lab = Arc::new(Lab::load(fixture.start(&spec).await.unwrap(), None).unwrap());
+    for confidence in [None, Some(json!(0)), Some(json!(101)), Some(json!(50.5))] {
+        let mut entry = verdict(7, "Unaccepted confidence");
+        if let Some(value) = confidence {
+            entry["confidence"] = value;
+        } else {
+            entry.as_object_mut().unwrap().remove("confidence");
+        }
+        let error = lab
+            .clone()
+            .tool("submit", json!({"verdicts":[entry]}))
+            .await
+            .unwrap_err();
+        assert!(error.contains("confidence"), "{error}");
+        assert_eq!(fixture.output("verdicts.json"), json!([]));
+    }
+
+    let mut low = verdict(7, "Low confidence");
+    low["confidence"] = json!(1);
+    let mut high = verdict(2, "High confidence");
+    high["confidence"] = json!(100);
+    lab.clone()
+        .tool("submit", json!({"verdicts":[low,high]}))
+        .await
+        .unwrap();
+    assert_eq!(fixture.output("verdicts.json"), json!([low, high]));
+
+    let tool = lab
+        .tools()
+        .iter()
+        .find(|tool| tool["name"] == "submit")
+        .unwrap();
+    let schema = &tool["input_schema"]["properties"]["verdicts"]["items"];
+    assert!(schema["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("confidence")));
+    assert_eq!(
+        schema["properties"]["confidence"],
+        json!({
+            "type":"integer", "minimum":1, "maximum":100, "description":"How sure you are that this verdict is right."
+        })
+    );
+}
+
+#[tokio::test]
 async fn submit_requires_bounded_reasoning_for_removals_but_not_keep_and_refuses_them_alone() {
     let fixture = Fixture::new();
     let invalid = removal(7, "retire");
