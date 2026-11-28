@@ -125,7 +125,13 @@ test_module_binary bin 3m --bin ck-mc
 for test_file in crates/mc-module/tests/*.rs; do
     test_name=${test_file##*/}
     test_name=${test_name%.rs}
-    test_module_binary "integration-$test_name" 5m --test "$test_name"
+    limit=5m
+    if [[ $test_name == scenarios ]]; then
+        # The long-head test alone took 335s on Windows x64. Allow for the
+        # other scenarios running alongside it and for slower ARM64 runners.
+        limit=10m
+    fi
+    test_module_binary "integration-$test_name" "$limit" --test "$test_name"
 done
 test_module_binary doc 5m --doc
 
