@@ -1019,9 +1019,12 @@ async fn lab_restart_resumes_same_run_and_completes_verdicts() {
     let client = fixture
         .run(
             fixture.spec_value(),
-            Ends::LabRestart {
-                before: submit(std::slice::from_ref(&before)),
-                after: submit(std::slice::from_ref(&after)),
+            Ends::Restart {
+                before: Box::new(Ends::LabTools(vec![submit(std::slice::from_ref(&before))])),
+                after: vec![
+                    Ends::Active,
+                    Ends::LabTools(vec![submit(std::slice::from_ref(&after))]),
+                ],
             },
         )
         .await;

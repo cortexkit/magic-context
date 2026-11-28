@@ -41,7 +41,7 @@ use crate::routing::{self, DreamDemand, Router, DREAM_OUTPUT_TOKENS};
 use crate::summary::account_wait::{AccountWait, Reselect, SendKind};
 use crate::summary::fit::Window;
 use crate::summary::run::{
-    backoff, now_ms, send_and_wait_lab, send_and_wait_stepped, Ended, Model, PlanRun, Reply,
+    backoff, now_ms, send_and_wait_recorded, send_and_wait_stepped, Ended, Model, PlanRun, Reply,
     SummaryError, MAX_RETRIES,
 };
 
@@ -495,7 +495,7 @@ async fn run_inner<C: RunnerClient + Router>(
             lab.observed.model = Some(model.clone());
             lab.observed.route = Some(answer.route.route_key());
             let mut spent = None;
-            let sent = send_and_wait_lab(
+            let sent = send_and_wait_recorded(
                 client,
                 &first_child,
                 &child_id,

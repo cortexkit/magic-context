@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use cortexkit_role_llm_runner::run::{states, RunReason, RunStatus};
 use rusqlite::params;
 use serde_json::json;
 
@@ -789,6 +790,91 @@ async fn a_failed_model_counts_a_failure_and_releases_the_lock() {
         .unwrap();
     assert_eq!(failures, 1);
     assert_eq!(locks(&db), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn nightly_restart_pause_is_cancelled_at_the_same_deadline_as_an_active_run() {
+    for state in [states::ACTIVE, states::PAUSED] {
+        let (_dir, db) = store();
+        let engine = engine(1);
+        let settings = Settings::default();
+        let profile = profile();
+        let kind = "classify-memories";
+        let owner = OwnerKey::project(PROJECT);
+        assert!(db
+            .with_connection(|conn| {
+                let now = now_ms();
+                store::lock(conn, &owner, &engine.holder, kind, now, now + LOCK_MS)
+            })
+            .unwrap());
+        let due = store::Due {
+            owner: owner.clone(),
+            task: kind.into(),
+            schedule: String::new(),
+            next_due_at: 0,
+            failures: 0,
+            watermark: None,
+        };
+        let run_id = begin_run(&db, &due, kind, &profile).unwrap();
+        let (ends, reason) = if state == states::PAUSED {
+            (
+                vec![Ends::restart(vec![Ends::NoResult])],
+                Some(RunReason::Restart),
+            )
+        } else {
+            (vec![Ends::Active, Ends::NoResult], None)
+        };
+        let mut client = Client::new(&["p/a"], &ends);
+        let mut status = RunStatus::new(state);
+        status.reason = reason;
+        client.status = Some(status);
+        let start = tokio::time::Instant::now();
+        engine
+            .run_task(
+                &db,
+                &client,
+                &settings,
+                &due,
+                kind,
+                &json!({}),
+                FOLDER,
+                &profile,
+                run_id,
+                None,
+                std::slice::from_ref(&owner),
+                None,
+                &[],
+            )
+            .await;
+        let (outcome, class, error): (String, String, String) = db
+            .with_connection(|conn| {
+                conn.query_row(
+                    "SELECT outcome, failure_class, error FROM dream_task_runs WHERE id = ?1",
+                    [run_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(outcome, "failed", "{state}");
+        assert_eq!(class, "model", "{state}");
+        let child = format!("mc-dream:{run_id}.0:0.0");
+        assert_eq!(
+            error,
+            format!("the run did not finish in time (child {child})"),
+            "{state}"
+        );
+        assert_eq!(client.children(), std::slice::from_ref(&child), "{state}");
+        assert_eq!(
+            *client.cancels.lock().unwrap(),
+            [(child, "run".into(), start + run::RUN_TIMEOUT)],
+            "{state}"
+        );
+        assert_eq!(
+            *client.reports.lock().unwrap(),
+            ["decision-a failed"],
+            "{state}"
+        );
+    }
 }
 
 /// Routing's full capacity (`concurrency_full`) ends the run as a wait the

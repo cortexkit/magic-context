@@ -4,7 +4,8 @@ use std::sync::Mutex;
 use cortexkit_role_compaction::read::{ReadPage, ReadRequest};
 use cortexkit_role_compaction::view::{AppliedViewAnswer, ApplyViewAnswer, ApplyViewRequest};
 use cortexkit_role_llm_runner::run::{
-    states, FinalMessage, Finish, RunError, RunResult, RunResultRequest,
+    states, FinalMessage, Finish, RunError, RunReason, RunResult, RunResultRequest, RunStatus,
+    RunStatusRequest,
 };
 use cortexkit_role_llm_runner::send::{SendReply, SendRequest};
 use cortexkit_role_routing::report::ReportRequest;
@@ -35,12 +36,23 @@ pub(crate) enum Ends {
     Full(u64),
     SpentFull(u64, u64),
     LabTools(Vec<serde_json::Value>),
-    LabRestart {
-        before: serde_json::Value,
-        after: serde_json::Value,
+    Restart {
+        before: Box<Ends>,
+        after: Vec<Ends>,
     },
+    Active,
+    NoResult,
     /// The runner could not hand the prompt to its host, so no model ran.
     NeverRan,
+}
+
+impl Ends {
+    pub(crate) fn restart(after: Vec<Self>) -> Self {
+        Self::Restart {
+            before: Box::new(Self::Spent("", 100)),
+            after,
+        }
+    }
 }
 
 /// A reader catalog as the tests give it: each tool with its capabilities,
@@ -74,6 +86,9 @@ pub(crate) struct Client {
     pub(crate) sends: Mutex<Vec<(Child, SendRequest)>>,
     pub(crate) send_replies: Mutex<VecDeque<SendReply>>,
     pub(crate) send_errors: Mutex<VecDeque<ClientError>>,
+    run_reads: Mutex<Vec<String>>,
+    pub(crate) status: Option<RunStatus>,
+    pub(crate) cancels: Mutex<Vec<(String, String, tokio::time::Instant)>>,
     pub(crate) route_script: Mutex<VecDeque<Result<&'static str, routing::RouteError>>>,
     /// The runners that take fetch plans.
     pub(crate) plans: Vec<&'static str>,
@@ -126,6 +141,9 @@ impl Client {
             sends: Mutex::default(),
             send_replies: Mutex::default(),
             send_errors: Mutex::default(),
+            run_reads: Mutex::default(),
+            status: None,
+            cancels: Mutex::default(),
             route_script: Mutex::default(),
             plans: Vec::new(),
             providers: vec!["aft"],
@@ -301,8 +319,9 @@ impl RunnerClient for Client {
     async fn child_result(
         &self,
         child: &Child,
-        _: RunResultRequest,
+        request: RunResultRequest,
     ) -> Result<RunResult, ClientError> {
+        self.run_reads.lock().unwrap().push(request.run_id);
         let ends = self
             .ends
             .lock()
@@ -310,11 +329,13 @@ impl RunnerClient for Client {
             .pop_front()
             .expect("a scripted run end");
         let (ends, restart) = match ends {
-            Ends::LabRestart { before, after } => (Ends::LabTools(vec![before]), Some(after)),
+            Ends::Restart { before, after } => (*before, Some(after)),
             ends => (ends, None),
         };
-        Ok(match ends {
-            Ends::LabRestart { .. } => unreachable!("restart split into two steps"),
+        let result = match ends {
+            Ends::Restart { .. } => unreachable!("nested restart"),
+            Ends::Active => RunResult::new("run", states::ACTIVE),
+            Ends::NoResult => std::future::pending().await,
             Ends::Result(result) => *result,
             Ends::Reply(text) => completed(text, None),
             Ends::Spent(text, tokens) => {
@@ -372,33 +393,7 @@ impl RunnerClient for Client {
                             .push(serde_json::from_slice(&bytes).unwrap());
                     }
                 }
-                if let Some(after) = restart {
-                    let sends = self.sends.lock().unwrap();
-                    let request = serde_json::to_value(&sends.last().unwrap().1).unwrap();
-                    let mut ends = self.ends.lock().unwrap();
-                    if request["on_restart"] == "resume" {
-                        let mut paused = RunResult::new("run", states::PAUSED);
-                        paused.reason =
-                            Some(cortexkit_role_llm_runner::run::RunReason::Restart.into());
-                        ends.extend([
-                            Ends::Result(Box::new(paused)),
-                            Ends::Result(Box::new(RunResult::new("run", states::ACTIVE))),
-                            Ends::LabTools(vec![after]),
-                        ]);
-                    } else {
-                        let mut interrupted = RunResult::new("run", states::INTERRUPTED);
-                        interrupted.reason = Some(
-                            cortexkit_role_llm_runner::run::interrupt_reasons::RUNNER_SHUTDOWN
-                                .into(),
-                        );
-                        ends.push_back(Ends::Result(Box::new(interrupted)));
-                    }
-                    let mut active = RunResult::new("run", states::ACTIVE);
-                    active.usage = result.usage;
-                    active
-                } else {
-                    self.lab_result.clone().unwrap_or(result)
-                }
+                self.lab_result.clone().unwrap_or(result)
             }
             Ends::NeverRan => crate::summary::run::never_ran_tests::handover("nothing_written"),
             Ends::Error(message) => {
@@ -427,7 +422,48 @@ impl RunnerClient for Client {
                 }
                 result
             }
-        })
+        };
+        let Some(after) = restart else {
+            return Ok(result);
+        };
+        let sends = self.sends.lock().unwrap();
+        let request = serde_json::to_value(&sends.last().unwrap().1).unwrap();
+        let mut ends = self.ends.lock().unwrap();
+        if request["on_restart"] == "resume" {
+            let mut paused = RunResult::new("run", states::PAUSED);
+            paused.reason = Some(RunReason::Restart.into());
+            paused.usage.clone_from(&result.usage);
+            for end in after.into_iter().rev() {
+                ends.push_front(end);
+            }
+            ends.push_front(Ends::Result(Box::new(paused)));
+        } else {
+            let mut interrupted = RunResult::new("run", states::INTERRUPTED);
+            interrupted.reason =
+                Some(cortexkit_role_llm_runner::run::interrupt_reasons::RUNNER_SHUTDOWN.into());
+            ends.push_front(Ends::Result(Box::new(interrupted)));
+        }
+        let mut active = RunResult::new("run", states::ACTIVE);
+        active.usage = result.usage;
+        Ok(active)
+    }
+
+    async fn child_status(&self, _: &Child, _: RunStatusRequest) -> Result<RunStatus, ClientError> {
+        self.status
+            .clone()
+            .ok_or_else(|| ClientError::new("run.status unavailable"))
+    }
+
+    async fn cancel_child_run(&self, child: &Child, run_id: &str) -> Result<bool, ClientError> {
+        if self.status.is_none() {
+            return Ok(false);
+        }
+        self.cancels.lock().unwrap().push((
+            child.session.session.clone(),
+            run_id.to_owned(),
+            tokio::time::Instant::now(),
+        ));
+        Ok(true)
     }
 }
 
@@ -1048,11 +1084,16 @@ async fn a_runner_without_session_retention_gets_the_same_dreamer_send_bytes_as_
     let client = Client::new(&["p/a"], &[Ends::Reply("ok")]);
     run(&client, &job(), &Task { fits: true }).await.unwrap();
     let sends = client.sends.lock().unwrap();
+    let mut send = sends[0].1.clone();
+    assert_eq!(
+        send.runner_params.remove("on_restart"),
+        Some(json!("resume"))
+    );
     // The bytes a dreamer child's creating send had before runners could be
     // asked to keep it, written out rather than rebuilt by the code under
     // test.
     assert_eq!(
-        serde_json::to_string(&sends[0].1).unwrap(),
+        serde_json::to_string(&send).unwrap(),
         r#"{"prompt":"200000 32000","send_id":"mc-dream:17:0.0","route_decision_id":"decision-a","generation":{"max_output_tokens":32000},"model":{"model":"a","provider":"p"},"stop_when":{"max_steps":1},"system":"You classify memories.","tools":[]}"#
     );
 }
@@ -1090,6 +1131,76 @@ fn reading_client(routes: &[&'static str], ends: &[Ends]) -> Client {
     client
 }
 
+#[tokio::test(start_paused = true)]
+async fn nightly_restart_resumes_the_same_run_and_counts_usage_once() {
+    let mut finished = completed("ok", None);
+    finished.usage = Some(
+        serde_json::from_value(json!({
+            "steps": 2,
+            "unreported_steps": 0,
+            "input_tokens": 300,
+            "cached_input_tokens": 50,
+            "output_tokens": 25,
+        }))
+        .unwrap(),
+    );
+    let client = reading_client(
+        &["p/a"],
+        &[Ends::restart(vec![
+            Ends::Active,
+            Ends::Result(Box::new(finished)),
+        ])],
+    );
+    let reply = run(&client, &verify(), &CappedTask).await.unwrap();
+    assert_eq!(reply.child, "mc-dream:18:0.0");
+    assert_eq!(reply.text, "ok");
+    assert_eq!(reply.steps, Some(2));
+    assert_eq!(usage_tokens(reply.usage.as_ref()), (350, 25));
+    assert_eq!(client.children(), ["mc-dream:18:0.0"]);
+    assert_eq!(*client.run_reads.lock().unwrap(), ["run"; 4]);
+    assert_eq!(*client.reports.lock().unwrap(), ["decision-a completed"]);
+    assert_eq!(*client.report_ids.lock().unwrap(), [Some(reply.child)]);
+    assert!(client.cancels.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn nightly_restart_resume_expired_takes_the_interrupted_fallback() {
+    for reason in ["runner_shutdown", "restart_resume_expired"] {
+        let mut interrupted = RunResult::new("run", states::INTERRUPTED);
+        interrupted.reason = Some(reason.into());
+        let end = Ends::Result(Box::new(interrupted));
+        let first = if reason == "restart_resume_expired" {
+            Ends::restart(vec![end])
+        } else {
+            end
+        };
+        let no_fallback = reading_client(&["p/a"], std::slice::from_ref(&first));
+        assert_eq!(
+            run(&no_fallback, &verify(), &CappedTask)
+                .await
+                .unwrap_err()
+                .to_string(),
+            format!("the run ended interrupted: {reason} (child mc-dream:18:0.0)")
+        );
+        let client = reading_client(&["p/a", "p/b"], &[first, Ends::Reply("ok")]);
+        let (result, log) =
+            crate::test_log::logged_async(run(&client, &verify(), &CappedTask)).await;
+        let reply = result.unwrap();
+        assert_eq!(reply.model.model, "b");
+        assert_eq!(client.children(), ["mc-dream:18:0.0", "mc-dream:18:1.0"]);
+        assert_eq!(
+            *client.reports.lock().unwrap(),
+            ["decision-a failed", "decision-b completed"]
+        );
+        assert!(
+            log.lines()
+                .any(|line| line.contains("a child run ended without completing")
+                    && line.contains(reason)),
+            "{log}"
+        );
+    }
+}
+
 /// A capped task's run stops at the cap; the child is then sent the
 /// finalize message once, in the same conversation and for one step, and
 /// that reply is the run's answer.
@@ -1117,6 +1228,7 @@ async fn a_run_at_its_step_cap_is_told_once_to_answer_and_that_answer_is_used() 
     assert_eq!(child.session.session, first_child.session.session);
     assert_eq!(finalize.prompt.as_deref(), Some(STOP));
     assert_eq!(finalize.send_id, "mc-dream:18:0.0:finalize");
+    assert_eq!(finalize.runner_params["on_restart"], "resume");
     assert_eq!(finalize.runner_params["stop_when"], json!({"max_steps": 1}));
     // The child keeps its plan; a later send carries none of what created
     // it.
