@@ -2675,6 +2675,7 @@ const TEMPLATE_DATA = [
 "[magic-context] hidden child \x01 removed",
 "Window source: \x01; denominator: \x01 tokens",
 "[magic-context] registered dreamer (\x01)",
+"[magic-context] v2 \x01 cleanup failed (\x01)",
 "compartment trigger: firing (reason=\x01)",
 "[dreamer] map-memories batch failed: \x01",
 "[dreamer] parent lookup failed for \x01: \x01\x020p",

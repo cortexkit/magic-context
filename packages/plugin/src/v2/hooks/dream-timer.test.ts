@@ -4,7 +4,7 @@ import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { resetCtxReduceRegisteredGloballyForTest } from "../../hooks/magic-context/ctx-reduce-availability";
-import { setBootQuietPeriodForTests } from "../../plugin/boot-quiet";
+import { BOOT_QUIET_MS, setBootQuietPeriodForTests } from "../../plugin/boot-quiet";
 import {
     _getDreamTimerStateForTests,
     _resetDreamTimerForTests,
@@ -15,8 +15,10 @@ import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { isolatedTestGitEnv } from "../../shared/test-git-env";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
+import * as hiddenCompletion from "../hidden-completion";
 import { setup } from "../server";
-import { V2StoreReader } from "../store-reader";
+import { V2StoreReader, V2StoreReaderPool } from "../store-reader";
+import * as commands from "./commands";
 import { registerContext } from "./context";
 import { findV2DreamParentSession } from "./dream-timer";
 import * as storageGate from "./storage-gate";
@@ -91,6 +93,177 @@ function mockConfig(dreamer: { disable: boolean }, gitIndexing = false) {
 }
 
 describe("OpenCode 2 dream schedule timer registration", () => {
+    test("normal disposal interrupts hidden runs before joining subscription workers", async () => {
+        mockConfig({ disable: false });
+        const host = fakeHost(projectDirectory());
+        const effects: string[] = [];
+        let subscribed = 0;
+        host.event.subscribe = async function* ({ signal }) {
+            const name = subscribed++ === 0 ? "dream" : "usage";
+            const done = Promise.withResolvers<void>();
+            signal.addEventListener(
+                "abort",
+                () => {
+                    effects.push(`${name} abort`);
+                    done.resolve();
+                },
+                { once: true },
+            );
+            await done.promise;
+            effects.push(`${name} join`);
+        };
+        const create = hiddenCompletion.createV2HiddenCompletionExecutor;
+        const hidden = spyOn(
+            hiddenCompletion,
+            "createV2HiddenCompletionExecutor",
+        ).mockImplementation(async (...args) => {
+            const executor = await create(...args);
+            const dispose = executor.dispose;
+            executor.dispose = async () => {
+                effects.push("hidden interrupt and drain");
+                await dispose();
+            };
+            return executor;
+        });
+        const clear = globalThis.clearInterval;
+        const timer = spyOn(globalThis, "clearInterval").mockImplementation((id) => {
+            effects.push("interval clear");
+            clear(id);
+        });
+        const close = V2StoreReaderPool.prototype.closeWhenIdle;
+        const pool = spyOn(V2StoreReaderPool.prototype, "closeWhenIdle").mockImplementation(
+            function (this: V2StoreReaderPool, ms) {
+                effects.push("pool close");
+                return close.call(this, ms);
+            },
+        );
+        try {
+            const duties = await registerContext(host);
+            await duties?.dispose();
+            expect(effects).toEqual([
+                "interval clear",
+                "usage abort",
+                "hidden interrupt and drain",
+                "usage join",
+                "dream abort",
+                "dream join",
+                "interval clear",
+                "pool close",
+            ]);
+        } finally {
+            pool.mockRestore();
+            timer.mockRestore();
+            hidden.mockRestore();
+        }
+    });
+
+    for (const early of [false, true]) {
+        test(
+            early
+                ? "early hook rejection disposes only resources setup reached"
+                : "command registration rejection releases startup timers and subscription workers",
+            async () => {
+                mockConfig({ disable: false });
+                setBootQuietPeriodForTests(Date.now());
+                disposers.push(async () => setBootQuietPeriodForTests(null));
+                const host = fakeHost(projectDirectory());
+                const subscriptions = new Set<AbortSignal>();
+                const endStreams = Promise.withResolvers<void>();
+                host.event.subscribe = async function* ({ signal }) {
+                    const ended = Promise.withResolvers<void>();
+                    const abort = () => ended.resolve();
+                    subscriptions.add(signal);
+                    signal.addEventListener("abort", abort, { once: true });
+                    try {
+                        await Promise.race([ended.promise, endStreams.promise]);
+                    } finally {
+                        signal.removeEventListener("abort", abort);
+                        subscriptions.delete(signal);
+                    }
+                };
+                const intervals = new Set<ReturnType<typeof setInterval>>();
+                const start = globalThis.setInterval;
+                const clear = globalThis.clearInterval;
+                const startSpy = spyOn(globalThis, "setInterval").mockImplementation((...args) => {
+                    const id = start(...args);
+                    intervals.add(id);
+                    return id;
+                });
+                const clearSpy = spyOn(globalThis, "clearInterval").mockImplementation((id) => {
+                    if (id !== undefined) intervals.delete(id as ReturnType<typeof setInterval>);
+                    clear(id);
+                });
+                const bootQuietTimers = new Set<ReturnType<typeof setTimeout>>();
+                const schedule = globalThis.setTimeout;
+                const cancel = globalThis.clearTimeout;
+                const scheduleSpy = spyOn(globalThis, "setTimeout").mockImplementation(
+                    (...args) => {
+                        const id = schedule(...args);
+                        if ((args[1] ?? 0) >= BOOT_QUIET_MS / 2 && (args[1] ?? 0) <= BOOT_QUIET_MS)
+                            bootQuietTimers.add(id);
+                        return id;
+                    },
+                );
+                const cancelSpy = spyOn(globalThis, "clearTimeout").mockImplementation((id) => {
+                    if (id !== undefined)
+                        bootQuietTimers.delete(id as ReturnType<typeof setTimeout>);
+                    cancel(id);
+                });
+                const handles = () => ({
+                    intervals: intervals.size,
+                    bootQuietTimers: bootQuietTimers.size,
+                    subscriptions: subscriptions.size,
+                    scheduledProjects: _getDreamTimerStateForTests().directories.length,
+                });
+                const before = handles();
+                let atFailure: ReturnType<typeof handles> | undefined;
+                const failure = new Error("injected command registration failure");
+                if (early) {
+                    host.session.hook = async (stage) => {
+                        if (stage !== "http.response") return;
+                        atFailure = handles();
+                        throw failure;
+                    };
+                }
+                const register = spyOn(commands, "registerV2Commands").mockImplementation(
+                    async () => {
+                        atFailure = handles();
+                        throw failure;
+                    },
+                );
+                try {
+                    await expect(registerContext(host)).rejects.toBe(failure);
+                    expect(atFailure).toEqual(
+                        early
+                            ? {
+                                  intervals: 1,
+                                  bootQuietTimers: 0,
+                                  subscriptions: 0,
+                                  scheduledProjects: 0,
+                              }
+                            : {
+                                  intervals: 2,
+                                  bootQuietTimers: 2,
+                                  subscriptions: 2,
+                                  scheduledProjects: 1,
+                              },
+                    );
+                    if (early) expect(register).not.toHaveBeenCalled();
+                    expect(handles()).toEqual(before);
+                } finally {
+                    endStreams.resolve();
+                    for (const id of intervals) clear(id);
+                    for (const id of bootQuietTimers) cancel(id);
+                    cancelSpy.mockRestore();
+                    scheduleSpy.mockRestore();
+                    register.mockRestore();
+                    clearSpy.mockRestore();
+                    startSpy.mockRestore();
+                }
+            },
+        );
+    }
+
     test("setup registers the project with the schedule timer and its cleanup unregisters it", async () => {
         mockConfig({ disable: false });
         const directory = projectDirectory();

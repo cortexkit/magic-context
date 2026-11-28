@@ -1108,6 +1108,32 @@ function coveredInstructionRows(
         .map((message) => markCoveredInstructionRow(message));
 }
 
+// Shutdown order matters: interrupt hidden runs before joining the event workers,
+// and keep the reader pool available until those workers have finished.
+const contextDisposalOrder = [
+    "sweep",
+    "backfill",
+    "idle",
+    "abortUsage",
+    "hidden",
+    "joinUsage",
+    "rpc",
+    "transform",
+    "tools",
+    "deletedSessions",
+    "dream",
+    "maintenance",
+    "embeddings",
+    "rawProviders",
+    "restoredRows",
+    "readerPool",
+    "synthetic",
+] as const;
+
+type ContextCleanup = Partial<
+    Record<(typeof contextDisposalOrder)[number], (failedSetup: boolean) => void | Promise<void>>
+>;
+
 export async function registerContext(context: V2Context) {
     const directory = context.location.directory;
     const config = loadPluginConfigDetailed(directory).config;
@@ -1148,7 +1174,6 @@ export async function registerContext(context: V2Context) {
         });
         return;
     }
-    const liveConfigReader = pluginConfigReader(directory, config);
     const compactionOff = !isCompactionEnabled(config);
     const conflicts = detectConflicts(directory, {
         compactionEnabled: !compactionOff,
@@ -1160,9 +1185,40 @@ export async function registerContext(context: V2Context) {
         );
         return;
     }
+    const cleanup: ContextCleanup = {};
+    const dispose = async (failedSetup = false) => {
+        for (const resource of contextDisposalOrder) {
+            try {
+                const drain = cleanup[resource]?.(failedSetup);
+                if (drain) await drain;
+            } catch (error) {
+                const kind = error instanceof Error ? error.constructor.name : typeof error;
+                log(`[magic-context] v2 ${resource} cleanup failed (${kind})`);
+            }
+        }
+    };
+    try {
+        await setupContext(context, config, nativeRemove, compactionOff, cleanup);
+    } catch (error) {
+        await dispose(true);
+        throw error;
+    }
+    return { dispose: () => dispose() };
+}
+
+async function setupContext(
+    context: V2Context,
+    config: ReturnType<typeof loadPluginConfigDetailed>["config"],
+    nativeRemove: NonNullable<ReturnType<typeof nativeSessionRemove>>,
+    compactionOff: boolean,
+    cleanup: ContextCleanup,
+) {
+    const directory = context.location.directory;
+    const liveConfigReader = pluginConfigReader(directory, config);
     const embeddings = createV2EmbeddingScope(
         resolveProjectIdentityForSession(directory, config.allow_home_project),
     );
+    cleanup.embeddings = () => embeddings.dispose();
     const folds = new FoldOwner(context.storage);
     // The host store owns history; this bounded cache only accelerates replay.
     // Idle folding waits out the served response's frozen cache lifetime, and
@@ -1254,6 +1310,10 @@ export async function registerContext(context: V2Context) {
         isLive: isLiveHiddenChild,
     });
     let hiddenChildSweepTimer: ReturnType<typeof setInterval> | undefined;
+    cleanup.sweep = () => {
+        if (hiddenChildSweepTimer) clearInterval(hiddenChildSweepTimer);
+        return hiddenChildSweep.dispose();
+    };
     const sweepChildren = (database: NonNullable<typeof db>) => {
         hiddenChildSweep.start(database);
     };
@@ -1370,6 +1430,7 @@ export async function registerContext(context: V2Context) {
                   embeddings.ensureRegistered,
               )
             : undefined;
+    if (tools) cleanup.tools = () => tools.dispose();
     const generateReplay = new V2GenerateReplay();
     await context.session.hook("http.response", async (draft) => {
         if (!db || draft.kind !== "primary" || draft.response.ok) return;
@@ -1395,6 +1456,15 @@ export async function registerContext(context: V2Context) {
     });
     let hiddenAgentsReady: Promise<void> | undefined;
     const readerPool = new V2StoreReaderPool();
+    cleanup.readerPool = async () => {
+        // A cancelled run still holds the pool until its caller closes it. Wait
+        // briefly, then let the last holder close it without delaying reload.
+        if (!(await readerPool.closeWhenIdle(STORE_POOL_DISPOSE_WAIT_MS)))
+            log(
+                `[magic-context] v2 store reader pool still held by ${readerPool.holdCount()} hidden run(s) at dispose; it closes when they finish`,
+            );
+    };
+    cleanup.synthetic = () => clearSyntheticCandidates(context);
     const messageTimesCache = new V2MessageTimesCache();
     const openStoreReader = () =>
         readerPool.open(gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"));
@@ -1537,9 +1607,13 @@ export async function registerContext(context: V2Context) {
         resolveProjectIdentityForSession(directory, config.allow_home_project)
             ? await createHiddenExecutor(db)
             : undefined;
+    // The host still has this instance's hooks when it calls dispose. Interrupt
+    // the children before joining workers so no old run reaches the replacement.
+    cleanup.hidden = () => hiddenCompletionExecutor?.dispose();
     let dreamTrigger = hiddenCompletionExecutor
         ? startDreamer(hiddenCompletionExecutor)
         : undefined;
+    cleanup.dream = () => dreamTrigger?.dispose();
     // RPC handlers and commands are registered once at setup; after a refused
     // start they hold this stand-in, which reaches the executor recoverHiddenWork
     // wires later.
@@ -1547,6 +1621,7 @@ export async function registerContext(context: V2Context) {
     // Maintenance owns one process-wide timer, regardless of dreamer.disable.
     // The shared timer samples the git indexing switch separately from dream tasks.
     let maintenanceTimer: ReturnType<typeof registerV2DreamScheduleTimer> | undefined;
+    cleanup.maintenance = () => maintenanceTimer?.dispose();
     const startMaintenance = () => {
         const timerProjectIdentity = resolveProjectIdentityForSession(
             directory,
@@ -1625,6 +1700,11 @@ export async function registerContext(context: V2Context) {
     const commitSeenLastPass = new Map<string, boolean>();
     const restoredRows = new RestoredRowCache();
     const rawProviders = new Map<string, () => void>();
+    cleanup.restoredRows = () => restoredRows.clear();
+    cleanup.rawProviders = () => {
+        for (const release of rawProviders.values()) release();
+        rawProviders.clear();
+    };
     let passDuties: ReturnType<typeof createChatMessageHook> | undefined;
     let toolDuties: ReturnType<typeof createToolExecuteAfterHook> | undefined;
     const droppedInputGuard = createDroppedInputGuard();
@@ -1673,8 +1753,13 @@ export async function registerContext(context: V2Context) {
     };
     if (db && isDatabasePersisted(db)) {
         const backfillDb = db;
-        scheduleAfterBootQuiet(() => {
-            runV2SessionProjectBackfill(backfillDb, openStoreReader, config.allow_home_project)
+        let running: Promise<void> | undefined;
+        const timer = scheduleAfterBootQuiet(() => {
+            running = runV2SessionProjectBackfill(
+                backfillDb,
+                openStoreReader,
+                config.allow_home_project,
+            )
                 .then(() =>
                     backfillSessionActivity(backfillDb, "opencode", (sessionId) => {
                         const reader = openStoreReader();
@@ -1689,6 +1774,11 @@ export async function registerContext(context: V2Context) {
                     log("[session-project-backfill] OpenCode 2 backfill failed:", error),
                 );
         });
+        cleanup.backfill = (failedSetup) => {
+            if (!failedSetup) return;
+            clearTimeout(timer);
+            return running;
+        };
     }
     const readAllForConversion = (sessionID: string) =>
         readAllV2RawMessagesForConversion(openStoreReader, sessionID);
@@ -1713,10 +1803,12 @@ export async function registerContext(context: V2Context) {
         : undefined;
     const lkgSystems = new V2LkgSystemReplay();
     let transform: ReturnType<typeof createTransform> | undefined;
+    cleanup.transform = () => transform?.disposeRust();
     let systemPrompt: ReturnType<typeof createSystemPromptHashHandler> | undefined;
     const systemPromptRefreshSessions = new Set<string>();
     const tagger = createTagger();
     const deletedSessions = new DeletedSessionTombstones();
+    cleanup.deletedSessions = () => deletedSessions.clear();
     // Sessions whose fork inheritance has been settled in this process (seeded,
     // declined, or not a fork), so the store is asked once per session.
     const forkSeedSettled = new Set<string>();
@@ -1968,6 +2060,12 @@ export async function registerContext(context: V2Context) {
     const hostFoldIdle = hostFolds
         ? new HostFoldIdle((sessionID, eligible) => hostFolds.idle(sessionID, eligible))
         : undefined;
+    cleanup.idle = () => {
+        messageTimesCache.clear();
+        recoveredInstructions.clear();
+        loggedUncoveredCheckpoints.clear();
+        hostFoldIdle?.dispose();
+    };
     /**
      * Arm thinking-binding recovery when a host failure event carries the
      * binding 400, so the next pass strips the rejected thinking instead of
@@ -2017,6 +2115,7 @@ export async function registerContext(context: V2Context) {
         }
     };
     const usageController = new AbortController();
+    cleanup.abortUsage = () => usageController.abort();
     const usageDone = (async () => {
         let retry = 0;
         while (!usageController.signal.aborted) {
@@ -2266,6 +2365,7 @@ export async function registerContext(context: V2Context) {
             }
         }
     })();
+    cleanup.joinUsage = () => usageDone;
     /** The render options a fold of this compaction request's session uses. */
     const m0RenderOptions = (draft: SessionContext, store: Database, state: SessionMeta) => {
         const modelKey = `${draft.model.providerID}/${draft.model.id}`;
@@ -4189,6 +4289,10 @@ export async function registerContext(context: V2Context) {
     const storageDir = getMagicContextStorageDir();
     const rpcServer = new MagicContextRpcServer(storageDir, directory);
     let rpcStopped = false;
+    cleanup.rpc = () => {
+        rpcStopped = true;
+        rpcServer.stop();
+    };
     registerRpcHandlers(rpcServer, {
         directory,
         config,
@@ -4350,46 +4454,6 @@ export async function registerContext(context: V2Context) {
                 .catch((error) => log("[magic-context] v2 RPC server failed to start", error));
         }, 0),
     );
-    return {
-        async dispose() {
-            if (hiddenChildSweepTimer) clearInterval(hiddenChildSweepTimer);
-            await hiddenChildSweep.dispose();
-            messageTimesCache.clear();
-            recoveredInstructions.clear();
-            loggedUncoveredCheckpoints.clear();
-            hostFoldIdle?.dispose();
-            usageController.abort();
-            // OpenCode 2 runs this disposer before it removes this instance's hooks
-            // (scope finalizers run in reverse registration order, and the disposer
-            // is added after setup has registered them), and loads the replacing
-            // instance only afterwards. Cancelling hidden runs first interrupts their
-            // children while this instance still shapes their turns, so no step of
-            // them reaches the new instance, which has no record of their prompts.
-            // The disposer cannot wait for those runs to finish instead: the host
-            // holds every new session drain until the reload completes.
-            await hiddenCompletionExecutor?.dispose();
-            await usageDone;
-            rpcStopped = true;
-            rpcServer.stop();
-            transform?.disposeRust();
-            tools?.dispose();
-            deletedSessions.clear();
-            await dreamTrigger?.dispose();
-            await maintenanceTimer?.dispose();
-            await embeddings.dispose();
-            for (const release of rawProviders.values()) release();
-            rawProviders.clear();
-            restoredRows.clear();
-            // A cancelled run still holds the pool until its caller closes it. Wait
-            // briefly so that usually completes here; otherwise the pool closes when
-            // the last hold is released, and the reload is not kept waiting for it.
-            if (!(await readerPool.closeWhenIdle(STORE_POOL_DISPOSE_WAIT_MS)))
-                log(
-                    `[magic-context] v2 store reader pool still held by ${readerPool.holdCount()} hidden run(s) at dispose; it closes when they finish`,
-                );
-            clearSyntheticCandidates(context);
-        },
-    };
 }
 
 import {
