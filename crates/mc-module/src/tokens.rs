@@ -25,6 +25,8 @@ pub fn bytes(bytes: u64) -> u64 {
 /// one, else an estimate. Reasoning is counted from its visible text only;
 /// [`crate::lanes`] uses the step's reported count when it has one.
 pub fn part(part: &Part) -> u64 {
+    // Request sums also use these weights for individual stored parts, so
+    // the host's omission costs zero even outside a carried-parts iterator.
     if !crate::neutral::carries_part(part) {
         return 0;
     }

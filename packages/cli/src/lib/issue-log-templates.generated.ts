@@ -1305,6 +1305,7 @@ const TEMPLATE_DATA = [
 "tag identity decision \x01 could not be written; serving duplicates unmerged: \x01",
 "calibration: completeness=partial reason=unavailable-returned-array-count",
 "ck-mc: dreamer: acknowledging a role notice took longer than the deadline",
+"ck-mc: session: runner refused a view edit naming a part the host omitted",
 "note-nudge: CAS reported success with no plan staged; treating as failure",
 "Pi publication skipped reason=pair_commit_failed; serving managed context",
 "system prompt changed under a held signed turn: releasing signed thinking",

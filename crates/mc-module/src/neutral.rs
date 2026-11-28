@@ -9,8 +9,8 @@
 use cortexkit_role_compaction::part::{Part, PartBody, Seal, ToolStatus};
 use cortexkit_role_compaction::read::{Entry, HostPart, Role};
 
-/// Whether the runner sends this part on a model request. An unnumbered
-/// part can still be carried; system text has no number, for example.
+/// The single decision for the host's omission fact, independent of any
+/// view. An unnumbered part can still be carried, for example system text.
 pub(crate) fn carries_part(part: &Part) -> bool {
     !part.omitted
 }
@@ -40,6 +40,10 @@ fn omitted_only(entry: &Entry, has_carried_parts: impl FnOnce() -> bool) -> bool
 
 pub(crate) fn first_request_entry(entries: &[Entry]) -> Option<&Entry> {
     entries.iter().find(|entry| !is_absent_from_request(entry))
+}
+
+pub(crate) fn last_request_entry(entries: &[Entry]) -> Option<&Entry> {
+    entries.iter().rfind(|entry| !is_absent_from_request(entry))
 }
 
 /// Runner-authored content is still on the wire, but is not a speaker's words.

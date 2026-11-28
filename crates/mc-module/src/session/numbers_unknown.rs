@@ -390,7 +390,7 @@ impl Session {
             .iter()
             .take_while(|entry| entry.ordinal <= floor.ordinal)
             .find_map(|entry| {
-                entry.parts.iter().find_map(|part| match &part.body {
+                crate::neutral::carried_parts(entry).find_map(|part| match &part.body {
                     PartBody::Tool(tool) if !crate::neutral::is_finished(&tool.status) => {
                         Some((entry.ordinal, tool.name.clone(), tool.call_id.clone()))
                     }

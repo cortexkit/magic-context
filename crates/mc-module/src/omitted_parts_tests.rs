@@ -550,6 +550,14 @@ async fn check_settlement(elide_suffix: bool) {
     assert_eq!(session.pending_keep, Some(BTreeSet::from([later.clone()])));
     assert!(!session.app.stamps.contains_key(&running));
     assert!(session.app.stamps.contains_key(&later));
+    let (costs, _) = session.served_costs(std::iter::empty());
+    assert!(!costs.contains_key(&running));
+    assert!(costs[&later] > 0);
+    let snapshot = session.app_snapshot();
+    let row = &snapshot.messages["reply"].row;
+    assert_eq!(row["parts"]["stamped"], 0);
+    assert_eq!(row["items"][1]["not_sent"], true);
+    assert_eq!(row["items"][1]["tokens"], 0);
     assert!(session
         .ctx_reduce(&client, &json!({"drop":"4"}))
         .await
@@ -579,9 +587,16 @@ async fn omitted_born_parts_stay_in_app_rows_and_raw_expansion() {
         .unwrap();
     assert_eq!(items.len(), 2);
     for item in items {
-        assert_eq!(item["omitted"], true);
+        assert_eq!(item["not_sent"], true);
         assert_eq!(item["tokens"], 0);
         assert_eq!(item["state"], "live");
+    }
+    let sample: Value = serde_json::from_str(include_str!(
+        "../testdata/omitted-parts/app-not-sent-rows.json"
+    ))
+    .unwrap();
+    for name in ["cut-reply", "cut-final"] {
+        assert_eq!(snapshot.messages[name].row, sample[name]);
     }
     for input in [
         json!({"message":2}),
@@ -666,4 +681,564 @@ async fn published_omitted_part_refusal_blames_only_the_named_part() {
         );
         assert_eq!(session.refused_once, BTreeSet::from([target.clone()]));
     }
+}
+
+#[test]
+fn omitted_final_turn_pair_is_refused_for_both_transcripts() {
+    use cortexkit_role_compaction::rules::RuleBreak;
+    let entries = [
+        row(1, Role::User, vec![line("p0", 1, "Do the task.")]),
+        row(
+            2,
+            Role::Assistant,
+            vec![
+                line("p0", 2, "Partial answer before the cut."),
+                omit(call("omit-p1", 0, "edit", ToolStatus::Running)),
+            ],
+        ),
+    ];
+    let result = |entries: &[Entry]| {
+        crate::view_builder::next_view(
+            None,
+            entries,
+            vec![EditOp::Drop {
+                mid: "m2".into(),
+                part: Some("p0".into()),
+            }],
+            &ProviderRules::new(SignedParts::None, EditCost::Suffix),
+            1,
+            |_| false,
+        )
+    };
+    assert_eq!(
+        result(&entries),
+        Err(ViewRefusal::Rule(RuleBreak::FinalTurnRemoved { index: 0 }))
+    );
+    on_both(&entries, result);
+}
+
+#[test]
+fn omitted_signed_companion_pair_needs_no_drop_for_the_omitted_part() {
+    let entries = [
+        row(1, Role::User, vec![line("p0", 1, "Old words.")]),
+        row(
+            2,
+            Role::Assistant,
+            vec![
+                omit(
+                    Part::new(
+                        "omit-p0",
+                        PartBody::Reasoning {
+                            text: None,
+                            text_bytes: Some(4_000),
+                        },
+                    )
+                    .with_seal(Seal::Signed),
+                ),
+                line("p1", 2, "Kept answer."),
+            ],
+        ),
+        row(3, Role::User, vec![line("p0", 3, "Next prompt.")]),
+    ];
+    let remove = EditOp::Drop {
+        mid: "m1".into(),
+        part: Some("p0".into()),
+    };
+    on_both(&entries, |entries| {
+        let view = crate::view_builder::next_view(
+            None,
+            entries,
+            vec![remove.clone()],
+            &ProviderRules::new(SignedParts::Bound, EditCost::Suffix),
+            1,
+            |_| false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            view.edits.iter().map(|edit| &edit.op).collect::<Vec<_>>(),
+            [&remove]
+        );
+        view
+    });
+}
+
+#[test]
+fn history_wait_ignores_a_new_omitted_only_row() {
+    let (mut session, _, _, _, _) = fixture();
+    session.index.extend([text(1, "visible")]);
+    session.no_progress = Some(("visible".into(), false));
+    session.index.extend([row(
+        2,
+        Role::Assistant,
+        vec![omit(line("cut", 0, "Cut before sending."))],
+    )]);
+    assert!(session.waits_for_new_history(false));
+    session.index.extend([text(3, "new prompt")]);
+    assert!(!session.waits_for_new_history(false));
+}
+
+#[test]
+fn omitted_running_call_cannot_block_the_numbers_floor_or_the_cut() {
+    let (mut session, _, _, _, mut settings) = fixture();
+    session.features.summarizer = true;
+    settings.memory_enabled = false;
+    let mut marked = row(
+        1,
+        Role::Assistant,
+        vec![
+            Part::new(
+                "kept",
+                PartBody::Text {
+                    text: "Actual history.".into(),
+                },
+            ),
+            omit(call("omitted", 0, "read", ToolStatus::Running)),
+        ],
+    );
+    marked.numbers_unknown = true;
+    session.index.extend([marked, text(2, "Continue")]);
+    session.numbers_covered = Some(MoveFloor {
+        ordinal: 1,
+        mid: "m1".into(),
+    });
+    assert_eq!(session.numbers_floor().unwrap().ordinal, 1);
+    assert!(session.running_call_below_numbers_floor().is_none());
+    assert_eq!(session.history_ops(&settings, false).1, Some(1));
+}
+
+#[tokio::test]
+async fn omission_does_not_change_clock_notes_on_carried_tool_turns() {
+    for should_send in [false, true] {
+        let (mut session, client, _, _, mut settings) = fixture();
+        settings.clock_note = Some(60_000);
+        client.descriptions.lock().unwrap().push_back(Ok(
+            json!({"capabilities":["delivery_order","template_datetime"]}),
+        ));
+        session.index.extend([text(1, "Question")]);
+        if should_send {
+            session.index.extend([
+                row(
+                    2,
+                    Role::Assistant,
+                    vec![call("real", 2, "read", ToolStatus::Completed)],
+                ),
+                row(3, Role::User, vec![omit(line("cut", 0, "Not carried"))]),
+            ]);
+        } else {
+            session.index.extend([row(
+                2,
+                Role::Assistant,
+                vec![
+                    line("reply", 2, "Text only"),
+                    omit(call("cut", 0, "read", ToolStatus::Completed)),
+                ],
+            )]);
+        }
+        session.send_clock_note_if_due(&client, &settings).await;
+        let sent = client.sent.lock().unwrap();
+        assert_eq!(sent.len(), usize::from(should_send));
+        if let Some(request) = sent.first() {
+            let delivery = request.delivery_order().unwrap().unwrap();
+            assert_eq!(delivery.template.unwrap().id, crate::clock_note::TEMPLATE);
+        }
+    }
+}
+
+#[tokio::test]
+async fn omitted_parts_are_not_addressable_even_in_a_bad_named_read() {
+    let (mut session, client, _, _, settings) = fixture();
+    session.index_ready = true;
+    let mut bad_part = omit(line("bad", 0, "The runner should not tag this."));
+    bad_part.tag = Some(777);
+    let record = row(1, Role::Assistant, vec![bad_part]);
+    for tool in ["ctx_expand", "ctx_reduce"] {
+        client
+            .pages
+            .lock()
+            .unwrap()
+            .push_back(Ok(ReadPage::new(vec![record.clone()], Head::new())));
+        let request = if tool == "ctx_expand" {
+            json!({"tag":777})
+        } else {
+            json!({"drop":"777"})
+        };
+        let output = session
+            .tool(&client, &settings, tool, &request)
+            .await
+            .unwrap();
+        if tool == "ctx_expand" {
+            assert!(output.starts_with("no tag 777"), "{output}");
+        } else {
+            assert!(output.starts_with("Error: Unknown tag(s)"), "{output}");
+        }
+        assert!(session.queued.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn omission_keeps_first_message_protection_and_replays_a_published_view_on_undo() {
+    let (mut session, client, route, mut setup, settings) = fixture();
+    session.features.keep_first_message = true;
+    let absent = row(
+        1,
+        Role::Assistant,
+        vec![omit(line("absent", 0, "Cut first reply"))],
+    );
+    let first = row(
+        2,
+        Role::Assistant,
+        vec![line("first", 1, "First carried reply")],
+    );
+    let old = row(
+        3,
+        Role::Assistant,
+        vec![line("old", 2, "An older carried reply")],
+    );
+    let next = row(
+        4,
+        Role::Assistant,
+        vec![call("keep", 3, "ctx_keep", ToolStatus::Completed)],
+    );
+    let entries = [absent, first, old, next];
+    *client.entries.lock().unwrap() = entries.to_vec();
+    setup.newest = entries.last().map(cursor);
+    let features = session.features;
+    session
+        .setup(&client, &settings, &route, &setup, features)
+        .await;
+    session
+        .tool(&client, &settings, "ctx_reduce", &json!({"drop":"1"}))
+        .await
+        .unwrap();
+    assert!(
+        session.queued.is_empty(),
+        "the first carried message remains protected"
+    );
+    session
+        .tool(
+            &client,
+            &settings,
+            "ctx_keep",
+            &json!({"tags":"1","note":"The first answer stays."}),
+        )
+        .await
+        .unwrap();
+    assert!(session
+        .pending_keep
+        .as_ref()
+        .is_some_and(|parts| parts.contains(&("m2".into(), "first".into()))));
+    let kept = session.ready_keep(false).cloned().unwrap();
+    let view = session
+        .build(&settings, None, false, Some(&kept))
+        .0
+        .unwrap();
+    assert!(!view.edits.is_empty());
+    assert!(session.publish(&client, view.clone()).await);
+    session.settle_unconfirmed(Some(&view.applied()), &[]);
+    assert!(session.build(&settings, None, false, None).0.is_none());
+
+    let mut omitted_but_tagged = omit(line("invalid", 0, "Held defensive fixture"));
+    omitted_but_tagged.tag = Some(999);
+    let before_undo = row(5, Role::Assistant, vec![omitted_but_tagged]);
+    let undone = text(6, "undone");
+    session.index.extend([before_undo.clone(), undone]);
+    session.reclaim_bookmark = 1_000;
+    client.entries.lock().unwrap().push(before_undo.clone());
+    let mut undo = notice(&session, 1, Some(cursor(&before_undo)));
+    undo.applied_view = Some(view.applied());
+    undo.events
+        .push(Event::TranscriptChanged { from_ordinal: 6 });
+    session.notice(&client, &settings, undo).await;
+    assert_eq!(session.reclaim_bookmark, 3);
+    assert!(session.index.ends_at(Some(&cursor(&before_undo))));
+    assert_eq!(session.latest.as_ref().map(|v| &v.edits), Some(&view.edits));
+}
+
+#[test]
+fn a_whole_message_edit_does_not_make_omitted_parts_part_of_the_watermark() {
+    use cortexkit_role_compaction::view::Edit;
+    let mut invalid = omit(line("not-sent", 0, "Not part of this view's request."));
+    invalid.tag = Some(999);
+    let entries = [
+        row(
+            1,
+            Role::Assistant,
+            vec![line("visible", 1, "Sent"), invalid],
+        ),
+        text(2, "Keep this"),
+    ];
+    let mut index = Index::default();
+    index.extend(entries);
+    let view = View::seal(
+        1,
+        vec![Edit::new(
+            1,
+            EditOp::Drop {
+                mid: "m1".into(),
+                part: None,
+            },
+        )],
+    );
+    assert_eq!(
+        lanes::Edited::of(Some(&view), &index, None).watermark(&index),
+        1
+    );
+}
+
+#[test]
+fn a_window_without_carried_history_has_no_read_range() {
+    let entries = [row(
+        1,
+        Role::Assistant,
+        vec![omit(line("cut", 0, "Unsent"))],
+    )];
+    let mut window = Window::default();
+    let counter = crate::count::Counter::for_model(None);
+    let mut counts = chunk::CountCache::default();
+    window.sync(&entries, 1, None, 1, counter, &mut counts);
+    assert_eq!(window.bounded(&entries, 1, 0, true, 0), 1);
+    assert!(window
+        .scan(&entries, 1, 2, 100, counter, &mut counts)
+        .is_none());
+}
+
+#[test]
+fn bounded_validation_keeps_the_real_final_system_and_non_system_anchors() {
+    let rules = ProviderRules::new(SignedParts::None, EditCost::Suffix);
+    for role in [Role::System, Role::User] {
+        let system = |n, id| {
+            row(
+                n,
+                Role::System,
+                vec![Part::new(
+                    id,
+                    PartBody::Text {
+                        text: "Framing".into(),
+                    },
+                )],
+            )
+        };
+        let mut entries = if role == Role::System {
+            vec![system(1, "old"), system(2, "current")]
+        } else {
+            vec![
+                text(1, "Old request"),
+                text(2, "Current request"),
+                system(3, "tail"),
+            ]
+        };
+        entries.push(row(
+            entries.len() as u64 + 1,
+            Role::Assistant,
+            vec![omit(line("lost", 0, "Cut reply"))],
+        ));
+        on_both(&entries, |entries| {
+            crate::view_builder::next_view(
+                None,
+                entries,
+                vec![EditOp::Drop {
+                    mid: entries[0].mid.clone(),
+                    part: None,
+                }],
+                &rules,
+                1,
+                |_| false,
+            )
+            .unwrap()
+            .unwrap()
+        });
+    }
+}
+
+#[test]
+fn an_omitted_tail_cannot_make_the_history_cut_pass_its_last_anchor() {
+    for show_system in [false, true] {
+        let parts = || {
+            show_system
+                .then(|| {
+                    Part::new(
+                        "system",
+                        PartBody::Text {
+                            text: "Framing".into(),
+                        },
+                    )
+                })
+                .into_iter()
+                .collect()
+        };
+        let entries = [
+            row(1, Role::System, parts()),
+            row(2, Role::System, parts()),
+            row(3, Role::Assistant, vec![omit(line("lost", 0, "Cut reply"))]),
+        ];
+        let cut = |entries: &[Entry]| {
+            let (mut session, _, _, _, mut settings) = fixture();
+            session.features.summarizer = true;
+            settings.memory_enabled = false;
+            session.index.extend(entries.iter().cloned());
+            session.numbers_covered = Some(MoveFloor {
+                ordinal: 2,
+                mid: "m2".into(),
+            });
+            session.history_ops(&settings, false).1
+        };
+        assert_eq!(cut(&entries), Some(1));
+        on_both(&entries, cut);
+    }
+}
+
+#[test]
+fn a_fake_tag_on_omitted_text_does_not_shift_an_answered_images_age() {
+    let mut invalid = omit(line("lost", 0, "Cut reply"));
+    invalid.tag = Some(999);
+    let entries = [
+        row(
+            1,
+            Role::User,
+            vec![
+                line("question", 1, "What is this?"),
+                Part::new(
+                    "image",
+                    PartBody::File(FileMedia::inline("image/png", Some(300))),
+                ),
+                invalid,
+            ],
+        ),
+        row(
+            2,
+            Role::Assistant,
+            vec![line("answer", 2, "It is a diagram.")],
+        ),
+    ];
+    on_both(&entries, |entries| {
+        select(entries, |context| {
+            let result = lanes::answered_images(
+                context,
+                &lanes::Images {
+                    outputs: &BTreeMap::new(),
+                    watermark: 2,
+                    cutoff: None,
+                    over_limit: false,
+                    skip: &[],
+                },
+            );
+            assert_eq!(result.1, [("m1".into(), "image".into())]);
+            result
+        })
+    });
+}
+
+#[test]
+fn an_omitted_frame_cannot_turn_visible_words_into_a_relayed_wake() {
+    let entry = row(
+        1,
+        Role::User,
+        vec![
+            omit(line("start", 0, "<system-reminder>\nInbox:")),
+            line("ordinary", 1, "Use the new version.\n</system-reminder>"),
+        ],
+    );
+    assert!(crate::summary::trigger::is_meaningful_user(&entry));
+}
+
+#[test]
+fn an_omitted_tail_does_not_make_the_newest_oversized_entry_summarizable() {
+    use cortexkit_role_compaction::tokens::PartTokens;
+    let mut huge = line("huge", 2, "Newest model answer.");
+    huge.tokens = Some(PartTokens::count(80_000));
+    let mut older = line("older", 1, "Older words.");
+    older.tokens = Some(PartTokens::count(30_000));
+    let entries = [
+        row(1, Role::Assistant, vec![older]),
+        row(2, Role::Assistant, vec![huge]),
+        row(
+            3,
+            Role::Assistant,
+            vec![omit(line("lost", 0, "Unsent remainder"))],
+        ),
+    ];
+    on_both(&entries, |entries| {
+        let mut window = Window::default();
+        let counter = crate::count::Counter::for_model(None);
+        let mut counts = chunk::CountCache::default();
+        window.sync(entries, 1, None, 1, counter, &mut counts);
+        let until = window.bounded(entries, 1, 100, true, u64::MAX);
+        assert_eq!(until, 2);
+        until
+    });
+}
+
+#[test]
+fn omitted_signed_reasoning_cannot_keep_a_cleared_step_on_hold() {
+    let signed = |id| {
+        Part::new(
+            id,
+            PartBody::Reasoning {
+                text: None,
+                text_bytes: Some(8_000),
+            },
+        )
+        .with_seal(Seal::Signed)
+    };
+    let entries = [
+        text(1, "Question"),
+        row(
+            2,
+            Role::Assistant,
+            vec![signed("shown"), omit(signed("not-sent"))],
+        ),
+    ];
+    let (session, _, _, _, _) = fixture();
+    let mut conditions = session.conditions;
+    conditions.rules.signed_parts = SignedParts::Bound;
+    let edited = lanes::Edited::default().including(&[("m2".into(), "shown".into())]);
+    on_both(&entries, |entries| {
+        let hold =
+            crate::pass::heavy_signed_turn_in_view(entries, &conditions, None, Some(&edited));
+        assert!(!hold);
+        hold
+    });
+}
+
+#[test]
+fn exact_summary_counts_keep_the_same_block_start_and_shape_after_omission() {
+    use super::omitted_twin_checks::{framed_text, materialize, Slot};
+    let slots = [
+        Slot {
+            role: Role::User,
+            parts: vec![(line("absent", 0, "Never sent"), true)],
+            notice: None,
+        },
+        Slot {
+            role: Role::User,
+            parts: vec![(line("actual", 0, "Find the test"), false)],
+            notice: None,
+        },
+        Slot {
+            role: Role::User,
+            parts: vec![
+                (framed_text("Never sent either"), true),
+                (line("next", 0, "Then check it"), false),
+            ],
+            notice: None,
+        },
+        Slot {
+            role: Role::Assistant,
+            parts: vec![(line("reply", 0, "Ready"), false)],
+            notice: None,
+        },
+    ];
+    let (marked, _, twin) = materialize(&slots, false);
+    let scan = |entries: &[Entry]| {
+        let counter = crate::count::Counter::for_model(Some("anthropic/claude-opus-5-5"));
+        assert!(counter.family().is_some());
+        let mut window = Window::default();
+        let mut counts = chunk::CountCache::default();
+        window.sync(entries, 1, None, 1, counter, &mut counts);
+        window
+            .scan(entries, 1, 5, 500, counter, &mut counts)
+            .unwrap()
+    };
+    assert_eq!(scan(&marked), scan(&twin));
 }

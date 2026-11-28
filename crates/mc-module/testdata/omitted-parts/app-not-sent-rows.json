@@ -1,0 +1,29 @@
+{
+  "cut-reply": {
+    "message_id": "cut-reply",
+    "state": "raw",
+    "compartment_id": null,
+    "outside_reason": null,
+    "split": null,
+    "parts": { "tagged": 0, "stamped": 0, "dropped": 0 },
+    "stamped_parts": [],
+    "dropped_parts": [],
+    "items": [
+      { "part_ref": { "part_key": "never-ran" }, "kind": "tool", "tokens": 0, "source": "counted", "state": "live", "tool": "read", "not_sent": true },
+      { "part_ref": { "part_key": "unused-tail" }, "kind": "text", "tokens": 0, "source": "counted", "state": "live", "not_sent": true }
+    ]
+  },
+  "cut-final": {
+    "message_id": "cut-final",
+    "state": "raw",
+    "compartment_id": null,
+    "outside_reason": null,
+    "split": null,
+    "parts": { "tagged": 0, "stamped": 0, "dropped": 0 },
+    "stamped_parts": [],
+    "dropped_parts": [],
+    "items": [
+      { "part_ref": { "part_key": "never-ran-either" }, "kind": "tool", "tokens": 0, "source": "counted", "state": "live", "tool": "read", "not_sent": true }
+    ]
+  }
+}

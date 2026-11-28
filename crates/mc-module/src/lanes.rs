@@ -240,6 +240,7 @@ pub struct Context<'a> {
 /// thinking after a tool-list change, so the runner strips that reasoning
 /// itself (compaction contract W3.5). No lane counts it, holds for it or
 /// drops it: none of it is sent.
+/// The signed floor is a view rule, separate from parts the host omits on its own.
 pub fn stripped_by_floor(floor: Option<u64>, entry: &Entry, part: &Part) -> bool {
     part.seal == Seal::Signed && floor.is_some_and(|floor| entry.ordinal <= floor)
 }

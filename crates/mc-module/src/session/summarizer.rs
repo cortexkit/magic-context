@@ -454,7 +454,8 @@ impl Session {
         let Some((newest, retried)) = &mut self.no_progress else {
             return false;
         };
-        let current = self.index.entries().last().map(|entry| entry.mid.as_str());
+        let current = crate::neutral::last_request_entry(self.index.entries())
+            .map(|entry| entry.mid.as_str());
         if current != Some(newest.as_str()) {
             self.no_progress = None;
             return false;
@@ -468,7 +469,9 @@ impl Session {
 
     /// A run published nothing: wait for newer history before the next.
     fn record_no_progress(&mut self, settings: &Settings) {
-        let Some(newest) = self.index.entries().last().map(|entry| entry.mid.clone()) else {
+        let Some(newest) =
+            crate::neutral::last_request_entry(self.index.entries()).map(|entry| entry.mid.clone())
+        else {
             return;
         };
         let force = pass::in_force_band(&self.pressure(), settings);
@@ -488,7 +491,8 @@ impl Session {
     /// message arrives.
     pub(super) fn account_wait_admits(&mut self, usage: f64) -> Option<AccountAdmit> {
         let now = crate::summary::account_wait::now_ms();
-        let newest = self.index.entries().last().map(|entry| entry.mid.clone());
+        let newest =
+            crate::neutral::last_request_entry(self.index.entries()).map(|entry| entry.mid.clone());
         let session = &self.key.session;
         let Some(waiting) = &mut self.account_wait else {
             return Some(AccountAdmit::NoWait);
@@ -641,7 +645,8 @@ impl Session {
                     // A run started at emergency usage was that history's
                     // one try.
                     if started.emergency {
-                        emergency_at = self.index.entries().last().map(|entry| entry.mid.clone());
+                        emergency_at = crate::neutral::last_request_entry(self.index.entries())
+                            .map(|entry| entry.mid.clone());
                     }
                 }
                 self.account_refused_at(wait, emergency_at);
@@ -654,9 +659,10 @@ impl Session {
             // again on the same history while the quota lasts.
             Err(error) => {
                 if let run::SummaryError::PaidThenWait { wait, .. } = &error {
-                    let emergency_at = started
-                        .filter(|started| started.emergency)
-                        .and_then(|_| self.index.entries().last().map(|entry| entry.mid.clone()));
+                    let emergency_at = started.filter(|started| started.emergency).and_then(|_| {
+                        crate::neutral::last_request_entry(self.index.entries())
+                            .map(|entry| entry.mid.clone())
+                    });
                     self.account_refused_at(wait.clone(), emergency_at);
                 }
                 let error = error.to_string();

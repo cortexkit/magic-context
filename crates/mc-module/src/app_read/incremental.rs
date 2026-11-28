@@ -1093,11 +1093,10 @@ fn message(
     for part in &cached.parts {
         tagged += u64::from(!part.omitted && part.tag.is_some());
         let key = (cached.mid.clone(), part.id.clone());
-        let removed = !part.omitted
-            && (cut
-                || messages.contains(&cached.mid)
-                || dropped.contains(&key)
-                || (floor && part.signed && part.kind == Kind::Reasoning));
+        let removed = cut
+            || messages.contains(&cached.mid)
+            || dropped.contains(&key)
+            || (floor && part.signed && part.kind == Kind::Reasoning);
         let queued = !part.omitted
             && (session.queued.contains(&key)
                 || before.is_some_and(|queued| queued.contains(&key)));
@@ -1173,7 +1172,7 @@ fn message(
         let items = value["items"].as_array_mut().expect("typed row items");
         for (item, part) in items.iter_mut().zip(&cached.parts) {
             if part.omitted {
-                item["omitted"] = json!(true);
+                item["not_sent"] = json!(true);
             }
         }
         Row::from(value)

@@ -524,8 +524,11 @@ impl Window {
             }
         }
         let high = entries.partition_point(|entry| entry.ordinal < boundary);
-        if self.prefix(high, |fact| fact.raw) - self.prefix(low, |fact| fact.raw)
-            <= super::trigger::HYSTERESIS_TOKENS
+        // The lower bound skipped absent rows; a snapped boundary may
+        // leave nothing before it, not a reversed range of prefix totals.
+        if high <= low
+            || self.prefix(high, |fact| fact.raw) - self.prefix(low, |fact| fact.raw)
+                <= super::trigger::HYSTERESIS_TOKENS
         {
             return from;
         }
