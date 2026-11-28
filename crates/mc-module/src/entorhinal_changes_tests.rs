@@ -361,7 +361,7 @@ fn deleting_the_marker_then_putting_its_old_value_requests_two_rereads() {
     let state = WatchState::default();
     let count = AtomicUsize::new(0);
     let event = |event| {
-        observe(&state, KEY, 1, event, &|| {
+        observe(&state, KEY, event, &|| {
             count.fetch_add(1, Ordering::SeqCst);
         });
         count.load(Ordering::SeqCst)
@@ -403,7 +403,7 @@ fn a_put_after_an_empty_snapshot_is_a_reread_even_if_the_value_returns() {
     };
     let count = AtomicUsize::new(0);
     let event = |event| {
-        observe(&state, KEY, 1, event, &|| {
+        observe(&state, KEY, event, &|| {
             count.fetch_add(1, Ordering::SeqCst);
         });
         count.load(Ordering::SeqCst)
@@ -442,4 +442,30 @@ async fn a_new_session_ends_marker_backoff_without_waiting_for_the_timer() {
         .expect("the watch follows the live session before its timer");
     assert_eq!(tokio::time::Instant::now(), resumed);
     assert!(state.is_up());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_handoff_warns_once_even_while_the_snapshot_is_pending() {
+    let log = crate::test_log::capture();
+    let (release, snapshot) = oneshot::channel::<()>();
+    let handoff = tokio::spawn(trace_handoff(KEY, Instant::now(), snapshot));
+    let warning = "marker watch handoff is taking longer than expected";
+    tokio::time::sleep(SLOW_HANDOFF - Duration::from_millis(1)).await;
+    assert_eq!(log.count(warning), 0);
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    assert_eq!(log.count(warning), 1);
+    assert!(
+        log.text()
+            .lines()
+            .any(|line| line.trim_start().starts_with("WARN")
+                && line.contains(warning)
+                && line.contains("elapsed_ms=5000")),
+        "{}",
+        log.text()
+    );
+    assert!(!handoff.is_finished());
+    tokio::time::sleep(SLOW_HANDOFF).await;
+    release.send(()).unwrap();
+    handoff.await.unwrap().unwrap();
+    assert_eq!(log.count(warning), 1);
 }

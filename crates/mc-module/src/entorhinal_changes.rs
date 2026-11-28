@@ -14,8 +14,8 @@
 //! lost connection) everything runs as it does anyway: the workspace is read
 //! at each Setup, and the legacy rounds run at start, on a new project id and
 //! hourly. A watch that can't start or ends is tried again after a growing
-//! pause. Ordinary connection changes are logged at INFO; an unexpected
-//! task exit is logged at WARN before restarting the task.
+//! pause. Planned moves log at DEBUG, a watch coming up or recovering at
+//! INFO, and an outage or slow move at WARN.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,8 +23,9 @@ use std::time::Duration;
 use cortexkit_bus_trait::{RegisterEntry, RegisterUpdate, RegisterWatch, Revision, WatchEvent};
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 
-use crate::bus::Bus;
+use crate::bus::{Bus, BusGeneration};
 
 /// The module that writes the bucket, the bucket's name, and the key.
 pub(crate) const OWNER: &str = "entorhinal";
@@ -35,26 +36,36 @@ pub(crate) const KEY: &str = "registry";
 /// twice as long, up to [`RETRY_CAP`]. A watch that came up starts over.
 pub(crate) const RETRY_FIRST: Duration = Duration::from_secs(5);
 pub(crate) const RETRY_CAP: Duration = Duration::from_secs(5 * 60);
+const SLOW_HANDOFF: Duration = Duration::from_secs(5);
 
 /// The watch's progress survives even when its task unwinds.
 struct Progress {
-    /// `None` until the first try; then whether the watch is up.
-    up: Option<bool>,
+    down_reported: bool,
     last: Option<(Revision, Vec<u8>)>,
     snapshot_generation: Option<u64>,
-    current_generation: Option<watch::Receiver<Option<u64>>>,
+    current_generation: Option<watch::Receiver<Option<BusGeneration>>>,
     retry: Duration,
 }
 
 impl Default for Progress {
     fn default() -> Self {
         Self {
-            up: None,
+            down_reported: false,
             last: None,
             snapshot_generation: None,
             current_generation: None,
             retry: RETRY_FIRST,
         }
+    }
+}
+
+impl Progress {
+    fn is_up(&self) -> bool {
+        self.current_generation.as_ref().is_some_and(|current| {
+            current
+                .borrow()
+                .is_some_and(|current| Some(current.id) == self.snapshot_generation)
+        })
     }
 }
 
@@ -80,23 +91,29 @@ impl WatchState {
     /// Whether the watch is up now.
     #[cfg(test)]
     pub(crate) fn is_up(&self) -> bool {
-        let progress = self.progress.lock().expect("watch state");
-        progress.up == Some(true)
-            && progress.current_generation.as_ref().is_some_and(|current| {
-                *current.borrow() == progress.snapshot_generation
-                    && progress.snapshot_generation.is_some()
-            })
+        self.progress.lock().expect("watch state").is_up()
     }
 
     /// The watch is up.
-    fn up(&self, generation: u64) {
-        let previous = {
+    fn up(&self, key: &str, generation: u64, planned: bool) {
+        let came_up = {
             let mut progress = self.progress.lock().expect("watch state");
-            progress.retry = RETRY_FIRST;
+            let was_up = progress.is_up();
             progress.snapshot_generation = Some(generation);
-            progress.up.replace(true)
+            let is_up = progress.is_up();
+            if is_up {
+                progress.retry = RETRY_FIRST;
+                progress.down_reported = false;
+            }
+            !was_up && is_up
         };
-        if previous != Some(true) {
+        if !came_up {
+            return;
+        }
+        if planned {
+            tracing::debug!(%key, generation, "ck-mc: entorhinal changes: marker watch moved to the replacement connection");
+            tracing::debug!(%key, "ck-mc: entorhinal changes: watching the marker again");
+        } else {
             match self.effect {
                 None => tracing::info!(
                     "ck-mc: entorhinal changes: watching the registry marker; workspaces and legacy project rows are read again when it changes"
@@ -108,13 +125,13 @@ impl WatchState {
 
     /// The watch couldn't start or ended, because of `why`.
     fn down(&self, why: &str) {
-        if self.mark_down() != Some(false) {
+        if !self.mark_down() {
             match self.effect {
-                None => tracing::info!(
+                None => tracing::warn!(
                     reason = %why,
                     "ck-mc: entorhinal changes: no watch on the registry marker; workspaces are read at each Setup and legacy project rounds run hourly, and the watch is tried again"
                 ),
-                Some(effect) => tracing::info!(
+                Some(effect) => tracing::warn!(
                     reason = %why,
                     %effect,
                     "ck-mc: entorhinal changes: no watch on a marker; it is tried again, and meanwhile its work waits for the timer"
@@ -123,10 +140,10 @@ impl WatchState {
         }
     }
 
-    fn mark_down(&self) -> Option<bool> {
+    fn mark_down(&self) -> bool {
         let mut progress = self.progress.lock().expect("watch state");
         progress.snapshot_generation = None;
-        progress.up.replace(false)
+        std::mem::replace(&mut progress.down_reported, true)
     }
 
     fn observe(&self, entry: Option<RegisterEntry>, snapshot: bool) -> bool {
@@ -179,29 +196,43 @@ async fn open(bus: &Bus, key: &str) -> Result<(Box<dyn RegisterWatch>, u64), Wat
 async fn open_ready(
     bus: &Bus,
     key: &str,
-    generations: &watch::Receiver<Option<u64>>,
-) -> Result<(Box<dyn RegisterWatch>, u64, WatchEvent), WatchFailure> {
+    generations: &watch::Receiver<Option<BusGeneration>>,
+    previous: Option<BusGeneration>,
+) -> Result<(Box<dyn RegisterWatch>, BusGeneration, WatchEvent), WatchFailure> {
     loop {
         let (mut marker, generation) = open(bus, key).await?;
         // NATS reads the snapshot in watch(), so next() takes the result
         // already buffered in the newly opened watch.
         let Ok(snapshot @ WatchEvent::Snapshot { .. }) = marker.next().await else {
-            bus.forget(generation).await;
-            return Err(WatchFailure {
-                reason: "register watch ended before its snapshot".into(),
-                generation,
-            });
+            return Err(
+                ended_watch(bus, generation, "register watch ended before its snapshot").await,
+            );
         };
-        match *generations.borrow() {
-            Some(current) if current == generation => return Ok((marker, generation, snapshot)),
-            Some(_) => continue,
-            None => {
-                return Err(WatchFailure {
-                    reason: "bus session discarded while opening register watch".into(),
-                    generation,
-                })
+        match (previous, *generations.borrow()) {
+            (Some(old), Some(current)) if old.continuity != current.continuity => {
+                return Err(discarded_handoff(old.id));
             }
+            (_, Some(current)) if current.id == generation => {
+                return Ok((marker, current, snapshot))
+            }
+            (_, Some(_)) => continue,
+            (_, None) => return Err(discarded_handoff(generation)),
         }
+    }
+}
+
+fn discarded_handoff(generation: u64) -> WatchFailure {
+    WatchFailure {
+        reason: "bus session discarded while opening register watch".into(),
+        generation,
+    }
+}
+
+async fn ended_watch(bus: &Bus, generation: u64, reason: &'static str) -> WatchFailure {
+    bus.forget(generation).await;
+    WatchFailure {
+        reason: reason.into(),
+        generation,
     }
 }
 
@@ -279,7 +310,7 @@ async fn retry(bus: &Bus, state: &WatchState, failed_generation: u64) {
     let mut generations = bus.generations();
     tokio::select! {
         () = tokio::time::sleep(state.next_retry()) => {}
-        () = replacement(&mut generations, failed_generation) => {}
+        _ = replacement(&mut generations, failed_generation) => {}
     }
 }
 
@@ -290,64 +321,73 @@ async fn follow(
     changed: &(impl Fn() + Sync),
 ) -> Result<std::convert::Infallible, WatchFailure> {
     let mut generations = bus.generations();
-    let (mut marker, mut generation, snapshot) = open_ready(bus, key, &generations).await?;
-    observe(state, key, generation, snapshot, changed);
+    let (mut marker, mut generation, snapshot) = open_ready(bus, key, &generations, None).await?;
+    state.up(key, generation.id, false);
+    observe(state, key, snapshot, changed);
     loop {
-        tokio::select! {
+        let replacement = tokio::select! {
             biased;
-            _ = replacement(&mut generations, generation) => {}
+            replacement = replacement(&mut generations, generation.id) => replacement,
             event = marker.next() => match event {
                 Ok(event) => {
-                    observe(state, key, generation, event, changed);
+                    observe(state, key, event, changed);
                     continue;
                 }
-                Err(_) => {
-                    if !can_move_after_end(bus, &generations, generation).await {
-                        return Err(WatchFailure { reason: "register watch ended".into(), generation });
-                    }
-                }
+                Err(_) => return Err(ended_watch(bus, generation.id, "register watch ended").await),
             },
+        };
+        if replacement.continuity != generation.continuity {
+            return Err(discarded_handoff(generation.id));
         }
-        // A marker requests a reread of current state. Read the replacement
-        // snapshot before dropping the old watch, then take later updates
-        // from the new subscription.
-        let (next, new_generation, snapshot) = open_ready(bus, key, &generations).await?;
-        observe(state, key, new_generation, snapshot, changed);
+        // Read the replacement snapshot before dropping the old watch, then
+        // take later updates from the new subscription.
+        let (next, new_generation, snapshot) = trace_handoff(
+            key,
+            replacement.installed,
+            open_ready(bus, key, &generations, Some(generation)),
+        )
+        .await?;
+        state.up(key, new_generation.id, true);
+        observe(state, key, snapshot, changed);
         marker = next;
         generation = new_generation;
     }
 }
 
-async fn can_move_after_end(
-    bus: &Bus,
-    generations: &watch::Receiver<Option<u64>>,
-    generation: u64,
-) -> bool {
-    // The counter can advance even if a publisher has since discarded the
-    // newer session. With nothing live to move to, back off and reopen.
-    !bus.forget(generation).await && has_replacement(*generations.borrow(), generation)
-}
-
-fn has_replacement(current: Option<u64>, generation: u64) -> bool {
-    current.is_some_and(|current| current != generation)
-}
-
-async fn replacement(generations: &mut watch::Receiver<Option<u64>>, generation: u64) {
-    let _ = generations
-        .wait_for(|current| has_replacement(*current, generation))
-        .await;
-}
-
-fn observe(
-    state: &WatchState,
+async fn trace_handoff<F: std::future::Future>(
     key: &str,
+    started: Instant,
+    opened: F,
+) -> F::Output {
+    tokio::pin!(opened);
+    tokio::select! {
+        biased;
+        () = tokio::time::sleep_until(started + SLOW_HANDOFF) => {
+            log_slow_handoff(key, started.elapsed());
+            opened.await
+        }
+        result = &mut opened => result,
+    }
+}
+
+fn log_slow_handoff(key: &str, elapsed: Duration) {
+    tracing::warn!(%key, elapsed_ms = elapsed.as_millis(), "ck-mc: entorhinal changes: marker watch handoff is taking longer than expected");
+}
+
+async fn replacement(
+    generations: &mut watch::Receiver<Option<BusGeneration>>,
     generation: u64,
-    event: WatchEvent,
-    changed: &(impl Fn() + Sync),
-) {
+) -> BusGeneration {
+    generations
+        .wait_for(|current| current.is_some_and(|current| current.id != generation))
+        .await
+        .expect("the bus still owns its generation sender")
+        .expect("a replacement is installed")
+}
+
+fn observe(state: &WatchState, key: &str, event: WatchEvent, changed: &(impl Fn() + Sync)) {
     let (entry, snapshot) = match event {
         WatchEvent::Snapshot { entries, .. } => {
-            state.up(generation);
             (entries.into_iter().find(|entry| entry.key == key), true)
         }
         WatchEvent::Update(RegisterUpdate::Put(entry)) if entry.key == key => (Some(entry), false),

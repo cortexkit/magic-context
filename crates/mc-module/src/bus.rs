@@ -813,8 +813,18 @@ pub struct Bus {
     /// Advances each time the session gets a new connection, opened or
     /// renewed. Readers and marker watches can follow the replacement.
     generation: AtomicU64,
-    current: tokio::sync::watch::Sender<Option<u64>>,
+    current: tokio::sync::watch::Sender<Option<BusGeneration>>,
     retirements: retirement::Retirements,
+}
+
+/// A newly installed connection and when consumers could start moving to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BusGeneration {
+    pub(crate) id: u64,
+    pub(crate) installed: tokio::time::Instant,
+    /// The first connection opened without a preceding live session. A
+    /// renewal preserves this; a discard followed by opening does not.
+    pub(crate) continuity: u64,
 }
 
 /// The bus's open session, held until dropped.
@@ -884,6 +894,7 @@ impl Bus {
             // since a renewal opens a new connection too.
             let mut connected = false;
             let mut replaced = None;
+            let opened = session.is_none();
             if session.is_none() {
                 *session = Some(self.factory.open().await?);
                 connected = true;
@@ -900,7 +911,15 @@ impl Bus {
             }
             if connected {
                 let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-                self.current.send_replace(Some(generation));
+                let continuity = match *self.current.borrow() {
+                    Some(previous) if !opened => previous.continuity,
+                    _ => generation,
+                };
+                self.current.send_replace(Some(BusGeneration {
+                    id: generation,
+                    installed: tokio::time::Instant::now(),
+                    continuity,
+                }));
             }
             if let Some((connection, expires)) = replaced {
                 self.retirements.park(connection, expires);
@@ -920,7 +939,7 @@ impl Bus {
         }
     }
 
-    pub(crate) fn generations(&self) -> tokio::sync::watch::Receiver<Option<u64>> {
+    pub(crate) fn generations(&self) -> tokio::sync::watch::Receiver<Option<BusGeneration>> {
         self.current.subscribe()
     }
 

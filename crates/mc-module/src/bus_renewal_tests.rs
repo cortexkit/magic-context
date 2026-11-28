@@ -254,6 +254,7 @@ async fn renewal_retires_the_connection_held_by_a_marker_watch() {
     let mut reader = bind_reader(&bus).await;
     marker_event(&mut events).await;
     marker_event(&mut epochs).await;
+    let log = crate::test_log::capture();
     let started = tokio::time::Instant::now();
     let (mut old, generation) = at_renewal(&bus, server.addr).await;
     assert_eq!(generation, 2);
@@ -286,6 +287,7 @@ async fn renewal_retires_the_connection_held_by_a_marker_watch() {
         .unwrap();
     marker_event(&mut events).await;
     marker_event(&mut epochs).await;
+    assert_eq!(log.count("ck-mc: entorhinal changes:"), 0, "{}", log.text());
 }
 
 #[tokio::test]
@@ -398,7 +400,7 @@ async fn a_marker_opens_a_fresh_session_by_itself_after_reconnect_exhaustion() {
             .unwrap(),
         Some(())
     );
-    assert_eq!(*generations.borrow(), Some(2));
+    assert_eq!(generations.borrow().map(|current| current.id), Some(2));
     assert!(
         state.is_up(),
         "the original marker task recovered without a restart"
@@ -841,7 +843,7 @@ async fn a_closed_marker_with_no_live_replacement_backs_off_instead_of_polling_a
             assert_eq!(event.expect("the marker retries and reads the new snapshot"), Some(()));
         }
     }
-    assert_eq!(*bus.generations().borrow(), Some(3));
+    assert_eq!(bus.generation(), 3);
     assert!(state.is_up());
 }
 
@@ -861,6 +863,7 @@ async fn a_discard_during_the_replacement_snapshot_recovers_after_backoff() {
         change.send(()).unwrap()
     });
     marker_event(&mut events).await;
+    let log = crate::test_log::capture();
     let (_, generation) = at_renewal(&bus, server.addr).await;
     assert_eq!(generation, 2);
     tokio::time::timeout(Duration::from_secs(2), gate.waiting.notified())
@@ -887,8 +890,24 @@ async fn a_discard_during_the_replacement_snapshot_recovers_after_backoff() {
         resumed.elapsed() >= RETRY_FIRST,
         "a failed snapshot without a replacement should back off"
     );
-    assert_eq!(*bus.generations().borrow(), Some(4));
+    assert_eq!(bus.generation(), 4);
     assert!(state.is_up());
+    let text = log.text();
+    let marker_lines: Vec<_> = text
+        .lines()
+        .filter(|line| line.contains("ck-mc: entorhinal changes:"))
+        .collect();
+    assert_eq!(marker_lines.len(), 2, "{text}");
+    assert!(
+        marker_lines[0].trim_start().starts_with("WARN")
+            && marker_lines[0].contains("no watch on the registry marker"),
+        "{text}"
+    );
+    assert!(
+        marker_lines[1].trim_start().starts_with("INFO")
+            && marker_lines[1].contains("watching the registry marker"),
+        "{text}"
+    );
 }
 
 #[tokio::test]
