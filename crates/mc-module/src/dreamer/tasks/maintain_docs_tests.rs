@@ -352,7 +352,10 @@ fn the_request_fills_the_frames_byte_for_byte() {
         .replace("⟦mc:maintain-docs.input⟧", &input);
     assert_eq!(batch.message(), user);
     assert!(changes.contains("src/parser.rs"));
-    assert_eq!(batch.folder(), fixture.repo.path().to_str());
+    assert_eq!(
+        std::fs::canonicalize(batch.folder().unwrap()).unwrap(),
+        std::fs::canonicalize(fixture.repo.path()).unwrap()
+    );
 }
 
 #[test]
