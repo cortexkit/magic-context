@@ -14,6 +14,7 @@ crates/mc-module/testdata/role-lease-v1.2/*.json text eol=lf
 crates/mc-module/testdata/fleet-epoch-magic-context-v1.1/* text eol=lf
 crates/mc-module/testdata/entorhinal-fleet-epoch-current-v1/* text eol=lf
 crates/mc-module/testdata/config-settings-v1/* text eol=lf
+packages/plugin/scripts/fixtures/cache-bust-runner-structured.log.txt text eol=lf
 
 # The tool catalog embeds these bytes and hashes them into its text revision.
 crates/mc-module/assets/catalog_tools_only*.txt text eol=lf
