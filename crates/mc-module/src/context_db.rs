@@ -51,6 +51,26 @@ pub(crate) const FRESH_SCHEMA: &str = include_str!("../testdata/context-schema.s
 #[path = "context_db_creation_probe.rs"]
 mod creation_probe;
 
+#[cfg(test)]
+#[path = "context_db_creation_tests.rs"]
+mod creation_tests;
+
+/// A fresh schema becomes visible all at once, without a durable commit for
+/// each statement. Keep the connection's existing journal and sync settings.
+fn initialize_fresh_schema(connection: &mut Connection, schema: &str) -> rusqlite::Result<()> {
+    let transaction = connection.transaction()?;
+    transaction.execute_batch(schema)?;
+    transaction.commit()
+}
+
+#[cfg(test)]
+fn initialize_schema_statement_by_statement(
+    connection: &Connection,
+    schema: &str,
+) -> rusqlite::Result<()> {
+    connection.execute_batch(schema)
+}
+
 /// A numeric literal declared in TypeScript source, read at compile time so
 /// an installed binary needs no TypeScript files.
 const fn declared_number(source: &str, declaration: &str) -> u32 {
@@ -465,8 +485,7 @@ impl ContextDb {
     #[cfg(test)]
     pub(crate) fn fresh_in_memory() -> Connection {
         let mut connection = Connection::open_in_memory().expect("in-memory store");
-        connection
-            .execute_batch(&FRESH_SCHEMA.replace(":applied_at", "0"))
+        initialize_fresh_schema(&mut connection, &FRESH_SCHEMA.replace(":applied_at", "0"))
             .expect("fresh schema");
         crate::context_migrations::upgrade(&mut connection, i64::from(PLUGIN_SCHEMA_VERSION))
             .expect("module migrations");
@@ -485,14 +504,16 @@ impl ContextDb {
         let temp = dir.join(format!("context.db.creating-{}", std::process::id()));
         let _ = std::fs::remove_file(&temp);
         let written = (|| {
-            let connection = Connection::open(&temp).map_err(|error| error.to_string())?;
+            let mut connection = Connection::open(&temp).map_err(|error| error.to_string())?;
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|elapsed| elapsed.as_millis() as i64)
                 .unwrap_or(0);
-            connection
-                .execute_batch(&FRESH_SCHEMA.replace(":applied_at", &now.to_string()))
-                .map_err(|error| format!("fresh schema: {error}"))
+            initialize_fresh_schema(
+                &mut connection,
+                &FRESH_SCHEMA.replace(":applied_at", &now.to_string()),
+            )
+            .map_err(|error| format!("fresh schema: {error}"))
         })();
         let linked = written.and_then(|()| {
             std::fs::hard_link(&temp, path).map_err(|error| format!("{}: {error}", path.display()))
@@ -513,11 +534,10 @@ impl ContextDb {
         if path.exists() {
             return Err(format!("{} already exists", path.display()));
         }
-        let connection = Connection::open(path).map_err(|error| error.to_string())?;
+        let mut connection = Connection::open(path).map_err(|error| error.to_string())?;
         // The snapshot binds the migration time as a named parameter.
         let schema = FRESH_SCHEMA.replace(":applied_at", "0");
-        connection
-            .execute_batch(&schema)
+        initialize_fresh_schema(&mut connection, &schema)
             .map_err(|error| format!("fresh schema: {error}"))?;
         drop(connection);
         Self::open(path)
