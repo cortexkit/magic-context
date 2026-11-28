@@ -3,11 +3,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
 
-use super::{live_schema_version, ContextDb, FRESH_SCHEMA, SCHEMA_VERSION};
+use super::{
+    initialize_fresh_schema, initialize_schema_statement_by_statement, live_schema_version,
+    ContextDb, FRESH_SCHEMA, SCHEMA_VERSION,
+};
 
 #[derive(Clone, Copy)]
 enum Setup {
-    Current,
+    StatementByStatement,
     OneTransaction,
     WalNormalFirst,
 }
@@ -44,13 +47,12 @@ fn time_schema(dir: &Path, label: &str, schema: &str, setup: Setup) {
         assert_eq!(synchronous, 1, "WAL-first must time NORMAL synchronous");
     }
     let schema_start = Instant::now();
-    if let Setup::OneTransaction = setup {
-        let transaction = db.transaction().unwrap();
-        transaction.execute_batch(schema).unwrap();
-        transaction.commit().unwrap();
-    } else {
-        db.execute_batch(schema).unwrap();
+    match setup {
+        Setup::StatementByStatement => initialize_schema_statement_by_statement(&db, schema),
+        Setup::OneTransaction => initialize_fresh_schema(&mut db, schema),
+        Setup::WalNormalFirst => db.execute_batch(schema),
     }
+    .unwrap();
     let schema_time = schema_start.elapsed();
     eprintln!(
         "sqlite-create {label} journal={mode} synchronous={synchronous} schema_ms={:.3}",
@@ -93,7 +95,12 @@ fn fresh_store_creation_timing() {
         .unwrap()
         .as_millis();
     let schema = FRESH_SCHEMA.replace(":applied_at", &now.to_string());
-    time_schema(dir.path(), "current", &schema, Setup::Current);
+    time_schema(
+        dir.path(),
+        "statement-by-statement",
+        &schema,
+        Setup::StatementByStatement,
+    );
     time_schema(
         dir.path(),
         "one-transaction",
