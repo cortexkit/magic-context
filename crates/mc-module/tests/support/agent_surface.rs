@@ -471,8 +471,10 @@ async fn surface_search_returns_fully_dropped_messages_but_not_partially_visible
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-#[tokio::test]
-async fn surface_hint_deadline_includes_waiting_for_the_database() {
+#[test]
+fn surface_hint_deadline_includes_waiting_for_the_database() {
+    use std::time::Duration;
+
     let (dir, db) = database();
     let mut session = session("head");
     session.project = Some(Project {
@@ -481,30 +483,60 @@ async fn surface_hint_deadline_includes_waiting_for_the_database() {
     });
     session.db = Some(db.clone());
     db.with_connection(|conn| conn.execute("INSERT INTO git_commits (sha, project_path, short_sha, message, author, committed_at, indexed_at) VALUES ('aaaaaaa', 'p', 'aaaaaaa', 'Fix zebra parser crash on empty input', 'a', 1, 1)", [])).unwrap();
-    // The hint reads on a search connection of its own; its read is held
-    // there for longer than the deadline.
+    // Keep the read held until the test sees the response at the deadline.
     let crate::context_db::SearchPause { reached, release } = db.pause_next_search_read();
+    let (entered, held) = tokio::sync::oneshot::channel();
+    let (finish, resume) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
-        let _ = reached.recv_timeout(std::time::Duration::from_secs(10));
-        std::thread::sleep(std::time::Duration::from_millis(1300));
-        let _ = release.send(());
+        // Bound fixture waits so a regression that blocks the runtime cannot
+        // strand the reader. Dropping `release` also lets it go.
+        reached.recv_timeout(Duration::from_secs(10)).unwrap();
+        entered.send(()).unwrap();
+        resume.recv_timeout(Duration::from_secs(10)).unwrap();
+        release.send(()).unwrap();
     });
     let settings = Settings {
         git_commits_enabled: true,
         ..Settings::default()
     };
-    let start = std::time::Instant::now();
-    let answer = session
-        .pre_user(&settings, "Fix zebra parser crash on empty input", 1000)
-        .await;
-    let elapsed = start.elapsed();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    runtime.block_on(async move {
+        let started = tokio::time::Instant::now();
+        let hint = session.pre_user(&settings, "Fix zebra parser crash on empty input", 1000);
+        tokio::pin!(hint);
+        tokio::select! {
+            biased;
+            _ = &mut hint => panic!("the hint returned before its read was held"),
+            result = held => result.unwrap(),
+        }
+        tokio::time::advance(Duration::from_millis(950)).await;
+        tokio::select! {
+            biased;
+            _ = &mut hint => panic!("the hint returned before its 1000 ms deadline"),
+            () = std::future::ready(()) => {}
+        }
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let answer = tokio::time::timeout(Duration::ZERO, &mut hint)
+            .await
+            .expect("the deadline must return while the search read is still held");
+        let elapsed = started.elapsed();
+        assert_eq!(answer.append, None, "{answer:?}; took {elapsed:?}");
+        assert!(elapsed < Duration::from_millis(1200), "{elapsed:?}");
+        eprintln!(
+            "held search deadline: elapsed_logical_ms={}",
+            elapsed.as_millis()
+        );
+        finish.send(()).unwrap();
+    });
     handle.join().unwrap();
-    assert_eq!(answer.append, None, "{answer:?}; took {elapsed:?}");
-    assert!(
-        elapsed < std::time::Duration::from_millis(1200),
-        "{elapsed:?}"
-    );
-    drop((session, db));
+    // The deadline ends the caller's wait, not the blocking SQLite read.
+    // Runtime shutdown joins that read before the scratch files are removed.
+    drop(runtime);
+    drop(db);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
