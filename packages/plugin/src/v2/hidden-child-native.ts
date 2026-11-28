@@ -7,6 +7,7 @@ import {
     type HiddenChildLifecycle,
     type HiddenChildModel,
     type HiddenChildRole,
+    type HiddenChildSetupBudget,
     keptUnderRetention,
     type PersistedHiddenChild,
     roleTitle,
@@ -79,6 +80,22 @@ export function createNativeHiddenChildren(
     const quiet = supportsQuietHiddenChildren(options.hostVersion);
     // Removals in flight, so a finished run can wait for the removal its own failure started.
     const removing = new Map<string, Promise<void>>();
+    const removeBounded = async (id: string, timeoutMs = options.removalTimeoutMs ?? 5000) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            await Promise.race([
+                removeSession({ sessionID: id }),
+                new Promise<never>((_, reject) => {
+                    timer = setTimeout(
+                        () => reject(new Error("session.remove timed out")),
+                        timeoutMs,
+                    );
+                }),
+            ]);
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    };
 
     const remove = (child: PersistedHiddenChild): Promise<void> => {
         const inFlight = removing.get(child.id);
@@ -86,20 +103,7 @@ export function createNativeHiddenChildren(
         options.log(`[magic-context] hidden child ${child.id} removing`);
         const done = (async () => {
             try {
-                let timer: ReturnType<typeof setTimeout> | undefined;
-                try {
-                    await Promise.race([
-                        removeSession({ sessionID: child.id }),
-                        new Promise<never>((_, reject) => {
-                            timer = setTimeout(
-                                () => reject(new Error("session.remove timed out")),
-                                options.removalTimeoutMs ?? 5000,
-                            );
-                        }),
-                    ]);
-                } finally {
-                    if (timer) clearTimeout(timer);
-                }
+                await removeBounded(child.id);
                 forgetHiddenChild(options.db, child.id);
                 options.log(`[magic-context] hidden child ${child.id} removed`);
             } catch (error) {
@@ -130,18 +134,35 @@ export function createNativeHiddenChildren(
         identity: HiddenRunIdentity,
         role: HiddenChildRole,
         model: HiddenChildModel,
+        budget?: HiddenChildSetupBudget,
     ): Promise<PersistedHiddenChild> => {
         const input = childCreateInput(identity, role, model);
         const directory = identity.directory;
         if (quiet) {
             if (!host.createHolder)
                 throw new Error("OpenCode 2 background holder API is not wired");
-            const placement = await hiddenRunPlacement(host.createHolder, directory);
+            const placement = await hiddenRunPlacement(host.createHolder, directory, budget?.work);
             input.id = placement.id;
             input.parentID = placement.parentID;
             delete input.location;
         }
-        const created = await host.create(input);
+        const start = () => host.create(input);
+        const removeLate = ({ id }: Awaited<ReturnType<typeof start>>) => {
+            if (!id || !budget) return;
+            // Setup already timed out or was cancelled. Remove the child without
+            // registering its hook or writing to the store.
+            void removeBounded(id, budget.cleanupMs).catch((error) => {
+                if (!isSessionNotFound(error))
+                    options.log(`[magic-context] late hidden child ${id} could not be removed`);
+            });
+        };
+        const created = await (budget?.work(start, removeLate) ?? start());
+        try {
+            budget?.check();
+        } catch (error) {
+            removeLate(created);
+            throw error;
+        }
         if (!created.id) throw new Error("OpenCode 2 did not return a child session id");
         const createdAt = Date.now();
         liveChildren.add(created.id);
@@ -155,22 +176,12 @@ export function createNativeHiddenChildren(
                 });
             } catch (storeError) {
                 let removed = false;
-                let timer: ReturnType<typeof setTimeout> | undefined;
                 try {
-                    await Promise.race([
-                        removeSession({ sessionID: created.id }),
-                        new Promise<never>((_, reject) => {
-                            timer = setTimeout(
-                                () => reject(new Error("session.remove timed out")),
-                                options.removalTimeoutMs ?? 5000,
-                            );
-                        }),
-                    ]);
+                    await removeBounded(created.id);
                     removed = true;
                 } catch (error) {
                     removed = isSessionNotFound(error);
                 } finally {
-                    if (timer) clearTimeout(timer);
                     liveChildren.delete(created.id);
                 }
                 options.log(

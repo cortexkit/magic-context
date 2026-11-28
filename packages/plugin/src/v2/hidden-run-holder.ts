@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { sameProjectDirectory } from "../shared/project-directory-key";
-import type { HiddenChildHost } from "./hidden-child-record";
+import type { HiddenChildHost, HiddenChildSetupBudget } from "./hidden-child-record";
 
 const HOLDER_PREFIX = "ses_mc_bg_";
 const HOLDER_CANDIDATES = 3;
@@ -28,8 +28,9 @@ export function matchesHiddenRunLocation(wanted: string, returned: string | unde
 export async function hiddenRunPlacement(
     createHolder: NonNullable<HiddenChildHost["createHolder"]>,
     directory: string,
+    work: HiddenChildSetupBudget["work"] = (start) => start(),
 ): Promise<{ id: string; parentID: string }> {
-    if (!(await stat(directory)).isDirectory())
+    if (!(await work(() => stat(directory))).isDirectory())
         throw new Error(`Not a run directory: ${directory}`);
     // The child inherits its parent's location. Keep the spelling OpenCode used
     // to start this plugin instance; following a symlink would send the child to
@@ -41,12 +42,14 @@ export async function hiddenRunPlacement(
         // This root is permanent: removing it would cascade to its live or retained runs.
         // OpenCode returns the existing session on duplicate create, including after restart
         // or when two instances ask at once. A moved holder must not lend its new location.
-        const holder = await createHolder({
-            id,
-            title: "Magic Context background runs",
-            location: { directory },
-            metadata: { magic_context: "background-holder" },
-        });
+        const holder = await work(() =>
+            createHolder({
+                id,
+                title: "Magic Context background runs",
+                location: { directory },
+                metadata: { magic_context: "background-holder" },
+            }),
+        );
         if (holder.id !== id || holder.parentID)
             throw new Error(`OpenCode did not return the expected background holder ${id}`);
         if (

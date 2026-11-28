@@ -355,6 +355,8 @@ async function setup(
         keepSubagents?: boolean;
         skipContextHook?: boolean;
         writeRows?: (rows: Rows, sessionID: string) => void;
+        holdStore?: () => () => void;
+        hostVersion?: string;
     } = {},
 ) {
     const db = new Database(":memory:");
@@ -490,6 +492,8 @@ async function setup(
             directory: "/project",
             hook,
             openReader: () => rows,
+            holdStore: capabilities.holdStore,
+            hostVersion: capabilities.hostVersion,
             generation: hostGeneration,
             ...(capabilities.keepSubagents ? { keepSubagents: true } : {}),
             log: (message) => capabilities.logs?.push(message),
@@ -577,6 +581,214 @@ async function close(
 
 describe("OpenCode 2 hidden child completion", () => {
     afterEach(() => jest.useRealTimers());
+
+    test("times out a stalled child creation, releases its leases, and retires the late child", async () => {
+        let holds = 0;
+        const f = await setup(undefined, {
+            holdStore: () => {
+                holds++;
+                return () => {
+                    holds--;
+                };
+            },
+        });
+        const creating = Promise.withResolvers<void>();
+        const answer = Promise.withResolvers<void>();
+        const create = f.host.create;
+        f.host.create = async (input) => {
+            creating.resolve();
+            await answer.promise;
+            return create(input);
+        };
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+        const opening = f.executor.open(dreamerRun);
+        let outcome: unknown;
+        void opening.then(
+            (handle) => {
+                outcome = handle;
+            },
+            (error) => {
+                outcome = error;
+            },
+        );
+        try {
+            await creating.promise;
+            expect(holds).toBe(1);
+            jest.advanceTimersByTime(dreamerRun.timeoutMs - 1);
+            await flush();
+            expect(outcome).toBeUndefined();
+            jest.advanceTimersByTime(1);
+            await flush();
+            expect(outcome).toBeInstanceOf(Error);
+            await expect(opening).rejects.toThrow("timed out");
+            expect(holds).toBe(0);
+
+            f.host.create = create;
+            const next = await f.executor.open(dreamerRun);
+            try {
+                answer.resolve();
+                await flush();
+                expect(f.removed).toEqual(["child-2"]);
+                expect(f.requests).toEqual([]);
+                await f.executor.attempt(next, request());
+                expect(f.requests.map((draft) => draft.sessionID)).toEqual([next.id]);
+            } finally {
+                await close(f.executor, next, true);
+            }
+        } finally {
+            answer.resolve();
+            const handle = await opening.catch(() => undefined);
+            if (handle) await close(f.executor, handle, false);
+            f.db.close();
+        }
+    });
+
+    test("a stalled interrupt does not delay rejection at the run deadline", async () => {
+        let holds = 0;
+        const f = await setup(undefined, {
+            holdStore: () => {
+                holds++;
+                return () => {
+                    holds--;
+                };
+            },
+        });
+        const reloading = Promise.withResolvers<void>();
+        const reloaded = Promise.withResolvers<void>();
+        const create = f.host.create;
+        f.host.create = async (input) => {
+            reloading.resolve();
+            await reloaded.promise;
+            return create(input);
+        };
+        const waiting = Promise.withResolvers<void>();
+        const interrupt = Promise.withResolvers<{ interrupted: boolean }>();
+        const interruptCalls: string[] = [];
+        const wait = f.host.wait;
+        f.host.wait = async () => {
+            waiting.resolve();
+            await new Promise(() => {});
+        };
+        f.host.interrupt = ({ sessionID }) => {
+            interruptCalls.push(sessionID);
+            return interrupt.promise;
+        };
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+        const opening = f.executor.open(run);
+        await reloading.promise;
+        const setupMs = 300;
+        jest.advanceTimersByTime(setupMs);
+        reloaded.resolve();
+        const handle = await opening;
+        const result = f.executor.attempt(handle, request());
+        let failure: unknown;
+        void result.catch((error) => {
+            failure = error;
+        });
+        try {
+            await waiting.promise;
+            jest.advanceTimersByTime(run.timeoutMs - setupMs - 1);
+            await flush();
+            expect(failure).toBeUndefined();
+            jest.advanceTimersByTime(1);
+            await flush();
+            expect(interruptCalls).toEqual([handle.id]);
+            expect(failure).toBeInstanceOf(Error);
+            await expect(result).rejects.toThrow("timed out");
+            await close(f.executor, handle, false);
+            expect(holds).toBe(1);
+            let replacementId: string | undefined;
+            const replacing = f.executor.open({ ...run, timeoutMs: 4_000 });
+            void replacing.then(
+                (next) => {
+                    replacementId = next.id;
+                },
+                () => {},
+            );
+            jest.advanceTimersByTime(1999);
+            await flush();
+            expect(replacementId).toBeUndefined();
+            expect(holds).toBe(2);
+            expect(f.removed).toEqual([]);
+            jest.advanceTimersByTime(1);
+            await flush();
+            expect(replacementId).toBe("child-2");
+            const next = await replacing;
+            try {
+                expect(holds).toBe(1);
+                expect(f.removed).toEqual([handle.id]);
+                interrupt.resolve({ interrupted: true });
+                await flush();
+                f.host.wait = wait;
+                await f.executor.attempt(next, request());
+                expect(f.requests.map((draft) => draft.sessionID)).toEqual([handle.id, next.id]);
+                expect(f.removed).toEqual([handle.id]);
+            } finally {
+                await close(f.executor, next, true);
+            }
+            expect(holds).toBe(0);
+        } finally {
+            interrupt.resolve({ interrupted: true });
+            await result.catch(() => {});
+            await close(f.executor, handle, false);
+            f.db.close();
+        }
+    });
+
+    test("keeps a late permanent holder without dispatching its child and reuses it", async () => {
+        const { dir, cleanup } = createTestTempDir("v2-late-background-holder-");
+        const f = await setup(undefined, { hostVersion: "2.4.2" });
+        const creatingHolder = Promise.withResolvers<void>();
+        const holderAnswer = Promise.withResolvers<void>();
+        const holders = new Map<
+            string,
+            Awaited<ReturnType<NonNullable<HiddenChildHost["createHolder"]>>>
+        >();
+        const children: Parameters<HiddenChildHost["create"]>[0][] = [];
+        f.host.createHolder = async (input) => {
+            const prior = holders.get(input.id!);
+            if (prior) return prior;
+            const holder = { id: input.id!, location: input.location, metadata: input.metadata };
+            holders.set(holder.id, holder);
+            creatingHolder.resolve();
+            await holderAnswer.promise;
+            return holder;
+        };
+        f.host.create = async (input) => {
+            children.push(input);
+            return { id: input.id!, parentID: input.parentID, location: { directory: dir } };
+        };
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+        const identity = { ...run, directory: dir };
+        const opening = f.executor.open(identity);
+        void opening.catch(() => {});
+        try {
+            await creatingHolder.promise;
+            jest.advanceTimersByTime(run.timeoutMs);
+            await expect(opening).rejects.toThrow("timed out");
+            holderAnswer.resolve();
+            await flush();
+            expect(holders.size).toBe(1);
+            expect(children).toEqual([]);
+            const next = await f.executor.open(identity);
+            try {
+                expect(holders.size).toBe(1);
+                expect(children).toHaveLength(1);
+                expect(children[0]?.parentID).toBe(holders.keys().next().value);
+            } finally {
+                await close(f.executor, next, true);
+            }
+            expect(f.removed).toEqual([next.id]);
+        } finally {
+            holderAnswer.resolve();
+            f.db.close();
+            cleanup();
+        }
+    });
+
     for (const retryAfterMs of [undefined, 190_000_000]) {
         test(`retains structured quota delay when the host exposes it (${retryAfterMs ?? "unavailable"})`, async () => {
             const f = await setup();
@@ -672,6 +884,8 @@ describe("OpenCode 2 hidden child completion", () => {
             const f = await setup();
             initializeDatabase(f.db);
             runMigrations(f.db);
+            jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+            jest.setSystemTime(new Date("2026-08-11T12:00:00Z"));
             const handle = await f.executor.open({
                 ...dreamerRun,
                 title: "magic-context-dream-classify-memories",
@@ -704,8 +918,6 @@ describe("OpenCode 2 hidden child completion", () => {
             f.host.wait = async ({ sessionID }) => {
                 if (sessionID === "child-1") await new Promise(() => {});
             };
-            jest.useFakeTimers({ doNotFake: ["setImmediate"] });
-            jest.setSystemTime(new Date("2026-08-11T12:00:00Z"));
             const flushAttempt = () => new Promise<void>((resolve) => setImmediate(resolve));
             const startedAt = Date.now();
             try {

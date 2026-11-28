@@ -1917,6 +1917,7 @@ const TEMPLATE_DATA = [
 "refusal notice skipped: no terminal viewing the session",
 "rust refusal recovery could not read persisted history:",
 "the module refused this host's poll: malformed_response",
+"[magic-context] late hidden child \x01 could not be removed",
 "[dreamer] OpenCode 2 parent session lookup failed for \x01:\x020p",
 "[git-commits] embedded \x01 commits for \x01 (total embedded: \x01)\x021p",
 "historian failure: source=existing-validation reason=\"\x01\"",

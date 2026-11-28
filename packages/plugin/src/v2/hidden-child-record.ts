@@ -99,6 +99,13 @@ export interface HiddenChildRows {
     latestIdle(sessionID: string): StoreRow<"idle"> | undefined;
 }
 
+/** The attempt's work deadline and the separate allowance for removing a late child. */
+export interface HiddenChildSetupBudget {
+    check(): void;
+    work<T>(start: () => Promise<T>, onLate?: (result: T) => void): Promise<T>;
+    cleanupMs: number;
+}
+
 /**
  * Where a hidden run's child comes from and where it goes. The executor drives the run itself
  * (prompting, waiting, reading the reply) independently of session cleanup.
@@ -109,12 +116,14 @@ export interface HiddenChildLifecycle {
         identity: HiddenRunIdentity,
         role: HiddenChildRole,
         model: HiddenChildModel,
+        budget?: HiddenChildSetupBudget,
     ): Promise<PersistedHiddenChild>;
     /** Always a new child; used when a retry finds its run's child already retired. */
     create(
         identity: HiddenRunIdentity,
         role: HiddenChildRole,
         model: HiddenChildModel,
+        budget?: HiddenChildSetupBudget,
     ): Promise<PersistedHiddenChild>;
     /** The child must never carry another run. Returns at once; cleanup happens off the run. */
     retire(child: PersistedHiddenChild, reason: string): void;

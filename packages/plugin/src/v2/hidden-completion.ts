@@ -36,6 +36,7 @@ import {
     type HiddenChildModel,
     type HiddenChildRole,
     type HiddenChildRows,
+    type HiddenChildSetupBudget,
     type PersistedHiddenChild,
     withReader,
 } from "./hidden-child-record";
@@ -110,6 +111,63 @@ interface InFlightAttempt {
 
 const DEFAULT_DISPOSE_DRAIN_MS = 2_000;
 
+class HiddenWorkTimeout extends Error {
+    constructor(timeoutMs: number) {
+        super(`prompt timed out after ${timeoutMs}ms`);
+    }
+}
+
+class HiddenWorkAborted extends Error {
+    constructor() {
+        super("Hidden completion prompt aborted");
+    }
+}
+
+function setupBudget(
+    deadline: number,
+    timeoutMs: number,
+    signal?: AbortSignal,
+): HiddenChildSetupBudget {
+    const check = () => {
+        if (Date.now() >= deadline) throw new HiddenWorkTimeout(timeoutMs);
+        if (signal?.aborted) throw new HiddenWorkAborted();
+    };
+    return {
+        check,
+        cleanupMs: DEFAULT_DISPOSE_DRAIN_MS,
+        async work(start, onLate) {
+            check();
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            let abort: (() => void) | undefined;
+            try {
+                return await Promise.race([
+                    start().then((result) => {
+                        try {
+                            check();
+                        } catch (error) {
+                            onLate?.(result);
+                            throw error;
+                        }
+                        return result;
+                    }),
+                    new Promise<never>((_, reject) => {
+                        timer = setTimeout(
+                            () => reject(new HiddenWorkTimeout(timeoutMs)),
+                            Math.max(0, deadline - Date.now()),
+                        );
+                        abort = () => reject(new HiddenWorkAborted());
+                        if (signal?.aborted) abort();
+                        else signal?.addEventListener("abort", abort, { once: true });
+                    }),
+                ]);
+            } finally {
+                clearTimeout(timer);
+                if (abort) signal?.removeEventListener("abort", abort);
+            }
+        },
+    };
+}
+
 /** Resolves when `work` settles or `ms` elapses, whichever is first. */
 async function settleWithin(work: Promise<unknown>, ms: number): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -136,6 +194,9 @@ interface RunState {
     releaseRole: () => void;
     /** Releases this run's hold on the store reader pool. */
     releaseStore: () => void;
+    firstDeadline?: number;
+    retirement?: Promise<void>;
+    deadlineExpired?: boolean;
     completion?: HiddenCompletion;
     partialCompletion?: HiddenCompletion;
     attempt?: { child: HiddenChildAttempt; baseline: number };
@@ -453,6 +514,8 @@ async function awaitAssistantRow(
 ): Promise<{ row: StoreRow<"assistant">; outputLimit?: true }> {
     for (;;) {
         // Checked before reading: a cancelled run must not open another reader.
+        if (Date.now() >= deadline)
+            throw new Error("Hidden completion timed out waiting for a persisted assistant row");
         const refusedBefore = localFailure();
         if (refusedBefore) throw refusedBefore;
         const { assistant, idle } = withReader(openReader, (reader) => ({
@@ -518,9 +581,6 @@ async function awaitAssistantRow(
             if (typeof newAssistant.data.finish === "string" || outcome === "succeeded") {
                 return { row: newAssistant };
             }
-        }
-        if (Date.now() >= deadline) {
-            throw new Error("Hidden completion timed out waiting for a persisted assistant row");
         }
         await sleepUntilPoll(signal, deadline);
     }
@@ -608,10 +668,13 @@ export async function createV2HiddenCompletionExecutor(
     };
 
     const warnedVariants = new Set<string>();
-    const validateVariant = async (model: Model): Promise<Model> => {
+    const validateVariant = async (
+        model: Model,
+        work: HiddenChildSetupBudget["work"],
+    ): Promise<Model> => {
         if (!model.variant || !options.modelCatalog) return model;
         try {
-            const listed = await options.modelCatalog();
+            const listed = await work(options.modelCatalog);
             const rows = Array.isArray(listed)
                 ? listed
                 : listed &&
@@ -643,22 +706,28 @@ export async function createV2HiddenCompletionExecutor(
                 );
             }
             return { providerID: model.providerID, modelID: model.modelID };
-        } catch {
+        } catch (error) {
+            if (error instanceof HiddenWorkTimeout || error instanceof HiddenWorkAborted)
+                throw error;
             return model;
         }
     };
 
-    const resolveHead = async (identity: HiddenRunIdentity): Promise<Model> => {
+    const resolveHead = async (
+        identity: HiddenRunIdentity,
+        work: HiddenChildSetupBudget["work"],
+    ): Promise<Model> => {
         const configured = configuredHead(identity);
-        if (configured) return validateVariant(configured);
-        if (!identity.parentSessionId) {
+        if (configured) return validateVariant(configured, work);
+        const parentSessionId = identity.parentSessionId;
+        if (!parentSessionId) {
             throw new HiddenCompletionRefusal(
                 "hidden_model_unsupported",
                 "Hidden completion requires a configured model or an existing parent session model",
                 true,
             );
         }
-        const parent = await host.get({ sessionID: identity.parentSessionId });
+        const parent = await work(() => host.get({ sessionID: parentSessionId }));
         if (!parent.model) {
             throw new HiddenCompletionRefusal(
                 "hidden_model_unsupported",
@@ -673,16 +742,23 @@ export async function createV2HiddenCompletionExecutor(
         };
     };
 
-    const switchChildModel = async (run: RunState, requested: Model): Promise<void> => {
+    const switchChildModel = async (
+        run: RunState,
+        requested: Model,
+        setup: HiddenChildSetupBudget,
+    ): Promise<void> => {
         if (sameModel(run.child.model, requested)) return;
-        await host.switchModel({
-            sessionID: run.child.id,
-            model: {
-                providerID: requested.providerID,
-                id: requested.modelID,
-                ...(requested.variant ? { variant: requested.variant } : {}),
-            },
-        });
+        await setup.work(() =>
+            host.switchModel({
+                sessionID: run.child.id,
+                model: {
+                    providerID: requested.providerID,
+                    id: requested.modelID,
+                    ...(requested.variant ? { variant: requested.variant } : {}),
+                },
+            }),
+        );
+        setup.check();
         run.child = lifecycle.updateModel(run.child, requested);
     };
 
@@ -723,29 +799,48 @@ export async function createV2HiddenCompletionExecutor(
         run.retired = true;
     };
 
-    const interruptAndRetire = async (run: RunState, reason: string): Promise<void> => {
-        try {
-            await host.interrupt({ sessionID: run.child.id });
-        } finally {
-            retire(run, reason);
-        }
+    const interruptAndRetire = (run: RunState, reason: string): Promise<void> => {
+        if (run.retired) return run.retirement ?? Promise.resolve();
+        return (run.retirement ??= (async () => {
+            const id = run.child.id;
+            const warn = () => note(`[magic-context] hidden child ${id} could not be interrupted`);
+            try {
+                await settleWithin(
+                    host.interrupt({ sessionID: id }).catch(warn),
+                    DEFAULT_DISPOSE_DRAIN_MS,
+                );
+            } catch {
+                warn();
+            } finally {
+                retire(run, reason);
+            }
+        })());
     };
 
     return {
         capabilities: V2_HIDDEN_EXECUTOR_CAPABILITIES,
         async open(identity) {
             if (disposed) throw disposed;
+            const deadline = Date.now() + identity.timeoutMs;
+            const setup = setupBudget(deadline, identity.timeoutMs);
+            const work = setup.work;
             const role = roleFor(identity);
             const releaseStore = options.holdStore?.() ?? (() => {});
             let releaseRole: (() => void) | undefined;
             let openedChild: PersistedHiddenChild | undefined;
             let opened: RunState | undefined;
             try {
-                releaseRole = await acquireRole(role);
+                releaseRole = await work(
+                    () => acquireRole(role),
+                    (release) => release(),
+                );
                 if (disposed) throw disposed;
-                await options.ensureAgent?.();
-                const head = await resolveHead(identity);
-                const active = await lifecycle.open(identity, role, head);
+                if (options.ensureAgent) await work(options.ensureAgent);
+                const head = await resolveHead(identity, work);
+                const active = await work(
+                    () => lifecycle.open(identity, role, head, setup),
+                    (child) => lifecycle.retire(child, "hidden-run-open-timeout"),
+                );
                 openedChild = active;
                 const configuredModel = toModelEntry(identity.model);
                 const handle: HiddenRunHandle = {
@@ -766,6 +861,7 @@ export async function createV2HiddenCompletionExecutor(
                     child: active,
                     releaseRole,
                     releaseStore,
+                    firstDeadline: deadline,
                     failed: false,
                     unsettledFailure: false,
                     retired: false,
@@ -774,13 +870,17 @@ export async function createV2HiddenCompletionExecutor(
                 opened = run;
                 openRuns.add(run);
                 if (disposed) noteChildOfDisposedInstance(active.id);
-                await switchChildModel(run, head);
+                await switchChildModel(run, head, setup);
+                setup.check();
                 return handle;
             } catch (error) {
-                if (openedChild) lifecycle.retire(openedChild, "hidden-run-open-failed");
-                if (opened) openRuns.delete(opened);
-                releaseRole?.();
-                releaseStore();
+                try {
+                    if (openedChild) lifecycle.retire(openedChild, "hidden-run-open-failed");
+                } finally {
+                    if (opened) openRuns.delete(opened);
+                    releaseRole?.();
+                    releaseStore();
+                }
                 throw error;
             }
         },
@@ -788,6 +888,16 @@ export async function createV2HiddenCompletionExecutor(
             const startedAt = Date.now();
             const run = runs.get(handle);
             if (!run) throw new Error("Unknown hidden completion run");
+            const timeoutMs = run.identity.timeoutMs;
+            const deadline = run.firstDeadline ?? startedAt + timeoutMs;
+            run.firstDeadline = undefined;
+            const setup = setupBudget(deadline, timeoutMs, request.signal);
+            const work = setup.work;
+            const stopWithinWork = async (reason: string) => {
+                const retirement = interruptAndRetire(run, reason);
+                if (Date.now() < deadline) await settleWithin(retirement, deadline - Date.now());
+                if (Date.now() >= deadline) run.deadlineExpired = true;
+            };
             const refuseDisposed = (): void => {
                 if (!disposed) return;
                 run.failed = true;
@@ -797,68 +907,105 @@ export async function createV2HiddenCompletionExecutor(
             };
             refuseDisposed();
             if (request.signal?.aborted) {
-                await interruptAndRetire(run, "aborted-before-prompt");
+                await stopWithinWork("aborted-before-prompt");
                 throw new Error("Hidden completion prompt aborted");
             }
 
-            const requested = await validateVariant(requestModel(request, run.child.model));
-            const requestedRef = modelKey(requested);
-            const configuredModel = [run.identity.model, ...(run.identity.configuredModels ?? [])]
-                .map(toModelEntry)
-                .find((entry) => entry?.model === requestedRef);
-            handle.attemptedModel = requestedRef;
-            handle.modelConfigKey = configuredModel?.sourceConfigKey ?? handle.modelConfigKey;
-            if (run.identity.kind !== "dreamer-task" && request.body.temperature === undefined) {
-                const configured = options.historianTemperature?.();
-                if (typeof configured === "number" && Number.isFinite(configured))
-                    request = { ...request, body: { ...request.body, temperature: configured } };
-            }
-            if (typeof request.body.temperature === "number") {
-                let metadata: unknown;
-                try {
-                    const listed = await options.modelCatalog?.();
-                    const rows = Array.isArray(listed)
-                        ? listed
-                        : (listed as { data?: unknown[] } | undefined)?.data;
-                    metadata = rows?.find(
-                        (row) =>
-                            row?.providerID === requested.providerID &&
-                            (row?.id === requested.modelID || row?.modelID === requested.modelID),
-                    );
-                } catch {
-                    // A failed catalog lookup is not evidence of sampling support.
+            let requested: Model;
+            let requestedRef: string;
+            try {
+                const previousRetirement = run.retirement;
+                if (previousRetirement) await work(() => previousRetirement);
+                requested = await validateVariant(requestModel(request, run.child.model), work);
+                requestedRef = modelKey(requested);
+                const configuredModel = [
+                    run.identity.model,
+                    ...(run.identity.configuredModels ?? []),
+                ]
+                    .map(toModelEntry)
+                    .find((entry) => entry?.model === requestedRef);
+                handle.attemptedModel = requestedRef;
+                handle.modelConfigKey = configuredModel?.sourceConfigKey ?? handle.modelConfigKey;
+                if (
+                    run.identity.kind !== "dreamer-task" &&
+                    request.body.temperature === undefined
+                ) {
+                    const configured = options.historianTemperature?.();
+                    if (typeof configured === "number" && Number.isFinite(configured))
+                        request = {
+                            ...request,
+                            body: { ...request.body, temperature: configured },
+                        };
                 }
-                const temperature = subagentTemperature(
-                    modelKey(requested),
-                    metadata,
-                    request.body.temperature,
-                    (message) => note(message),
-                );
-                const body = { ...request.body };
-                if (temperature === undefined) delete body.temperature;
-                else body.temperature = temperature;
-                request = { ...request, body };
+                if (typeof request.body.temperature === "number") {
+                    let metadata: unknown;
+                    try {
+                        const listed = options.modelCatalog
+                            ? await work(options.modelCatalog)
+                            : undefined;
+                        const rows = Array.isArray(listed)
+                            ? listed
+                            : (listed as { data?: unknown[] } | undefined)?.data;
+                        metadata = rows?.find(
+                            (row) =>
+                                row?.providerID === requested.providerID &&
+                                (row?.id === requested.modelID ||
+                                    row?.modelID === requested.modelID),
+                        );
+                    } catch (error) {
+                        if (
+                            error instanceof HiddenWorkTimeout ||
+                            error instanceof HiddenWorkAborted
+                        )
+                            throw error;
+                        // A failed catalog lookup is not evidence of sampling support.
+                    }
+                    const temperature = subagentTemperature(
+                        modelKey(requested),
+                        metadata,
+                        request.body.temperature,
+                        (message) => note(message),
+                    );
+                    const body = { ...request.body };
+                    if (temperature === undefined) delete body.temperature;
+                    else body.temperature = temperature;
+                    request = { ...request, body };
+                }
+                // Session permissions determine which genuine definitions the host can
+                // offer. Cross-provider retries must not retain the previous surface.
+                if (
+                    needsBlockedRead(run.identity.agent, run.child.model.providerID) !==
+                    needsBlockedRead(run.identity.agent, requested.providerID)
+                ) {
+                    retire(run, "hidden-run-tool-surface-changed");
+                }
+                if (run.retired) {
+                    // Fallback retries share the original handle. A terminal provider failure has
+                    // already retired its child, so give the retry a fresh child session instead of
+                    // prompting a session that is queued for deletion.
+                    run.child = await work(
+                        () => lifecycle.create(run.identity, run.role, requested, setup),
+                        (child) => lifecycle.retire(child, "hidden-run-replacement-timeout"),
+                    );
+                    run.retirement = undefined;
+                    run.deadlineExpired = false;
+                    run.failed = false;
+                    run.unsettledFailure = false;
+                    run.retired = false;
+                    handle.id = run.child.id;
+                    handle.childSessionId = run.child.id;
+                }
+                await switchChildModel(run, requested, setup);
+                setup.check();
+            } catch (error) {
+                if (error instanceof HiddenWorkTimeout || error instanceof HiddenWorkAborted) {
+                    if (error instanceof HiddenWorkTimeout) run.deadlineExpired = true;
+                    run.failed = true;
+                    run.unsettledFailure = true;
+                    if (!run.retirement) retire(run, "hidden-attempt-setup-cancelled");
+                }
+                throw error;
             }
-            // Session permissions determine which genuine definitions the host can
-            // offer. Cross-provider retries must not retain the previous surface.
-            if (
-                needsBlockedRead(run.identity.agent, run.child.model.providerID) !==
-                needsBlockedRead(run.identity.agent, requested.providerID)
-            ) {
-                retire(run, "hidden-run-tool-surface-changed");
-            }
-            if (run.retired) {
-                // Fallback retries share the original handle. A terminal provider failure has
-                // already retired its child, so give the retry a fresh carrier instead of
-                // prompting a session that is queued for deletion.
-                run.child = await lifecycle.create(run.identity, run.role, requested);
-                run.failed = false;
-                run.unsettledFailure = false;
-                run.retired = false;
-                handle.id = run.child.id;
-                handle.childSessionId = run.child.id;
-            }
-            await switchChildModel(run, requested);
             // Every await above can span a dispose; nothing is prompted after one.
             refuseDisposed();
             const baseline = withReader(options.openReader, (reader) =>
@@ -876,7 +1023,6 @@ export async function createV2HiddenCompletionExecutor(
             run.partialCompletion = undefined;
             run.attempt = { child: attempt, baseline };
             options.hook.registerAttempt(marker, attempt);
-            const deadline = Date.now() + run.identity.timeoutMs;
             lifecycle.extendDeadline(run.child, deadline);
             const budget = run.budget;
             if (budget?.snapshot().finalizeFired) {
@@ -980,9 +1126,9 @@ export async function createV2HiddenCompletionExecutor(
             };
             const deadlineTimer = setTimeout(
                 () => {
-                    void interruptAndRetire(run, "prompt-timeout").finally(() =>
-                        abortReject(new Error("Hidden completion prompt timed out")),
-                    );
+                    run.deadlineExpired = true;
+                    void interruptAndRetire(run, "prompt-timeout");
+                    abortReject(new HiddenWorkTimeout(timeoutMs));
                 },
                 Math.max(0, deadline - Date.now()),
             );
@@ -996,10 +1142,6 @@ export async function createV2HiddenCompletionExecutor(
                         // Stop the host stepping this child while this instance's hooks
                         // still serve it; any later step would reach the next instance.
                         await interruptAndRetire(run, "plugin-instance-disposed");
-                    } catch (error) {
-                        note(
-                            `[magic-context] hidden child ${run.child.id} could not be interrupted on dispose: ${errorText(error)}`,
-                        );
                     } finally {
                         abortReject(refusal);
                     }
@@ -1019,12 +1161,12 @@ export async function createV2HiddenCompletionExecutor(
             if (stopWatching) noteModelActivityMonitored(request.signal);
             try {
                 await Promise.race([
-                    host.prompt({ sessionID: run.child.id, text: marker }),
+                    work(() => host.prompt({ sessionID: run.child.id, text: marker })),
                     aborted,
                     ...(budget ? [budgetStopped] : []),
                 ]);
                 await Promise.race([
-                    host.wait({ sessionID: run.child.id }),
+                    work(() => host.wait({ sessionID: run.child.id })),
                     aborted,
                     ...(budget ? [budgetStopped] : []),
                 ]);
@@ -1033,16 +1175,18 @@ export async function createV2HiddenCompletionExecutor(
                         options.openReader,
                         async () => {
                             try {
-                                const eventError = await host.terminalError?.({
-                                    sessionID: run.child.id,
-                                });
+                                const id = run.child.id;
+                                const terminalError = host.terminalError;
+                                const eventError = terminalError
+                                    ? await work(() => terminalError.call(host, { sessionID: id }))
+                                    : undefined;
                                 if (eventError !== undefined) return eventError;
-                                return (await host.get({ sessionID: run.child.id })).error;
+                                return (await work(() => host.get({ sessionID: id }))).error;
                             } catch {
                                 return undefined;
                             }
                         },
-                        () => attempt.refusal ?? attempt.stepLimit,
+                        () => attempt.refusal ?? attempt.stepLimit ?? attempt.budgetExceeded,
                         run.child.id,
                         baseline,
                         deadline,
@@ -1085,7 +1229,7 @@ export async function createV2HiddenCompletionExecutor(
                 // step of longer runs without charging previously polled steps twice.
                 const exceeded = chargeBudgetRows(steps);
                 if (exceeded) {
-                    await interruptAndRetire(run, "token-budget");
+                    await stopWithinWork("token-budget");
                     throw exceeded;
                 }
                 const cappedChainStart = outputLimit
@@ -1108,8 +1252,9 @@ export async function createV2HiddenCompletionExecutor(
                 const usage = sumRowUsage(usageRows);
                 // A host promise may resolve at the same instant as cancellation.
                 // Never publish a completion after the child has been retired.
-                if (request.signal?.aborted || run.retired || Date.now() >= deadline) {
-                    await interruptAndRetire(run, "prompt-aborted-or-timeout");
+                if (Date.now() >= deadline) throw new HiddenWorkTimeout(timeoutMs);
+                if (request.signal?.aborted || run.retired) {
+                    await stopWithinWork("prompt-aborted-or-timeout");
                     throw new Error(
                         request.signal?.aborted
                             ? "Hidden completion prompt aborted"
@@ -1158,14 +1303,17 @@ export async function createV2HiddenCompletionExecutor(
                 if (!(error instanceof HiddenProviderError)) {
                     run.unsettledFailure = true;
                 }
-                if (request.signal?.aborted && !run.retired) {
-                    await interruptAndRetire(run, "prompt-aborted");
+                if (error instanceof HiddenWorkTimeout || Date.now() >= deadline) {
+                    run.deadlineExpired = true;
+                    void interruptAndRetire(run, "prompt-timeout");
+                } else if (request.signal?.aborted && !run.retired) {
+                    await stopWithinWork("prompt-aborted");
                 } else if (
                     error instanceof Error &&
                     error.message.includes("timed out") &&
                     !run.retired
                 ) {
-                    await interruptAndRetire(run, "prompt-timeout");
+                    await stopWithinWork("prompt-timeout");
                 } else if (
                     (error instanceof HiddenAgentStepLimit ||
                         (error instanceof HiddenProviderError && error.settled)) &&
@@ -1175,8 +1323,7 @@ export async function createV2HiddenCompletionExecutor(
                     // gone, any further host step on this child (a scheduled retry, for example)
                     // has no registered request and HiddenChildHook.apply refuses it into the
                     // host's drain loop. Retiring it means the next run starts on a clean child.
-                    await interruptAndRetire(
-                        run,
+                    await stopWithinWork(
                         error instanceof HiddenAgentStepLimit
                             ? "hidden-run-step-limit"
                             : "hidden-run-provider-error",
@@ -1207,7 +1354,19 @@ export async function createV2HiddenCompletionExecutor(
             if (!handle) return;
             const run = runs.get(handle);
             if (!run) return;
+            if (run.retirement && (!run.retired || run.deadlineExpired)) {
+                runs.delete(handle);
+                // Return without waiting; the old child keeps its role and store
+                // hold until the interrupt settles or cleanup retires it locally.
+                void run.retirement.finally(() => {
+                    openRuns.delete(run);
+                    run.releaseRole();
+                    run.releaseStore();
+                });
+                return;
+            }
             try {
+                if (run.retirement) await run.retirement;
                 // Settled provider failures are retired in attempt() before the marker is released.
                 // Keep this guard for callers that close an unsuccessful run without an attempt
                 // error, but never make a retired child reusable through close().
@@ -1231,7 +1390,8 @@ export async function createV2HiddenCompletionExecutor(
                 // Session removal below needs no store reads.
                 run.releaseStore();
             }
-            await lifecycle.finish(run.child, run.retired);
+            const finished = lifecycle.finish(run.child, run.retired);
+            if (!run.deadlineExpired) await finished;
         },
         async dispose() {
             disposed ??= new HiddenCompletionRefusal(
