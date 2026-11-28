@@ -423,5 +423,6 @@ fn a_fold_reads_3700_summaries_back() {
         folds.as_secs_f64() * 1e3,
         first_fold.as_secs_f64() * 1e3,
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
