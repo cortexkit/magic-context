@@ -382,7 +382,8 @@ fn all_lab_tool_definitions() -> Vec<Value> {
         "confirm_record_removals":true
     }))
     .unwrap();
-    tool_definitions(&spec).unwrap()
+    let history = History::load(&ContextDb::fresh_in_memory(), "p", None).unwrap();
+    tool_definitions(&spec, &history.scope).unwrap()
 }
 
 #[test]
@@ -485,8 +486,8 @@ async fn lab_without_sidekick_keeps_its_send_and_request_bytes() {
     assert_eq!(
         pins,
         [
-            "b7094a89a773d890f4ef21f2a5175ccb2642986aa577b15c95555e0f3769fbe2",
-            "db74866b98545ff155d1845f1c155e2a847ca8adb3756f5b30861bc512f6a5ba",
+            "d783f1e07f770e8c2cadcffddb512a7e81650db0dd661083b80121152caccbce",
+            "00ac158c4dcd8c427227879797864d29d6ef610e1360365171e61c54782e7bb2",
         ]
     );
 }
@@ -864,6 +865,7 @@ async fn persona_facts_report_sidekick_and_checkout_paths_only_when_offered() {
         )
         .unwrap();
         let mut spec = fixture.spec_value();
+        spec["history_sessions"] = json!(["session-p"]);
         if enabled {
             spec["tools"]
                 .as_array_mut()
@@ -1079,14 +1081,8 @@ async fn frozen_search_uses_only_project_sessions_and_indexed_messages() {
         !memory.contains("id=9") && !memory.contains("different project"),
         "{memory}"
     );
-    assert!(
-        answer.contains("session=session-p ref=session-p:12"),
-        "{answer}"
-    );
-    assert!(
-        answer.contains("session=session-p2 ref=session-p2:1-4"),
-        "{answer}"
-    );
+    assert!(answer.contains("ref=s1:12"), "{answer}");
+    assert!(answer.contains("ref=s2:1-4"), "{answer}");
     assert!(
         answer.contains("date=1970-01-01T00:00:01+00:00"),
         "{answer}"
@@ -1121,7 +1117,7 @@ async fn frozen_search_uses_only_project_sessions_and_indexed_messages() {
         .tool("history_search", json!({"query":"sharedterm"}))
         .await
         .unwrap();
-    assert!(narrow.contains("session=session-p ref=session-p:12"));
+    assert!(narrow.contains("ref=12"));
     assert!(!narrow.contains("session-p2"));
 }
 
@@ -1131,14 +1127,14 @@ async fn frozen_search_history_default_and_relevance_share_fixture_bytes() {
     let lab = fixture.search_lab(None).await;
     let expected = concat!(
         "## Summaries\n",
-        "[1] [message] score=0.80 compartment_id=1 range=1-4 match=lexical title=A frozen summary date=1970-01-01 session=session-p ref=session-p:1-4\n",
+        "[1] [message] score=0.80 match=lexical title=A frozen summary date=1970-01-01 ref=s1:1-4\n",
         "Snippet: sharedterm in the summary for session-p.\n\n",
-        "[2] [message] score=0.80 compartment_id=2 range=1-4 match=lexical title=A frozen summary date=1970-01-01 session=session-p2 ref=session-p2:1-4\n",
+        "[2] [message] score=0.80 match=lexical title=A frozen summary date=1970-01-01 ref=s2:1-4\n",
         "Snippet: sharedterm in the summary for session-p2.\n\n",
         "## The person's messages\n",
-        "[1] [message] score=1.00 ordinal=12 range=9-15 role=user date=1970-01-01T00:00:01+00:00 session=session-p ref=session-p:12\n",
+        "[1] [message] score=1.00 ordinal=12 range=9-15 role=user date=1970-01-01T00:00:01+00:00 ref=s1:12\n",
         "sharedterm in the indexed project message.\n\n",
-        "[2] [message] score=1.00 ordinal=12 range=9-15 role=user date=1970-01-01T00:00:01+00:00 session=session-p2 ref=session-p2:12\n",
+        "[2] [message] score=1.00 ordinal=12 range=9-15 role=user date=1970-01-01T00:00:01+00:00 ref=s2:12\n",
         "sharedterm in the other project session.\n\n",
         "## Commits\nnone",
     );
@@ -1206,23 +1202,13 @@ async fn frozen_search_history_order_newest_sorts_each_pool_before_paging() {
     for (title, oldest, newest_refs) in [
         (
             "Summaries",
-            "session-p:20-21",
-            &[
-                "session-p:28-29",
-                "session-p2:20-21",
-                "session-p2:22-23",
-                "session-p:26-27",
-            ][..],
+            "s1:20-21",
+            &["s1:28-29", "s2:20-21", "s2:22-23", "s1:26-27"][..],
         ),
         (
             "The person's messages",
-            "session-p:21",
-            &[
-                "session-p:29",
-                "session-p2:23",
-                "session-p2:21",
-                "session-p:27",
-            ][..],
+            "s1:21",
+            &["s1:29", "s2:23", "s2:21", "s1:27"][..],
         ),
         (
             "Commits",
@@ -1239,7 +1225,7 @@ async fn frozen_search_history_order_newest_sorts_each_pool_before_paging() {
         assert_eq!(references(&relevance)[0], oldest, "{relevance}");
         assert_eq!(references(&newest), newest_refs, "{newest}");
     }
-    assert!(newest.contains("date=1970-01-02..1970-01-06 session=session-p2 ref=session-p2:20-21"));
+    assert!(newest.contains("date=1970-01-02..1970-01-06 ref=s2:20-21"));
 }
 
 #[test]
@@ -1293,7 +1279,7 @@ fn frozen_search_history_order_newest_excludes_weak_commits_below_rank_bound() {
 async fn memory_search_does_not_use_history_session_selection() {
     let fixture = Fixture::new();
     let mut spec = fixture.spec_value();
-    spec["history_sessions"] = json!(["unrelated"]);
+    spec["history_sessions"] = json!(["session-p2"]);
     let lab = Arc::new(Lab::load(fixture.start(&spec).await.unwrap(), None).unwrap());
     let answer = lab
         .clone()
@@ -1365,9 +1351,9 @@ async fn frozen_search_agent_messages_require_opt_in_and_get_their_own_group() {
         )
         .await
         .unwrap();
-    assert!(group(&included, "The person's messages").contains("ref=session-p:12"));
+    assert!(group(&included, "The person's messages").contains("ref=s1:12"));
     assert!(!group(&included, "The person's messages").contains("from the agent"));
-    assert!(group(&included, "Agent messages").contains("ref=session-p:13"));
+    assert!(group(&included, "Agent messages").contains("ref=s1:13"));
 }
 
 #[tokio::test]
@@ -1411,7 +1397,7 @@ async fn frozen_search_sizes_multiply_independently_per_group() {
         }
         let answer = lab.clone().tool("history_search", input).await.unwrap();
         for (title, count, marker) in [
-            ("Summaries", 4, "compartment_id="),
+            ("Summaries", 4, "match="),
             ("The person's messages", 4, "ordinal="),
             ("Commits", 3, "sha="),
             ("Agent messages", 4, "ordinal="),
@@ -1503,16 +1489,7 @@ async fn frozen_search_dated_messages_use_inclusive_utc_bounds_and_total_tie_ord
         .lines()
         .filter_map(|line| line.split_once(" ref=").map(|(_, r)| r))
         .collect();
-    assert_eq!(
-        references,
-        [
-            "session-p:14",
-            "session-p2:15",
-            "session-p:15",
-            "session-p:16",
-        ],
-        "{answer}"
-    );
+    assert_eq!(references, ["s1:14", "s2:15", "s1:15", "s1:16"], "{answer}");
 }
 
 #[tokio::test]
@@ -1550,8 +1527,7 @@ async fn frozen_search_summary_dates_come_from_indexed_messages_inside_the_range
         input["query"] = json!("sharedterm");
         let answer = lab.clone().tool("history_search", input).await.unwrap();
         assert!(
-            group(&answer, "Summaries")
-                .contains("date=2026-06-28..2026-07-02 session=session-p ref=session-p:2-5"),
+            group(&answer, "Summaries").contains("date=2026-06-28..2026-07-02 ref=2-5"),
             "{answer}"
         );
     }
@@ -1587,14 +1563,8 @@ async fn frozen_search_summary_dates_of_empty_ranges_use_neighbouring_messages()
         .await
         .unwrap();
     let summaries = group(&answer, "Summaries");
-    assert!(
-        summaries.contains("date=1970-01-02 session=session-p ref=session-p:1-4"),
-        "{answer}"
-    );
-    assert!(
-        summaries.contains("date=1970-01-03 session=session-p ref=session-p:8-11"),
-        "{answer}"
-    );
+    assert!(summaries.contains("date=1970-01-02 ref=1-4"), "{answer}");
+    assert!(summaries.contains("date=1970-01-03 ref=8-11"), "{answer}");
     let answer = lab
         .tool(
             "history_search",
@@ -1603,11 +1573,8 @@ async fn frozen_search_summary_dates_of_empty_ranges_use_neighbouring_messages()
         .await
         .unwrap();
     let summaries = group(&answer, "Summaries");
-    assert!(
-        summaries.contains("date=1970-01-03 session=session-p ref=session-p:8-11"),
-        "{answer}"
-    );
-    assert!(!summaries.contains("ref=session-p:1-4"), "{answer}");
+    assert!(summaries.contains("date=1970-01-03 ref=8-11"), "{answer}");
+    assert!(!summaries.contains("ref=1-4"), "{answer}");
 }
 
 #[tokio::test]
@@ -1627,7 +1594,7 @@ async fn frozen_search_summary_dates_are_unknown_without_a_usable_session_time()
         .await
         .unwrap();
     assert!(
-        group(&answer, "Summaries").contains("date=unknown session=session-p ref=session-p:1-4"),
+        group(&answer, "Summaries").contains("date=unknown ref=1-4"),
         "{answer}"
     );
     let answer = lab
@@ -1784,17 +1751,17 @@ async fn lab_review_only_mapped_harness_contributes_history_for_shared_ids() {
         .tool("history_search", json!({"query":"sharedterm"}))
         .await
         .unwrap();
-    assert!(answer.contains("ref=session-p:1-4"), "{answer}");
+    assert!(answer.contains("ref=s1:1-4"), "{answer}");
     assert!(!answer.contains("private sharedterm"), "{answer}");
-    assert!(!answer.contains("ref=session-p:12"), "{answer}");
-    assert!(answer.contains("ref=session-p2:12"), "{answer}");
+    assert!(!answer.contains("ref=s1:12"), "{answer}");
+    assert!(answer.contains("ref=s2:12"), "{answer}");
     assert_eq!(
         answer.matches("1 sessions skipped: ambiguous id").count(),
         1,
         "{answer}"
     );
     assert!(
-        group(&answer, "Summaries").contains("date=unknown session=session-p ref=session-p:1-4"),
+        group(&answer, "Summaries").contains("date=unknown ref=s1:1-4"),
         "{answer}"
     );
 }
@@ -1823,11 +1790,11 @@ async fn history_omits_sessions_mapped_to_multiple_harnesses_in_the_same_project
     let calls = client.lab_tool_results.lock().unwrap();
     let answer = calls[0]["content"][0]["text"].as_str().unwrap();
     assert!(
-        answer.contains("ref=session-p2:12") && answer.contains("ref=session-p2:1-4"),
+        answer.contains("ref=12") && answer.contains("ref=1-4"),
         "{answer}"
     );
     assert!(
-        !answer.contains("ref=session-p:") && !answer.contains("same bare session id"),
+        !answer.contains("ref=s1:") && !answer.contains("same bare session id"),
         "{answer}"
     );
     assert_eq!(fixture.output("run.json")["history_session_ids_skipped"], 1);

@@ -34,6 +34,7 @@ use crate::child_scopes::{WorkerScope, WorkerScopeGuard, LAB_WORKER_SCOPE};
 use crate::client::{Child, RunnerClient};
 use crate::context_db::ContextDb;
 use crate::routing::{self, Router};
+use crate::search::lab::{History, HistoryScope};
 use crate::summary::fit::Window;
 use crate::summary::run::{ObservedSend, PlanRun};
 
@@ -125,7 +126,7 @@ pub(crate) struct Lab {
     memories: frozen::Memories,
     persona: persona::Persona,
     store: Mutex<rusqlite::Connection>,
-    history: Option<crate::search::lab::History>,
+    history: History,
     embedding: Option<crate::embedding::Provider>,
     ranking: ranking::Runtime,
     tools: Vec<Value>,
@@ -239,10 +240,14 @@ impl Start {
         let finished = tokio::task::spawn_blocking(move || {
             let _permit = write_permit;
             let history_session_ids_skipped = loaded.as_ref().and_then(|lab| {
-                lab.history
-                    .as_ref()
-                    .map(crate::search::lab::History::skipped_session_ids)
+                searches_history(&lab.spec).then(|| lab.history.skipped_session_ids())
             });
+            let history_session_map = loaded
+                .as_ref()
+                .map_or_else(|| json!({}), |lab| json!(lab.history.scope.report()));
+            let origins_outside_scope = loaded
+                .as_ref()
+                .map_or(0, |lab| lab.memories.origins_outside_scope);
             let ranking = loaded
                 .as_ref()
                 .map(|lab| lab.ranking.report(lab.spec.rerank));
@@ -261,6 +266,8 @@ impl Start {
                 (stop, error)
             };
             let mut result = observed.result(stop, missing, error, start.elapsed().as_millis());
+            result["history_session_map"] = history_session_map;
+            result["origins_outside_scope"] = json!(origins_outside_scope);
             if let Some(skipped) = history_session_ids_skipped {
                 result["history_session_ids_skipped"] = json!(skipped);
             }
@@ -316,19 +323,16 @@ impl Lab {
         }
         spec::reject_live(&spec.store, &live)?;
         let store = frozen::open(&spec.store)?;
-        let memories = frozen::memories(&store, &spec.project, &spec.memory_ids)?;
-        let history = (spec.tools.contains(&Tool::HistorySearch) || spec.confirm_record_removals)
-            .then(|| {
-                crate::search::lab::History::load(
-                    &store,
-                    &spec.project,
-                    spec.history_sessions.as_deref(),
-                )
-            })
-            .transpose()?;
+        let history = History::for_lab(
+            &store,
+            &spec.project,
+            spec.history_sessions.as_deref(),
+            searches_history(&spec),
+        )?;
+        let memories = frozen::memories(&store, &spec.project, &spec.memory_ids, &history.scope)?;
         let context = spec.context()?;
         let persona = persona::Persona::load(&spec, &live)?;
-        let tools = tool_definitions(&spec)?;
+        let tools = tool_definitions(&spec, &history.scope)?;
         Ok(Self {
             spec,
             context,
@@ -525,7 +529,7 @@ impl Lab {
         };
         let owned = self.clone();
         let (system, prompt) = tokio::task::spawn_blocking(move || -> Result<_, String> {
-            let (system, prompt) = owned.persona.render(
+            let (system, mut prompt) = owned.persona.render(
                 context,
                 tools,
                 &checkout_paths,
@@ -534,6 +538,10 @@ impl Lab {
             )?;
             if system.trim().is_empty() || prompt.trim().is_empty() {
                 return Err("the lab system text and first message must not be empty".into());
+            }
+            if let Some(legend) = owned.history.scope.legend() {
+                prompt.push_str("\n\n");
+                prompt.push_str(&legend);
             }
             if !window.admits(output_tokens, &system, &prompt) {
                 return Err("the exact lab request does not fit the selected model".into());
@@ -670,8 +678,6 @@ impl Lab {
             .clone()
             .read_frozen(deadline, TIMEOUT, move |lab, conn| {
                 lab.history
-                    .as_ref()
-                    .expect("history search has a session scope")
                     .prepare(conn, &input, semantic(&embedded), pool, summaries_only)
             })
             .await?;
@@ -679,9 +685,9 @@ impl Lab {
             scorer.apply(&query, &mut prepared, deadline).await;
         }
         Ok(if summaries_only {
-            prepared.render_two_summaries()
+            prepared.render_two_summaries(&self.history.scope)
         } else {
-            prepared.render()
+            prepared.render(&self.history.scope)
         })
     }
 
@@ -689,7 +695,14 @@ impl Lab {
         self.read_frozen(
             Instant::now() + frozen::SEARCH_LIMIT,
             "history_read timed out; narrow the date range",
-            move |lab, conn| crate::search::lab::history_read(conn, &lab.spec.project, &input),
+            move |lab, conn| {
+                crate::search::lab::history_read(
+                    conn,
+                    &lab.spec.project,
+                    &lab.history.scope,
+                    &input,
+                )
+            },
         )
         .await
     }
@@ -751,7 +764,7 @@ impl Lab {
     async fn removal_evidence(self: Arc<Self>, id: i64) -> (String, String) {
         let deadline = Instant::now() + frozen::SEARCH_LIMIT;
         let frozen = self.clone().read_frozen(deadline, "reading the origin timed out", move |lab, conn| {
-            let origin = lab.memories.origins.get(&id).map(|origin| origin.render(conn))
+            let origin = lab.memories.origins.get(&id).map(|(session, origin)| origin.render(conn, &lab.history.scope, session))
                 .transpose()?.unwrap_or_else(|| "No origin summary could be located.".into());
             let content: String = conn.query_row("SELECT content FROM memories WHERE id = ?1 AND level = 'project' AND owner_id = ?2",
                 rusqlite::params![id, lab.spec.project], |row| row.get(0)).map_err(|e| format!("reading frozen memory {id}: {e}"))?;
@@ -913,9 +926,13 @@ fn os() -> OsName {
     }
 }
 
-fn tool_definitions(spec: &Spec) -> Result<Vec<Value>, String> {
+fn searches_history(spec: &Spec) -> bool {
+    spec.tools.contains(&Tool::HistorySearch) || spec.confirm_record_removals
+}
+
+fn tool_definitions(spec: &Spec, scope: &HistoryScope) -> Result<Vec<Value>, String> {
     let mut tools = Vec::new();
-    let mut add = |name, description, schema, read_only| -> Result<(), String> {
+    let mut add = |name, description: &str, schema, read_only| -> Result<(), String> {
         let digest = catalog::schema_digest(&schema).map_err(|e| e.to_string())?;
         let mut tool = json!({"name":name,"description":description,"input_schema":schema,"schema_digest":digest,
             "semantics":1,"result_ops":["prepend","append"],"capabilities":[]});
@@ -977,17 +994,29 @@ Retrieval matches meaning and exact words and fuses them, so phrase `query` as a
         )?;
     }
     if spec.tools.contains(&Tool::HistoryRead) {
-        add("history_read", "Read summaries of past work in full. Give the `ref` of a `history_search` hit or of a memory's `origin`, or a `session` with `from` and `to` dates.",
-            json!({"type":"object","additionalProperties":false,"properties":{
-                "ref":{"type":"string","description":"Reference to one summary, in the form <session>:<start>-<end>."},
-                "session":{"type":"string","description":"Session ID to read summaries from when using from and to instead of a ref."},
+        let mut schema = json!({"type":"object","additionalProperties":false,"properties":{
+                "ref":{"type":"string","description":format!("Reference to one summary, in the form {}.", scope.reference_form())},
                 "from":{"type":"string","description":"Inclusive start date (YYYY-MM-DD in UTC, or a full ISO datetime)."},
                 "to":{"type":"string","description":"Inclusive end date (YYYY-MM-DD in UTC, or a full ISO datetime)."},
                 "offset":{"type":"integer","minimum":0,"description":"Continue a long summary from this character position; the previous result names the value."}
-            },"oneOf":[{"required":["ref"]},{"required":["session","from","to"]}]}), true)?;
+            },"oneOf":[{"required":["ref"],"not":{"anyOf":[{"required":["from"]},{"required":["to"]}]}},
+                       {"required":["from","to"],"not":{"anyOf":[{"required":["ref"]},{"required":["offset"]}]}}]});
+        let dates = if let Some(labels) = scope.labels() {
+            schema["properties"]["session"] = json!({"type":"string","enum":labels,"description":"History session label (such as s2) when reading by date."});
+            schema["oneOf"][0]["not"]["anyOf"]
+                .as_array_mut()
+                .expect("ref exclusions")
+                .push(json!({"required":["session"]}));
+            schema["oneOf"][1]["required"] = json!(["session", "from", "to"]);
+            "a `session` label with `from` and `to` dates"
+        } else {
+            "`from` and `to` dates"
+        };
+        let description = format!("Read summaries of past work in full. Give the `ref` of a `history_search` summary or of a memory's `origin`, or {dates}.");
+        add("history_read", description.as_str(), schema, true)?;
     }
     if spec.tools.contains(&Tool::Submit) {
-        add("submit", "Record verdicts for some lab memories. Supply reasoning for every verdict except keep. Later calls may replace an earlier verdict for the same id.", verdicts::schema(spec.confirm_record_removals), false)?;
+        add("submit", "Record verdicts for some lab memories. Supply reasoning for every verdict except keep. Later calls may replace an earlier verdict for the same id.", verdicts::schema(spec.confirm_record_removals, scope.labels().is_some()), false)?;
     }
     Ok(tools)
 }

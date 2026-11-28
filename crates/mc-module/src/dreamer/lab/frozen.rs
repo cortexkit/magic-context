@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
-use crate::search::lab::{Origin, Timeline};
+use crate::search::lab::{HistoryScope, Origin, Timeline};
 
 pub(super) fn open(path: &Path) -> Result<Connection, String> {
     let path = path.to_str().ok_or("store path must be UTF-8")?;
@@ -36,10 +36,16 @@ pub(super) fn open(path: &Path) -> Result<Connection, String> {
 
 pub(super) struct Memories {
     pub text: String,
-    pub origins: BTreeMap<i64, Origin>,
+    pub origins: BTreeMap<i64, (String, Origin)>,
+    pub origins_outside_scope: usize,
 }
 
-pub(super) fn memories(conn: &Connection, project: &str, ids: &[i64]) -> Result<Memories, String> {
+pub(super) fn memories(
+    conn: &Connection,
+    project: &str,
+    ids: &[i64],
+    scope: &HistoryScope,
+) -> Result<Memories, String> {
     let mut memory = conn
         .prepare(
             "SELECT category, created_at, source_type, importance, verified_at, content,
@@ -53,6 +59,7 @@ pub(super) fn memories(conn: &Connection, project: &str, ids: &[i64]) -> Result<
     let mut text = String::new();
     let mut timelines = HashMap::new();
     let mut origins = BTreeMap::new();
+    let mut origins_outside_scope = 0;
     for &id in ids {
         let row = memory
             .query_row(params![id, project], |row| {
@@ -88,7 +95,7 @@ pub(super) fn memories(conn: &Connection, project: &str, ids: &[i64]) -> Result<
             if files.is_empty() { "none".into() } else { files.join(", ") },
         ).expect("a string is writable");
         if let Some(session) = session {
-            let timeline = match timelines.entry(session) {
+            let timeline = match timelines.entry(session.clone()) {
                 std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     let timeline = Timeline::load(conn, project, entry.key())?;
@@ -103,13 +110,22 @@ pub(super) fn memories(conn: &Connection, project: &str, ids: &[i64]) -> Result<
                 .as_ref()
                 .and_then(|timeline| timeline.origin(&spans, created))
             {
-                writeln!(text, "origin: {}", origin.label()).expect("a string is writable");
-                origins.insert(id, origin);
+                if scope.contains(&session) {
+                    writeln!(text, "origin: {}", origin.label(scope, &session))
+                        .expect("a string is writable");
+                    origins.insert(id, (session, origin));
+                } else {
+                    origins_outside_scope += 1;
+                }
             }
         }
         writeln!(text, "\n{content}\n").expect("a string is writable");
     }
-    Ok(Memories { text, origins })
+    Ok(Memories {
+        text,
+        origins,
+        origins_outside_scope,
+    })
 }
 
 fn date(ms: i64) -> String {

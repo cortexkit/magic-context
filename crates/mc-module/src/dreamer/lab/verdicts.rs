@@ -336,7 +336,12 @@ enum Kind {
     Doc,
 }
 
-pub(super) fn schema(confirm_record_removals: bool) -> Value {
+pub(super) fn schema(confirm_record_removals: bool, labelled_history: bool) -> Value {
+    let history = if labelled_history {
+        "history:s2:165002-165159"
+    } else {
+        "history:165002-165159"
+    };
     let mut schema = json!({
         "type":"object", "additionalProperties":false, "required":["verdicts"],
         "properties":{"verdicts":{"type":"array","minItems":1,"description":"List of one or more verdict objects to record for lab memories.","items":{
@@ -353,7 +358,7 @@ pub(super) fn schema(confirm_record_removals: bool) -> Value {
                     "type":"object","additionalProperties":false,"required":["kind","ref","quote"],
                     "properties":{
                         "kind":{"type":"string","enum":["file","commit","memory","history","doc"],"description":"Type of source being cited, from the listed choices."},
-                        "ref":{"type":"string","description":"Reference identifying the source, such as a file path, commit ID, memory ID or history ref."},
+                        "ref":{"type":"string","description":format!("Reference identifying the source, such as a file path, commit ID or memory ID. Cite a summary as {history}, using the ref you were shown after `history:`.")},
                         "quote":{"type":"string","description":"Excerpt from the cited source that supports the decision."}
                     }
                 }},

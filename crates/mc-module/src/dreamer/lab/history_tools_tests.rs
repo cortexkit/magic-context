@@ -58,7 +58,7 @@ fn history_search_fuses_words_and_meaning_without_hiding_the_persons_message() {
         "{answer}"
     );
     assert!(
-        group(&answer, "The person's messages").contains("ref=session-p:30"),
+        group(&answer, "The person's messages").contains("ref=s1:30"),
         "{answer}"
     );
     let exact = history
@@ -146,12 +146,12 @@ fn ordinary_message_lane_and_fused_history_keep_their_fixture_output() {
 }
 
 #[tokio::test]
-async fn history_read_allows_an_unlisted_project_session_by_ref_and_by_dates_but_never_live() {
+async fn history_read_round_trips_short_refs_and_dates_in_a_single_session() {
     let fixture = Fixture::new();
     let frozen = rusqlite::Connection::open(&fixture.frozen).unwrap();
     frozen
         .execute(
-            "UPDATE compartments SET p1='Frozen detailed tier' WHERE session_id='session-p2'",
+            "UPDATE compartments SET p1='Frozen detailed tier' WHERE session_id='session-p'",
             [],
         )
         .unwrap();
@@ -159,7 +159,7 @@ async fn history_read_allows_an_unlisted_project_session_by_ref_and_by_dates_but
     let live = ContextDb::open(&fixture.live).unwrap();
     live.with_connection(|conn| {
         conn.execute(
-            "UPDATE compartments SET p1='LIVE detailed tier' WHERE session_id='session-p2'",
+            "UPDATE compartments SET p1='LIVE detailed tier' WHERE session_id='session-p'",
             [],
         )
         .unwrap();
@@ -170,26 +170,199 @@ async fn history_read_allows_an_unlisted_project_session_by_ref_and_by_dates_but
     spec["history_sessions"] = json!(["session-p"]);
     let lab = Arc::new(Lab::load(fixture.start(&spec).await.unwrap(), None).unwrap());
     let read = |input| lab.clone().tool("history_read", input);
-    let by_ref = read(json!({"ref":"session-p2:1-4"})).await.unwrap();
+    let by_ref = read(json!({"ref":"  1-4\n"})).await.unwrap();
     assert_eq!(
         by_ref,
-        "ref=session-p2:1-4 date=1970-01-01 title=A frozen summary\nFrozen detailed tier"
+        "ref=1-4 date=1970-01-01 title=A frozen summary\nFrozen detailed tier"
     );
     assert_eq!(
-        read(json!({"session":"session-p2","from":"1970-01-01","to":"1970-01-01"}))
+        read(json!({"from":"1970-01-01","to":"1970-01-01"}))
             .await
             .unwrap(),
         by_ref
     );
-    assert!(read(json!({"ref":"session-p:1-4"}))
-        .await
-        .unwrap()
-        .ends_with("sharedterm in the summary for session-p."));
-    assert!(read(json!({"ref":"unrelated:1-4"}))
-        .await
-        .unwrap_err()
-        .contains("does not belong"));
+    for reference in ["s1:1-4", "session-p2:1-4", "session-p:1-4", "81-83"] {
+        assert!(read(json!({"ref":reference}))
+            .await
+            .unwrap_err()
+            .contains("<start>-<end>"));
+    }
+    assert!(
+        read(json!({"session":"session-p2","from":"1970-01-01","to":"1970-01-01"}))
+            .await
+            .is_err()
+    );
     assert!(!by_ref.contains("LIVE"));
+}
+
+#[tokio::test]
+async fn history_references_stay_short_from_prompt_to_saved_verdict() {
+    for mode in ["single", "explicit", "implicit"] {
+        let fixture = Fixture::new();
+        let db = rusqlite::Connection::open(&fixture.frozen).unwrap();
+        db.execute_batch(
+            "UPDATE session_projects SET session_id = CASE session_id WHEN 'session-p' THEN 'ses_Z' ELSE 'ses_A' END WHERE project_path = 'p';
+             UPDATE compartments SET session_id = 'ses_Z', created_at = 1000, content = 'sharedterm early summary' WHERE session_id = 'session-p';
+             UPDATE compartments SET session_id = 'ses_A', created_at = 2000, content = 'sharedterm late summary' WHERE session_id = 'session-p2';
+             UPDATE memories SET source_session_id = CASE id WHEN 7 THEN 'ses_Z' ELSE 'ses_A' END,
+                 source_ordinals_json = '[[1,4]]' WHERE id IN (7,2);
+             INSERT INTO session_projects (session_id, harness, project_path, updated_at) VALUES ('ses_raw_only', 'mock', 'p', 1);
+             INSERT INTO git_commits (sha, project_path, short_sha, message, author, committed_at, indexed_at)
+                VALUES ('abc123', 'p', 'abc123', 'sharedterm commit', 'author', 1000, 1000);",
+        ).unwrap();
+        for session in ["ses_Z", "ses_A", "ses_raw_only"] {
+            index_message(
+                &db,
+                session,
+                11,
+                "user",
+                "sharedterm person's message",
+                1000,
+            );
+            index_message(
+                &db,
+                session,
+                12,
+                "assistant",
+                "sharedterm agent message",
+                1000,
+            );
+        }
+        drop(db);
+        let mut spec = fixture.spec_value();
+        spec["tools"] = json!([
+            "git_read",
+            "memory_search",
+            "history_search",
+            "history_read",
+            "submit"
+        ]);
+        let (prefix, date_label, map, outside) = match mode {
+            "single" => {
+                spec["history_sessions"] = json!(["ses_Z"]);
+                ("", None, json!({"":"ses_Z"}), 1)
+            }
+            "explicit" => {
+                spec["history_sessions"] = json!(["ses_A", "ses_Z"]);
+                ("s2:", Some("s2"), json!({"s1":"ses_A","s2":"ses_Z"}), 0)
+            }
+            _ => ("s1:", Some("s1"), json!({"s1":"ses_Z","s2":"ses_A"}), 0),
+        };
+        let reference = format!("{prefix}1-4");
+        let citation = format!("history:{reference}");
+        let mut dates = json!({"from":"1970-01-01","to":"1970-01-01"});
+        if let Some(label) = date_label {
+            dates["session"] = json!(label);
+        }
+        let mut verdict = verdict(7, "Spring cleaning");
+        verdict["evidence"] =
+            json!([{"kind":"history","ref":citation,"quote":"sharedterm early summary"}]);
+        let client = fixture.run(spec, Ends::LabTools(vec![
+            json!({"name":"history_search", "arguments":{"query":"sharedterm","include_agent":true}}),
+            json!({"name":"history_read", "arguments":{"ref":format!("  {reference}\n")}}),
+            json!({"name":"history_read", "arguments":dates}),
+            submit(&[verdict]),
+        ])).await;
+        let request = fixture.output("request.json");
+        assert!(!request.to_string().contains("ses_"), "{request}");
+        let prompt = request["first_message"].as_str().unwrap();
+        assert!(
+            prompt.contains(&format!("origin: ref={reference} date=")),
+            "{prompt}"
+        );
+        assert_eq!(prompt.matches("origin: ref=").count(), 2 - outside);
+        assert_eq!(
+            prompt.matches("History session labels:").count(),
+            usize::from(date_label.is_some())
+        );
+        if date_label.is_some() {
+            assert!(
+                prompt.ends_with("History session labels:\ns1: mock\ns2: mock"),
+                "{prompt}"
+            );
+        }
+
+        let tools = request["lab_tools"].as_array().unwrap();
+        let schema = &tools
+            .iter()
+            .find(|tool| tool["name"] == "history_read")
+            .unwrap()["input_schema"];
+        assert_eq!(schema["oneOf"][0]["required"], json!(["ref"]));
+        if date_label.is_some() {
+            assert_eq!(
+                schema["oneOf"][1]["required"],
+                json!(["session", "from", "to"])
+            );
+            assert_eq!(schema["properties"]["session"]["enum"], json!(["s1", "s2"]));
+        } else {
+            assert_eq!(schema["oneOf"][1]["required"], json!(["from", "to"]));
+            assert!(schema["properties"].get("session").is_none());
+        }
+
+        let results = client.lab_tool_results.lock().unwrap();
+        let search = answer(&results, 0);
+        assert!(!search.contains("ses_"), "{search}");
+        let summaries = group(search, "Summaries");
+        assert!(
+            summaries.contains(&format!("ref={reference}\n")),
+            "{summaries}"
+        );
+        assert!(
+            !summaries.contains("compartment_id=") && !summaries.contains("range="),
+            "{summaries}"
+        );
+        assert!(group(search, "The person's messages").contains(&format!("ref={prefix}11\n")));
+        assert_eq!(
+            group(search, "The person's messages")
+                .matches("ref=")
+                .count(),
+            2 - outside
+        );
+        assert!(group(search, "Agent messages").contains(&format!("ref={prefix}12\n")));
+        assert!(group(search, "Commits").contains("ref=abc123\n"));
+        let read = answer(&results, 1);
+        assert_eq!(read, answer(&results, 2));
+        assert_eq!(
+            read,
+            format!(
+                "ref={reference} date=1970-01-01 title=A frozen summary\nsharedterm early summary"
+            )
+        );
+        assert_eq!(fixture.output("run.json")["history_session_map"], map);
+        assert_eq!(fixture.output("run.json")["origins_outside_scope"], outside);
+        assert_eq!(
+            fixture.output("verdicts.json")[0]["evidence"][0]["ref"],
+            citation
+        );
+    }
+}
+
+#[tokio::test]
+async fn history_read_rejects_unlabelled_unknown_and_old_refs_in_a_labelled_scope() {
+    let fixture = Fixture::new();
+    let mut spec = fixture.spec_value();
+    spec["tools"] = json!(["history_read"]);
+    spec["history_sessions"] = json!(["session-p2", "session-p"]);
+    let lab = Arc::new(Lab::load(fixture.start(&spec).await.unwrap(), None).unwrap());
+    for reference in ["1-4", "s3:1-4", "session-p:1-4", "s2:81-83"] {
+        let error = lab
+            .clone()
+            .tool("history_read", json!({"ref":reference}))
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("<label>:<start>-<end>; valid labels: s1, s2"),
+            "{error}"
+        );
+    }
+    let error = lab
+        .tool(
+            "history_read",
+            json!({"session":"session-p","from":"1970-01-01","to":"1970-01-01"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("valid labels: s1, s2"), "{error}");
 }
 
 #[tokio::test]
@@ -205,24 +378,25 @@ async fn history_read_caps_pages_and_continues_long_unicode_summaries() {
     drop(conn);
     let mut spec = fixture.spec_value();
     spec["tools"] = json!(["history_read"]);
+    spec["history_sessions"] = json!(["session-p"]);
     let lab = Arc::new(Lab::load(fixture.start(&spec).await.unwrap(), None).unwrap());
     let read = |input| lab.clone().tool("history_read", input);
-    let page = read(json!({"session":"session-p","from":"1970-01-01","to":"1970-01-01"}))
+    let page = read(json!({"from":"1970-01-01","to":"1970-01-01"}))
         .await
         .unwrap();
     assert_eq!(page.matches("\n\nref=").count(), 2, "{page}");
     assert!(
-        page.contains("2 more summaries match. Next: history_read {\"ref\":\"session-p:22-22\"}"),
+        page.contains("2 more summaries match. Next: history_read {\"ref\":\"22-22\"}"),
         "{page}"
     );
-    let first = read(json!({"ref":"session-p:30-30"})).await.unwrap();
+    let first = read(json!({"ref":"30-30"})).await.unwrap();
     assert!(first.chars().count() <= 16_000);
     let (head, next) = first
         .split_once("\n\nContinue this summary: history_read ")
         .unwrap();
     assert!(head.ends_with('\n'), "cut should be at the nearby line end");
     let next: Value = serde_json::from_str(next).unwrap();
-    assert_eq!(next, json!({"ref":"session-p:30-30","offset":15_851}));
+    assert_eq!(next, json!({"ref":"30-30","offset":15_851}));
     let rest = read(next).await.unwrap();
     assert_eq!(
         format!(
@@ -283,10 +457,10 @@ async fn lab_memory_blocks_locate_origins_by_ordinals_then_time_and_omit_unattri
     assert_eq!(
         cases,
         [
-            Some("origin: ref=session-p:1-4 date=1970-01-01 title=A frozen summary"),
-            Some("origin: ref=session-p:1-4 date=1970-01-01 title=A frozen summary and later"),
-            Some("origin: ref=session-p:5-8 date=1970-01-01 title=Second summary"),
-            Some("origin: ref=session-p:1-4 date=1970-01-01 title=A frozen summary"),
+            Some("origin: ref=s1:1-4 date=1970-01-01 title=A frozen summary"),
+            Some("origin: ref=s1:1-4 date=1970-01-01 title=A frozen summary and later"),
+            Some("origin: ref=s1:5-8 date=1970-01-01 title=Second summary"),
+            Some("origin: ref=s1:1-4 date=1970-01-01 title=A frozen summary"),
             None,
             None,
             None,
@@ -436,9 +610,9 @@ async fn submit_record_challenges_include_bounded_origins_and_newest_summaries_a
         .split("### Memory 10:")
         .next()
         .unwrap();
-    assert!(first.contains(
-        "Origin:\nref=session-p:1-4 date=1970-01-01 title=A frozen summary\nOrigin detail"
-    ));
+    assert!(
+        first.contains("Origin:\nref=s2:1-4 date=1970-01-01 title=A frozen summary\nOrigin detail")
+    );
     assert_eq!(
         first
             .split_once("\nOrigin detail ")
@@ -454,9 +628,11 @@ async fn submit_record_challenges_include_bounded_origins_and_newest_summaries_a
     let snippets = first.split_once("## Summaries\n").unwrap().1;
     assert_eq!(snippets.matches("Snippet:").count(), 2, "{snippets}");
     assert!(
-        snippets.lines().next().unwrap().contains(
-            "title=Newer decision date=1970-01-02 session=session-p2 ref=session-p2:50-50"
-        ),
+        snippets
+            .lines()
+            .next()
+            .unwrap()
+            .contains("title=Newer decision date=1970-01-02 ref=s1:50-50"),
         "{snippets}"
     );
     let second = answer(&replies, 1);

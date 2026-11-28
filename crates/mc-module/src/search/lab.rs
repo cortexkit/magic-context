@@ -169,8 +169,189 @@ fn limit(input: &Value, default: usize, max: usize) -> usize {
 pub(crate) struct History {
     project: String,
     sessions: Vec<HistorySession>,
-    skipped_session_ids: usize,
+    pub(crate) scope: HistoryScope,
     coverage: Mutex<messages::Coverage>,
+}
+
+pub(crate) struct HistoryScope {
+    sessions: BTreeMap<String, ScopeEntry>,
+    labelled: bool,
+    skipped: usize,
+}
+
+struct ScopeEntry {
+    number: usize,
+    harness: String,
+}
+
+impl HistoryScope {
+    fn load(conn: &Connection, project: &str, selected: Option<&[String]>) -> Result<Self, String> {
+        let mut query = conn
+            .prepare(
+                "SELECT p.session_id, COUNT(DISTINCT p.harness), MIN(p.harness), MIN(c.created_at)
+                   FROM session_projects p LEFT JOIN compartments c
+                     ON c.session_id = p.session_id AND c.harness = p.harness
+                  WHERE p.project_path = ?1 GROUP BY p.session_id",
+            )
+            .map_err(show)?;
+        let all = query
+            .query_map([project], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ),
+                ))
+            })
+            .map_err(show)?
+            .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+            .map_err(show)?;
+        let ordered = if let Some(selected) = selected {
+            let mut seen = BTreeSet::new();
+            for id in selected {
+                if !all.contains_key(id) {
+                    return Err(format!(
+                        "history session {id:?} does not belong to project {project:?}"
+                    ));
+                }
+                if !seen.insert(id) {
+                    return Err(format!("history_sessions lists {id:?} more than once"));
+                }
+            }
+            selected.iter().collect::<Vec<_>>()
+        } else {
+            let mut summarised = all
+                .iter()
+                .filter_map(|(id, (_, _, first))| Some((first.as_ref()?, id)))
+                .collect::<Vec<_>>();
+            summarised.sort_unstable();
+            summarised.into_iter().map(|(_, id)| id).collect()
+        };
+        let mut skipped = 0;
+        let mut sessions = BTreeMap::new();
+        for (index, id) in ordered.iter().enumerate() {
+            let (count, harness, _) = &all[*id];
+            // A bare stored ID can name two histories in this project. Neither
+            // one gets a reference because the date and range would not disambiguate them.
+            if *count != 1 {
+                skipped += 1;
+                continue;
+            }
+            let number = if selected.is_some() {
+                index + 1
+            } else {
+                sessions.len() + 1
+            };
+            sessions.insert(
+                (*id).clone(),
+                ScopeEntry {
+                    number,
+                    harness: harness.clone(),
+                },
+            );
+        }
+        let labelled = selected.map_or(sessions.len(), <[String]>::len) > 1;
+        Ok(Self {
+            sessions,
+            labelled,
+            skipped,
+        })
+    }
+
+    fn ordered(&self) -> Vec<(&String, &ScopeEntry)> {
+        let mut sessions: Vec<_> = self.sessions.iter().collect();
+        sessions.sort_unstable_by_key(|(_, entry)| entry.number);
+        sessions
+    }
+
+    pub(crate) fn report(&self) -> BTreeMap<String, &str> {
+        self.sessions
+            .iter()
+            .map(|(id, entry)| {
+                let label = if self.labelled {
+                    format!("s{}", entry.number)
+                } else {
+                    String::new()
+                };
+                (label, id.as_str())
+            })
+            .collect()
+    }
+
+    pub(crate) fn labels(&self) -> Option<Vec<String>> {
+        self.labelled.then(|| {
+            self.ordered()
+                .iter()
+                .map(|(_, entry)| format!("s{}", entry.number))
+                .collect()
+        })
+    }
+
+    pub(crate) fn legend(&self) -> Option<String> {
+        (self.labelled && !self.sessions.is_empty()).then(|| {
+            let mut legend = vec!["History session labels:".to_owned()];
+            for (_, entry) in self.ordered() {
+                let label = format!("s{}", entry.number);
+                if entry.harness.is_empty() {
+                    legend.push(label);
+                } else {
+                    legend.push(format!("{label}: {}", entry.harness));
+                }
+            }
+            legend.join("\n")
+        })
+    }
+
+    pub(crate) fn reference_form(&self) -> &'static str {
+        if self.labelled {
+            "<label>:<start>-<end>"
+        } else {
+            "<start>-<end>"
+        }
+    }
+
+    fn lookup(&self, label: Option<&str>) -> Option<&str> {
+        if !self.labelled {
+            return if label.is_none() {
+                self.sessions.keys().next().map(String::as_str)
+            } else {
+                None
+            };
+        }
+        let label = label?;
+        let number = label.strip_prefix('s')?.parse::<usize>().ok()?;
+        if label != format!("s{number}") {
+            return None;
+        }
+        self.sessions
+            .iter()
+            .find(|(_, entry)| entry.number == number)
+            .map(|(id, _)| id.as_str())
+    }
+
+    fn label_error(&self) -> String {
+        match self.labels() {
+            Some(labels) if !labels.is_empty() => format!("; valid labels: {}", labels.join(", ")),
+            Some(_) => "; no history session labels are available".into(),
+            None if self.sessions.is_empty() => "; no history session is available".into(),
+            None => "; no session label is used".into(),
+        }
+    }
+
+    fn reference(&self, session: &str, position: impl std::fmt::Display) -> Option<String> {
+        let entry = self.sessions.get(session)?;
+        Some(if self.labelled {
+            format!("s{}:{position}", entry.number)
+        } else {
+            position.to_string()
+        })
+    }
+
+    pub(crate) fn contains(&self, session: &str) -> bool {
+        self.sessions.contains_key(session)
+    }
 }
 
 struct HistorySession {
@@ -199,67 +380,45 @@ impl HistorySession {
 }
 
 impl History {
+    #[cfg(test)]
     pub(crate) fn load(
         conn: &Connection,
         project: &str,
         selected: Option<&[String]>,
     ) -> Result<Self, String> {
-        let mut query = conn
-            .prepare(
-                "SELECT session_id, COUNT(DISTINCT harness) FROM session_projects
-                  WHERE project_path = ?1 GROUP BY session_id",
-            )
-            .map_err(show)?;
-        let all = query
-            .query_map([project], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })
-            .map_err(show)?
-            .collect::<rusqlite::Result<BTreeMap<_, _>>>()
-            .map_err(show)?;
-        let mut sessions: Vec<_> = match selected {
-            Some(selected) => {
-                if let Some(unknown) = selected.iter().find(|id| !all.contains_key(*id)) {
-                    return Err(format!(
-                        "history session {unknown:?} does not belong to project {project:?}"
-                    ));
-                }
-                selected
-                    .iter()
-                    .cloned()
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect()
-            }
-            None => all.keys().cloned().collect(),
-        };
-        // A history hit is cited by its session id and a position in that
-        // session, with no harness in it. When two harnesses in this project
-        // share one session id, such a citation is ambiguous, so the id is
-        // left out of the search and counted.
-        let selected_count = sessions.len();
-        sessions.retain(|id| all[id] == 1);
-        let skipped_session_ids = selected_count - sessions.len();
-        let sessions = sessions
-            .into_iter()
-            .map(|id| HistorySession::load(conn, project, id))
-            .collect::<Result<_, _>>()?;
+        Self::for_lab(conn, project, selected, true)
+    }
+
+    pub(crate) fn for_lab(
+        conn: &Connection,
+        project: &str,
+        selected: Option<&[String]>,
+        searchable: bool,
+    ) -> Result<Self, String> {
+        let scope = HistoryScope::load(conn, project, selected)?;
         let mut coverage = messages::Coverage::default();
-        // Message search first screens the index for rows that have no entry
-        // in the row-id map, which costs a pass over the whole index. The
-        // store copy never changes, so do that pass once and reuse its
-        // result for every later query of this run.
-        coverage.for_snapshot(0);
+        let sessions = if searchable {
+            // The frozen index never changes; reuse the coverage scan across queries.
+            coverage.for_snapshot(0);
+            scope
+                .sessions
+                .keys()
+                .cloned()
+                .map(|id| HistorySession::load(conn, project, id))
+                .collect::<Result<_, _>>()?
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             project: project.to_owned(),
-            skipped_session_ids,
+            scope,
             sessions,
             coverage: Mutex::new(coverage),
         })
     }
 
     pub(crate) fn skipped_session_ids(&self) -> usize {
-        self.skipped_session_ids
+        self.scope.skipped
     }
 
     #[cfg(test)]
@@ -270,7 +429,7 @@ impl History {
         semantic: Option<sources::Semantic<'_>>,
     ) -> Result<String, String> {
         self.prepare(conn, input, semantic, None, false)
-            .map(PreparedHistory::render)
+            .map(|prepared| prepared.render(&self.scope))
     }
 
     pub(crate) fn prepare(
@@ -318,7 +477,7 @@ impl History {
         let mut people = Vec::new();
         let mut agents = Vec::new();
         let mut summaries = Vec::new();
-        let mut skipped = self.skipped_session_ids;
+        let mut skipped = self.scope.skipped;
         let mut coverage = self.coverage.lock().expect("lab history coverage");
         let probes = text::literal_probes(query);
         for session in &self.sessions {
@@ -430,26 +589,7 @@ impl History {
                 group.documents = group
                     .rerank_candidates
                     .iter()
-                    .map(|hit| {
-                        let session = hit.session.as_deref().unwrap_or("");
-                        if let Hit::Chunk(chunk) = &hit.hit {
-                            let location = format!(
-                                "compartment {} {session} @{}-{}",
-                                chunk.compartment_id, chunk.start, chunk.end
-                            );
-                            let body = summary_body(conn, chunk.compartment_id)?;
-                            Ok(rerank::candidate_text(&location, &chunk.title, &body))
-                        } else {
-                            Ok(rerank::candidate_texts(
-                                conn,
-                                session,
-                                project,
-                                std::slice::from_ref(&hit.hit),
-                            )
-                            .pop()
-                            .expect("one hit yields one document"))
-                        }
-                    })
+                    .map(|hit| hit.document(conn, project, &self.scope))
                     .collect::<Result<_, String>>()?;
             }
         }
@@ -463,7 +603,7 @@ pub(crate) struct PreparedHistory {
 }
 
 impl PreparedHistory {
-    pub(crate) fn render(self) -> String {
+    pub(crate) fn render(self, scope: &HistoryScope) -> String {
         let mut groups = Vec::new();
         if self.skipped != 0 {
             groups.push(format!("{} sessions skipped: ambiguous id", self.skipped));
@@ -474,14 +614,15 @@ impl PreparedHistory {
                 group.title,
                 group.hits.into_iter().take(group.limit),
                 now,
+                scope,
             ));
         }
         groups.join("\n\n")
     }
 
-    pub(crate) fn render_two_summaries(mut self) -> String {
+    pub(crate) fn render_two_summaries(mut self, scope: &HistoryScope) -> String {
         self.groups[0].limit = 2;
-        self.render()
+        self.render(scope)
     }
 }
 
@@ -670,10 +811,10 @@ impl crate::summary::dates::TimedMessages for IndexedTimes {
 }
 
 pub(crate) struct Timeline {
-    session: String,
     summaries: Vec<Summary>,
 }
 
+#[derive(Clone)]
 pub(crate) struct Summary {
     id: i64,
     start: i64,
@@ -756,10 +897,7 @@ impl Timeline {
             .map_err(show)?
             .collect::<rusqlite::Result<_>>()
             .map_err(show)?;
-        Ok(Some(Self {
-            session: session.to_owned(),
-            summaries,
-        }))
+        Ok(Some(Self { summaries }))
     }
 
     pub(crate) fn origin(&self, spans: &[(i64, i64)], created: i64) -> Option<Origin> {
@@ -801,34 +939,37 @@ impl Timeline {
                 (earlier, false)
             };
         Some(Origin {
-            id: summary.id,
-            label: summary.label(&self.session),
+            summary: summary.clone(),
             later,
         })
     }
 }
 
 pub(crate) struct Origin {
-    id: i64,
-    label: String,
+    summary: Summary,
     later: bool,
 }
 
 impl Origin {
-    pub(crate) fn label(&self) -> String {
+    pub(crate) fn label(&self, scope: &HistoryScope, session: &str) -> String {
         format!(
             "{}{}",
-            self.label,
+            self.summary.label(scope, session),
             if self.later { " and later" } else { "" }
         )
     }
 
-    pub(crate) fn render(&self, conn: &Connection) -> Result<String, String> {
-        let body = summary_body(conn, self.id)?;
+    pub(crate) fn render(
+        &self,
+        conn: &Connection,
+        scope: &HistoryScope,
+        session: &str,
+    ) -> Result<String, String> {
+        let body = summary_body(conn, self.summary.id)?;
         let (body, cut) = char_prefix(&body, 4_000);
         Ok(format!(
             "{}\n{body}{}",
-            self.label(),
+            self.label(scope, session),
             if cut {
                 "\n[origin text cut at 4,000 characters; use history_read for the rest]"
             } else {
@@ -839,17 +980,19 @@ impl Origin {
 }
 
 impl Summary {
-    fn reference(&self, session: &str) -> String {
-        format!("{session}:{}-{}", self.start, self.end)
+    fn reference(&self, scope: &HistoryScope, session: &str) -> String {
+        scope
+            .reference(session, format_args!("{}-{}", self.start, self.end))
+            .expect("summary is in the history scope")
     }
 
-    fn label(&self, session: &str) -> String {
+    fn label(&self, scope: &HistoryScope, session: &str) -> String {
         let days = self
             .days
             .map_or_else(|| "unknown".to_owned(), SummaryRange::render);
         format!(
             "ref={} date={days} title={}",
-            self.reference(session),
+            self.reference(scope, session),
             self.title.replace(['\r', '\n'], " ")
         )
     }
@@ -880,23 +1023,46 @@ fn char_prefix(text: &str, limit: usize) -> (&str, bool) {
 pub(crate) fn history_read(
     conn: &Connection,
     project: &str,
+    scope: &HistoryScope,
     input: &Value,
 ) -> Result<String, String> {
-    const SHAPE: &str =
-        "history_read needs a ref (optionally with offset), or session, from and to";
-    let object = input.as_object().ok_or(SHAPE)?;
+    let ref_error = || {
+        format!(
+            "history_read ref must name a stored summary as {}{}",
+            scope.reference_form(),
+            scope.label_error()
+        )
+    };
+    let shape_error = || {
+        format!(
+            "history_read needs ref {} (optionally with offset), or {}from and to{}",
+            scope.reference_form(),
+            if scope.labelled { "session, " } else { "" },
+            scope.label_error()
+        )
+    };
+    let object = input.as_object().ok_or_else(shape_error)?;
     let (session, exact, offset, dates) = if let Some(reference) = object.get("ref") {
         if object.keys().any(|key| key != "ref" && key != "offset") {
-            return Err(SHAPE.into());
+            return Err(shape_error());
         }
         let parse_ref = || {
-            let (session, range) = reference.as_str()?.rsplit_once(':')?;
+            let reference = reference.as_str()?.trim();
+            let (label, range) = reference
+                .split_once(':')
+                .map_or((None, reference), |(label, range)| (Some(label), range));
+            let session = scope.lookup(label)?;
             let (start, end) = range.split_once('-')?;
+            if ![start, end]
+                .iter()
+                .all(|n| n.bytes().all(|b| b.is_ascii_digit()))
+            {
+                return None;
+            }
             let (start, end) = (start.parse::<i64>().ok()?, end.parse::<i64>().ok()?);
-            (!session.is_empty() && start >= 0 && start <= end).then_some((session, (start, end)))
+            (start <= end).then_some((session, (start, end)))
         };
-        let (session, range) =
-            parse_ref().ok_or("history_read ref must be <session>:<start>-<end>")?;
+        let (session, range) = parse_ref().ok_or_else(ref_error)?;
         let offset = match object.get("offset") {
             None => 0,
             Some(value) => value
@@ -906,18 +1072,19 @@ pub(crate) fn history_read(
         };
         (session, Some(range), offset, None)
     } else {
-        if object.len() != 3 || !input["from"].is_string() || !input["to"].is_string() {
-            return Err(SHAPE.into());
+        if object.len() != 2 + usize::from(scope.labelled)
+            || !input["from"].is_string()
+            || !input["to"].is_string()
+        {
+            return Err(shape_error());
         }
-        let session = input["session"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or(SHAPE)?;
+        let session = scope
+            .lookup(input["session"].as_str())
+            .ok_or_else(shape_error)?;
         (session, None, 0, super::date_range(input)?)
     };
-    let timeline = Timeline::load_mapped(conn, project, session, false)?.ok_or_else(|| {
-        format!("history_read session {session:?} does not belong to this project with an unambiguous id")
-    })?;
+    let timeline = Timeline::load_mapped(conn, project, session, false)?
+        .ok_or("history_read could not resolve the session in the frozen store")?;
     let matches = timeline
         .summaries
         .iter()
@@ -926,14 +1093,19 @@ pub(crate) fn history_read(
                 && dates.is_none_or(|range| s.dates_match(range))
         })
         .collect::<Vec<_>>();
-    if exact.is_some() && matches.len() > 1 {
-        return Err("history_read ref matches multiple stored summaries".into());
+    if exact.is_some() {
+        match matches.len() {
+            0 => return Err(ref_error()),
+            1 => {}
+            _ => return Err("history_read ref matches multiple stored summaries".into()),
+        }
     }
-    render_read(conn, session, &matches, offset)
+    render_read(conn, scope, session, &matches, offset)
 }
 
 fn render_read(
     conn: &Connection,
+    scope: &HistoryScope,
     session: &str,
     matches: &[&Summary],
     offset: usize,
@@ -944,7 +1116,7 @@ fn render_read(
             format!(
                 "\n\n{} more summaries match. Next: history_read {}",
                 matches.len() - shown,
-                serde_json::json!({"ref":next.reference(session)})
+                serde_json::json!({"ref":next.reference(scope, session)})
             )
         })
     };
@@ -953,7 +1125,7 @@ fn render_read(
         let header = format!(
             "{}{}\n",
             if index == 0 { "" } else { "\n\n" },
-            summary.label(session)
+            summary.label(scope, session)
         );
         let body = summary_body(conn, summary.id)?;
         let start = if offset == 0 {
@@ -979,7 +1151,7 @@ fn render_read(
             let next = |at| {
                 format!(
                     "\n\nContinue this summary: history_read {}",
-                    serde_json::json!({"ref":summary.reference(session), "offset":at})
+                    serde_json::json!({"ref":summary.reference(scope, session), "offset":at})
                 )
             };
             let room = room.saturating_sub(next(offset.saturating_add(CAP)).chars().count());
@@ -1209,27 +1381,85 @@ impl Evidence {
         (self.session.clone(), key)
     }
 
-    fn render(self, index: usize, now: i64) -> String {
-        let session = self.session.as_deref().unwrap_or("");
-        let reference = match &self.hit {
-            Hit::Commit(hit) => format!(" ref={}", hit.sha),
-            Hit::Message(hit) => {
-                format!(" session={session} ref={session}:{}", hit.number)
-            }
+    fn reference(&self, scope: &HistoryScope) -> String {
+        let session = || {
+            self.session
+                .as_deref()
+                .expect("a history hit has a session")
+        };
+        match &self.hit {
+            Hit::Commit(hit) => return hit.sha.clone(),
+            Hit::Message(hit) => scope.reference(session(), hit.number),
             Hit::Chunk(hit) => {
-                format!(" session={session} ref={session}:{}-{}", hit.start, hit.end)
+                scope.reference(session(), format_args!("{}-{}", hit.start, hit.end))
             }
             _ => unreachable!("only history sources were collected"),
-        };
+        }
+        .expect("a history hit is in scope")
+    }
+
+    fn document(
+        &self,
+        conn: &Connection,
+        project: &str,
+        scope: &HistoryScope,
+    ) -> Result<String, String> {
+        match &self.hit {
+            Hit::Chunk(hit) => Ok(rerank::candidate_text(
+                &format!("compartment {}", self.reference(scope)),
+                &hit.title,
+                &summary_body(conn, hit.compartment_id)?,
+            )),
+            Hit::Message(hit) => {
+                let body: Option<String> = conn
+                    .query_row(
+                        "SELECT f.content FROM message_fts_rowid_map m
+                       JOIN message_history_fts f ON f.rowid = m.fts_rowid
+                      WHERE m.session_id = ?1 AND m.message_ordinal = ?2 AND f.message_id = ?3",
+                        params![self.session, hit.number, hit.message_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten();
+                let body = body.as_deref().unwrap_or(&hit.content);
+                let first_line = body.split('\n').next().unwrap_or("");
+                Ok(rerank::candidate_text(
+                    &format!("message {}", self.reference(scope)),
+                    &format!("{}: {first_line}", hit.role),
+                    body,
+                ))
+            }
+            Hit::Commit(_) => {
+                Ok(
+                    rerank::candidate_texts(conn, "", project, std::slice::from_ref(&self.hit))
+                        .pop()
+                        .expect("one hit yields one document"),
+                )
+            }
+            _ => unreachable!("only history sources were collected"),
+        }
+    }
+
+    fn render(self, index: usize, now: i64, scope: &HistoryScope) -> String {
+        let reference = self.reference(scope);
         let date = match self.date {
             EvidenceDate::Instant(at) => format_date(at),
             EvidenceDate::Range(range) => {
                 range.map_or_else(|| "unknown".to_owned(), SummaryRange::render)
             }
         };
-        let block = super::format_hit(&self.hit, index, session, now);
+        if let Hit::Chunk(hit) = &self.hit {
+            let snippet = hit
+                .snippet
+                .as_deref()
+                .map_or_else(|| text::preview(&hit.title), |s| format!("Snippet: {s}"));
+            return format!("[{index}] [message] score={:.2} match={} title={} date={date} ref={reference}\n{snippet}",
+                hit.score, hit.match_type, hit.title);
+        }
+        let block = super::format_hit(&self.hit, index, "", now);
         let (head, text) = block.split_once('\n').unwrap_or((&block, ""));
-        format!("{head} date={date}{reference}\n{text}")
+        format!("{head} date={date} ref={reference}\n{text}")
     }
 }
 
@@ -1259,10 +1489,15 @@ fn rank_across_sessions(hits: &mut Vec<Evidence>, newest: bool) {
     hits.retain(|hit| seen.insert(hit.identity()));
 }
 
-fn render_group(title: &str, hits: impl Iterator<Item = Evidence>, now: i64) -> String {
+fn render_group(
+    title: &str,
+    hits: impl Iterator<Item = Evidence>,
+    now: i64,
+    scope: &HistoryScope,
+) -> String {
     let blocks: Vec<_> = hits
         .enumerate()
-        .map(|(n, hit)| hit.render(n + 1, now))
+        .map(|(n, hit)| hit.render(n + 1, now, scope))
         .collect();
     if blocks.is_empty() {
         format!("## {title}\nnone")
@@ -1344,16 +1579,11 @@ mod tests {
                     answer
                         .lines()
                         .filter_map(|line| {
-                            let (_, fields) = line.split_once("score=0.80 compartment_id=")?;
+                            let (_, fields) = line.split_once(" ref=")?;
+                            assert!(line.contains("score=0.80"), "{line}");
                             assert!(line.contains(&format!("match={kind}")), "{line}");
-                            Some(
-                                fields
-                                    .split_whitespace()
-                                    .next()
-                                    .unwrap()
-                                    .parse::<i64>()
-                                    .unwrap(),
-                            )
+                            let range = fields.rsplit_once(':').map_or(fields, |(_, range)| range);
+                            Some(range.split_once('-').unwrap().0.parse::<i64>().unwrap())
                         })
                         .collect::<Vec<_>>()
                 };
@@ -1433,12 +1663,9 @@ mod tests {
                 Some(semantic),
             )
             .unwrap();
-        assert_eq!(answer.matches("compartment_id=").count(), 1, "{answer}");
+        assert_eq!(answer.matches(" ref=").count(), 1, "{answer}");
         assert!(answer.contains("match=semantic"), "{answer}");
-        assert!(
-            answer.contains("date=1970-01-02 session=s ref=s:15-17"),
-            "{answer}"
-        );
+        assert!(answer.contains("date=1970-01-02 ref=15-17"), "{answer}");
     }
 
     #[test]
@@ -1455,9 +1682,9 @@ mod tests {
                  INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content)
                      VALUES ('legacy', 9, 'legacy-id', 'user', 'unmappedterm legacy text');",
             ).unwrap();
-            let history = History::load(conn, "p", None).unwrap();
+             let history = History::load(conn, "p", Some(&["legacy".into()])).unwrap();
             let undated = history.search(conn, &serde_json::json!({"query":"unmappedterm"}), None).unwrap();
-            assert!(undated.contains("date=unknown session=legacy ref=legacy:9"), "{undated}");
+             assert!(undated.contains("date=unknown ref=9"), "{undated}");
             let dated = history.search(conn, &serde_json::json!({"query":"unmappedterm", "from":"1970-01-01"}), None).unwrap();
             assert!(dated.contains("## The person's messages\nnone"), "{dated}");
         });

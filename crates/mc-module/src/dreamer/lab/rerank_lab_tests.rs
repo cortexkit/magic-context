@@ -63,7 +63,7 @@ async fn lab_history_reranks_each_relevance_group_but_not_newest_or_disabled_sea
             .lines()
             .next()
             .unwrap()
-            .ends_with("ref=session-p2:1-4"),
+            .ends_with("ref=s2:1-4"),
         "{reranked}"
     );
     assert!(
@@ -71,7 +71,7 @@ async fn lab_history_reranks_each_relevance_group_but_not_newest_or_disabled_sea
             .lines()
             .next()
             .unwrap()
-            .ends_with("ref=session-p:12"),
+            .ends_with("ref=s1:12"),
         "{reranked}"
     );
     let newest = search(json!({"query":QUERY,"order":"newest"}))
@@ -82,7 +82,7 @@ async fn lab_history_reranks_each_relevance_group_but_not_newest_or_disabled_sea
             .lines()
             .next()
             .unwrap()
-            .ends_with("ref=session-p:1-4"),
+            .ends_with("ref=s1:1-4"),
         "{newest}"
     );
     search(json!({"query":"sharedterm"})).await.unwrap();
@@ -121,7 +121,7 @@ async fn lab_history_reranks_each_relevance_group_but_not_newest_or_disabled_sea
             .lines()
             .next()
             .unwrap()
-            .ends_with("ref=session-p:1-4"),
+            .ends_with("ref=s1:1-4"),
         "{disabled}"
     );
     assert_eq!(requests.lock().unwrap().len(), 3);
