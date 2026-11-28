@@ -20,7 +20,7 @@ function manifestWith(entries: ModeManifest["entries"]): ModeManifest {
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(259);
+        expect(validation.files.length).toBe(263);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -31,7 +31,7 @@ describe("mode manifest validator", () => {
     it("derives separate TS and Rust invocation lists", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
-        expect(ts).toHaveLength(142);
+        expect(ts).toHaveLength(146);
         expect(rust).toHaveLength(60);
         expect(rust).toContain("tests/rust-compaction-marker-catchup.test.ts");
         expect(rust).toContain("tests/rust-tool-attachments.test.ts");
@@ -39,7 +39,7 @@ describe("mode manifest validator", () => {
         expect(rust).toContain("tests/idle-ttl-restart.test.ts");
         expect(rust).toContain("tests/subagent-behavior.test.ts");
         expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(9);
-        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(50);
+        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(51);
         expect(filesForMode(validation, "ts", "opencode")).toContain("tests/wrapup-next-message.test.ts");
         expect(rust).not.toContain("tests/wrapup-next-message.test.ts");
         expect(filesForMode(validation, "ts", "opencode")).toContain("tests/processed-images.test.ts");
@@ -53,8 +53,8 @@ describe("mode manifest validator", () => {
         expect(rust).not.toContain("tests/opencode2/latest-turn-thinking-recovery.test.ts");
         expect(ts).toContain("tests/reasoning-token-budget.test.ts");
         expect(rust).not.toContain("tests/reasoning-token-budget.test.ts");
-        expect(filesForMode(validation, "ts", "pi")).toHaveLength(36);
-        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(101);
+        expect(filesForMode(validation, "ts", "pi")).toHaveLength(37);
+        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(104);
         // These OpenCode 2 files are ts-only with hosts ["opencode2"], so only the
         // OpenCode 2 host lane runs them; the other host lanes never select them.
         for (const path of [
