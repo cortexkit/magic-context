@@ -1312,8 +1312,8 @@ impl run_ends::Cursor for RunEndCursor {
 
 impl RunEndCursor {
     fn connection_lost(&self) -> bool {
-        self.binding.connection.client().connection_state()
-            != async_nats::connection::State::Connected
+        *self.binding.connection.connection_state().borrow()
+            != cortexkit_bus_nats::NatsConnectionState::Connected
     }
 
     /// Retry a failed pull immediately if its connection was replaced.

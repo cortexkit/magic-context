@@ -129,19 +129,29 @@ mod tests {
     async fn two_retirements_close_at_their_own_deadlines() {
         let retirements = Retirements::new();
         let start = Instant::now();
-        let first = observe_close(&retirements, Duration::from_secs(60));
+        let (close_first, first) = oneshot::channel();
+        let (release_first, first_released) = oneshot::channel();
+        retirements.defer(Duration::from_secs(60), move |_| async move {
+            close_first.send(Instant::now()).unwrap();
+            first_released.await.unwrap();
+        });
         tokio::time::sleep(Duration::from_secs(1)).await;
         let second_started = Instant::now();
         let mut second = observe_close(&retirements, Duration::from_secs(60));
-        assert_eq!(first.await.unwrap().0, start + Duration::from_secs(4));
+        assert_eq!(first.await.unwrap(), start + Duration::from_secs(4));
         assert!(matches!(
             second.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
         assert_eq!(
-            second.await.unwrap().0,
+            tokio::time::timeout(Duration::from_secs(2), second)
+                .await
+                .expect("the second close does not wait for the first one to finish")
+                .unwrap()
+                .0,
             second_started + Duration::from_secs(4)
         );
+        release_first.send(()).unwrap();
     }
 
     #[tokio::test(start_paused = true)]

@@ -469,3 +469,31 @@ async fn a_slow_handoff_warns_once_even_while_the_snapshot_is_pending() {
     handoff.await.unwrap().unwrap();
     assert_eq!(log.count(warning), 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn an_ended_marker_forgets_the_current_session_before_sleeping() {
+    let test_bus = TestBus::new();
+    test_bus.kv.put(KEY, marker(1)).await.unwrap();
+    let bus = test_bus.bus();
+    let state = Arc::new(WatchState::default());
+    let callback = Arc::new(tokio::sync::Notify::new());
+    let _watch = spawn_marker(bus.clone(), state.clone(), KEY, {
+        let callback = callback.clone();
+        move || callback.notify_one()
+    });
+    callback.notified().await;
+    assert!(state.is_up());
+    test_bus.cut_watches();
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert!(!state.is_up());
+    assert!(
+        !bus.is_connected(),
+        "the marker must forget the failed current session"
+    );
+    assert!(bus.generations().borrow().is_none());
+    assert_eq!(
+        test_bus.opened.load(Ordering::Relaxed),
+        1,
+        "marker is backing off"
+    );
+}

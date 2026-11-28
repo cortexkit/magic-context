@@ -537,14 +537,20 @@ async fn a_failed_ack_on_the_current_binding_is_an_outage() {
     let mut reader = bind_reader(&bus).await;
     publish_run_end(&jetstream, "lost-ack").await;
     assert!(reader.next().await.unwrap().is_some());
+    let mut socket = reader.binding.connection.connection_state();
     reader
         .binding
         .connection
         .close(Duration::from_secs(1))
         .await
         .unwrap();
+    closed(&mut socket, Duration::from_secs(15)).await;
     assert_eq!(reader.ack().await.unwrap_err(), "nats_ack_failed");
     assert_eq!(reader.binding.generation, 1);
+    assert!(
+        bus.session.lock().await.is_none(),
+        "a failed ack forgets the lost current session"
+    );
 }
 
 #[tokio::test]
@@ -715,6 +721,7 @@ async fn a_failed_pull_on_the_current_binding_is_an_outage() {
         Some(PausedPull { waiting, resume }),
     ));
     let mut reader = bind_reader(&bus).await;
+    let mut socket = reader.binding.connection.connection_state();
     let pull = reader.next();
     tokio::pin!(pull);
     tokio::select! {
@@ -723,8 +730,13 @@ async fn a_failed_pull_on_the_current_binding_is_an_outage() {
         entered = entered => entered.unwrap(),
     }
     fail_pull.send(()).unwrap();
-    assert_eq!(pull.await.err().as_deref(), Some("nats_pull_failed"));
     peer.await.unwrap();
+    closed(&mut socket, Duration::from_secs(15)).await;
+    assert_eq!(pull.await.err().as_deref(), Some("nats_pull_failed"));
+    assert!(
+        bus.session.lock().await.is_none(),
+        "a failed pull forgets the lost current session"
+    );
 }
 
 #[tokio::test]
@@ -743,6 +755,11 @@ async fn shutdown_expedites_retirement_without_waiting_for_the_current_guard() {
         .unwrap();
     assert_eq!(*first.borrow_and_update(), NatsConnectionState::Closed);
     assert!(current.connection.is_some());
+    drop(current);
+    assert_eq!(
+        bus.session().await.err().as_deref(),
+        Some("bus_shutting_down")
+    );
 }
 
 struct ClosedWatchProbe {
