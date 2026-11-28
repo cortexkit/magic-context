@@ -232,7 +232,7 @@ struct Entry {
 impl Entry {
     fn check(&self, ids: &[i64]) -> Result<(), String> {
         if !ids.contains(&self.id) {
-            return Err(format!("unknown memory id {}", self.id));
+            return Err(format!("memory {} is outside the set", self.id));
         }
         match (self.verdict, self.into) {
             (Verdict::Merge, Some(id)) if id > 0 && id != self.id => {}

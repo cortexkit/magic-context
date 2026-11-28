@@ -7,6 +7,8 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
 use crate::search::lab::{HistoryScope, Origin, Timeline};
 
+use super::Spec;
+
 pub(super) fn open(path: &Path) -> Result<Connection, String> {
     let path = path.to_str().ok_or("store path must be UTF-8")?;
     // An immutable SQLite backup needs no writable sidecars. Refuse a loose
@@ -40,12 +42,118 @@ pub(super) struct Memories {
     pub origins_outside_scope: usize,
 }
 
+#[derive(Default)]
+pub(super) struct Related(BTreeMap<i64, RelatedMemory>);
+
+struct RelatedMemory {
+    category: String,
+    created: i64,
+    content: String,
+}
+
+impl Related {
+    pub(super) fn load(spec: &Spec, deadline: Instant) -> Result<Self, String> {
+        if spec.related.values().all(Vec::is_empty) {
+            return Ok(Self::default());
+        }
+        let conn = open(&spec.store)?;
+        search_with_limit(
+            &conn,
+            deadline.saturating_duration_since(Instant::now()),
+            super::VALIDATION_TIMEOUT,
+            |conn| {
+                let mut entries = BTreeMap::new();
+                let owners = workspace_owners(conn, &spec.project)?;
+                let mut memory = conn.prepare(
+                "SELECT level, owner_id, category, created_at, content FROM memories WHERE id = ?1",
+            ).map_err(|e| format!("reading related memories: {e}"))?;
+                for &id in spec.related.values().flatten() {
+                    let std::collections::btree_map::Entry::Vacant(entry) = entries.entry(id)
+                    else {
+                        continue;
+                    };
+                    let row = memory
+                        .query_row([id], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                RelatedMemory {
+                                    category: row.get(2)?,
+                                    created: row.get(3)?,
+                                    content: row.get(4)?,
+                                },
+                            ))
+                        })
+                        .optional()
+                        .map_err(|e| format!("reading related memory {id}: {e}"))?;
+                    let memory = row.filter(|(level, owner, _)| {
+                    (level == "project" && owner == &spec.project) || (level == "workspace" && owners.contains(owner))
+                }).map(|(_, _, memory)| memory).ok_or_else(|| {
+                    format!("related memory {id} does not exist in the frozen store for project {:?} or its workspace", spec.project)
+                })?;
+                    entry.insert(memory);
+                }
+                Ok(Self(entries))
+            },
+        )
+    }
+
+    fn render(
+        &self,
+        text: &mut String,
+        judged: i64,
+        ids: &[i64],
+        first_shown: &mut BTreeMap<i64, i64>,
+    ) {
+        if ids.is_empty() {
+            return;
+        }
+        writeln!(text, "Related memories outside your set:").expect("a string is writable");
+        for id in ids {
+            if let Some(parent) = first_shown.get(id) {
+                writeln!(text, "#{id} (shown under memory {parent})")
+                    .expect("a string is writable");
+            } else {
+                first_shown.insert(*id, judged);
+                let RelatedMemory {
+                    category,
+                    created,
+                    content,
+                } = &self.0[id];
+                let day = chrono::DateTime::from_timestamp_millis(*created)
+                    .map_or_else(|| created.to_string(), |dt| dt.date_naive().to_string());
+                writeln!(text, "#{id} {category} ({day}): {content}")
+                    .expect("a string is writable");
+            }
+        }
+        text.push('\n');
+    }
+}
+
+fn workspace_owners(conn: &Connection, project: &str) -> Result<Vec<String>, String> {
+    let error = |e| format!("reading frozen workspace membership: {e}");
+    let has_members: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_members')",
+        [], |row| row.get(0),
+    ).map_err(error)?;
+    if !has_members {
+        return Ok(Vec::new());
+    }
+    conn.prepare("SELECT CAST(workspace_id AS TEXT) FROM workspace_members WHERE project_path = ?1")
+        .map_err(error)?
+        .query_map([project], |row| row.get(0))
+        .map_err(error)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(error)
+}
+
 pub(super) fn memories(
     conn: &Connection,
-    project: &str,
-    ids: &[i64],
+    spec: &Spec,
     scope: &HistoryScope,
+    related: &Related,
 ) -> Result<Memories, String> {
+    let project = &spec.project;
     let mut memory = conn
         .prepare(
             "SELECT category, created_at, source_type, importance, verified_at, content,
@@ -60,7 +168,8 @@ pub(super) fn memories(
     let mut timelines = HashMap::new();
     let mut origins = BTreeMap::new();
     let mut origins_outside_scope = 0;
-    for &id in ids {
+    let mut first_shown = BTreeMap::new();
+    for &id in &spec.memory_ids {
         let row = memory
             .query_row(params![id, project], |row| {
                 Ok((
@@ -120,6 +229,9 @@ pub(super) fn memories(
             }
         }
         writeln!(text, "\n{content}\n").expect("a string is writable");
+        if let Some(ids) = spec.related.get(&id) {
+            related.render(&mut text, id, ids, &mut first_shown);
+        }
     }
     Ok(Memories {
         text,

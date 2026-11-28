@@ -11,6 +11,7 @@ use crate::dreamer::run::tests::{Client, Ends};
 
 #[path = "history_tools_tests.rs"]
 mod history_tools;
+mod related_tests;
 #[path = "rerank_lab_tests.rs"]
 mod rerank_lab;
 
@@ -278,7 +279,7 @@ async fn scripted_lab_records_verdicts_and_request_with_only_attribution_in_the_
     assert!(calls[1]["content"][0]["text"]
         .as_str()
         .unwrap()
-        .contains("unknown memory id 7000"));
+        .contains("memory 7000 is outside the set"));
     assert_eq!(
         client.lab_verdicts_after.lock().unwrap()[1],
         json!([verdict(2, "valid replacement")])

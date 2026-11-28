@@ -138,6 +138,7 @@ pub(crate) struct Lab {
 pub(crate) struct Start {
     spec: Spec,
     live: PathBuf,
+    related: frozen::Related,
     permit: Option<Permit>,
 }
 
@@ -155,6 +156,7 @@ impl Start {
                     .await
                     .map_err(|_| VALIDATION_TIMEOUT.to_owned())?
             })?;
+            let related = frozen::Related::load(&spec, deadline.into())?;
             if tokio::time::Instant::now() >= deadline {
                 return Err(VALIDATION_TIMEOUT.into());
             }
@@ -163,6 +165,7 @@ impl Start {
             Ok(Self {
                 spec,
                 live,
+                related,
                 permit: Some(permit),
             })
         })
@@ -317,7 +320,12 @@ async fn validate_with_limit<T: Send + 'static>(
 
 impl Lab {
     fn load(start: Start, embedding: Option<crate::embedding::Provider>) -> Result<Self, String> {
-        let Start { spec, live, .. } = start;
+        let Start {
+            spec,
+            live,
+            related,
+            ..
+        } = start;
         if spec.tools.contains(&Tool::Sidekick) {
             WorkerScope::check_project_id(&spec.project).map_err(|error| error.to_string())?;
         }
@@ -329,7 +337,7 @@ impl Lab {
             spec.history_sessions.as_deref(),
             searches_history(&spec),
         )?;
-        let memories = frozen::memories(&store, &spec.project, &spec.memory_ids, &history.scope)?;
+        let memories = frozen::memories(&store, &spec, &history.scope, &related)?;
         let context = spec.context()?;
         let persona = persona::Persona::load(&spec, &live)?;
         let tools = tool_definitions(&spec, &history.scope)?;

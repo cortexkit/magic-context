@@ -16,6 +16,8 @@ pub(super) struct Spec {
     pub store: PathBuf,
     pub checkouts: BTreeMap<String, PathBuf>,
     pub memory_ids: Vec<i64>,
+    #[serde(default)]
+    pub related: BTreeMap<i64, Vec<i64>>,
     pub history_sessions: Option<Vec<String>>,
     pub persona_dir: PathBuf,
     pub context_files: Vec<ContextFile>,
@@ -90,10 +92,23 @@ impl Spec {
         if spec.memory_ids.is_empty() || spec.memory_ids.len() > 5000 {
             return Err("memory_ids must contain between 1 and 5000 ids".into());
         }
-        if spec.memory_ids.iter().any(|id| *id <= 0)
-            || spec.memory_ids.iter().collect::<BTreeSet<_>>().len() != spec.memory_ids.len()
-        {
+        let judged: BTreeSet<_> = spec.memory_ids.iter().copied().collect();
+        if judged.first().is_some_and(|id| *id <= 0) || judged.len() != spec.memory_ids.len() {
             return Err("memory_ids must be positive and distinct".into());
+        }
+        for (id, related) in &spec.related {
+            if !judged.contains(id) {
+                return Err(format!("related: memory {id} is not in memory_ids"));
+            }
+            if related.len() > 8 {
+                return Err(format!(
+                    "related: memory {id} lists {} related memories (at most 8)",
+                    related.len()
+                ));
+            }
+            if let Some(in_set) = related.iter().find(|id| judged.contains(id)) {
+                return Err(format!("related: memory {in_set} is in memory_ids and cannot be listed under memory {id}"));
+            }
         }
         if spec.context_files.len() > 64 {
             return Err("context_files may contain at most 64 files".into());
