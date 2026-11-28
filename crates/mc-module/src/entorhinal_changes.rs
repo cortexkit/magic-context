@@ -171,7 +171,7 @@ impl WatchState {
 }
 
 /// Capture the watch's binding under the session lock. Release it before
-/// reading the bucket so publishers and the run-end reader can use the bus.
+/// reading the bucket so the module's other bus users can publish and read meanwhile.
 async fn open(bus: &Bus, key: &str) -> Result<(Box<dyn RegisterWatch>, u64), WatchFailure> {
     let attempted = bus.generation();
     let (bucket, generation) = {
