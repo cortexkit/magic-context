@@ -79,6 +79,18 @@ pub(super) enum Route {
 }
 
 impl Spec {
+    pub(super) fn single_checkout(&self) -> Option<&Path> {
+        if self.checkouts.len() == 1 {
+            self.checkouts.values().next().map(PathBuf::as_path)
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn session_root(&self) -> &Path {
+        self.single_checkout().unwrap_or(&self.root)
+    }
+
     // These checks are snapshots, not handles: only a process of the same
     // user may start the lab, and that user can already change these files.
     pub(super) async fn load(path: &Path, live: &Path) -> Result<Self, String> {

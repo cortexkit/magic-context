@@ -197,6 +197,10 @@ impl Start {
         let permit = Arc::new(self.permit.take());
         let out = self.spec.out_dir.clone();
         let ids = self.spec.memory_ids.clone();
+        let session_binding = json!({
+            "root": self.spec.session_root(),
+            "reason": if self.spec.single_checkout().is_some() { "single checkout" } else { "multiple checkouts; use the lab root" },
+        });
         let mut observed = Observed::default();
         let mut loaded = None;
         let outcome = tokio::time::timeout_at(deadline, async {
@@ -269,6 +273,7 @@ impl Start {
                 (stop, error)
             };
             let mut result = observed.result(stop, missing, error, start.elapsed().as_millis());
+            result["session_binding"] = session_binding;
             result["history_session_map"] = history_session_map;
             result["origins_outside_scope"] = json!(origins_outside_scope);
             if let Some(skipped) = history_session_ids_skipped {
@@ -367,9 +372,9 @@ impl Lab {
     ) -> Result<(), run::LabEnd> {
         let root = self
             .spec
-            .root
+            .session_root()
             .to_str()
-            .ok_or_else(|| run::LabEnd::Refused("root must be UTF-8".into()))?;
+            .ok_or_else(|| run::LabEnd::Refused("session root must be UTF-8".into()))?;
         let reader = if self.spec.tools.contains(&Tool::Reader) {
             Some(
                 plan::select_reader(client, root)
@@ -477,15 +482,19 @@ impl Lab {
             }
             providers.insert(plan::SIDEKICK_PROVIDER, composition_tools(vec![sidekick]));
             tool_items.push(plan::sidekick_item());
-            self.spec
-                .checkouts
-                .values()
-                .map(|path| {
-                    path.to_str().map(str::to_owned).ok_or_else(|| {
-                        format!("sidekick checkout path must be UTF-8: {}", path.display())
+            if self.spec.single_checkout().is_some() {
+                Vec::new()
+            } else {
+                self.spec
+                    .checkouts
+                    .values()
+                    .map(|path| {
+                        path.to_str().map(str::to_owned).ok_or_else(|| {
+                            format!("sidekick checkout path must be UTF-8: {}", path.display())
+                        })
                     })
-                })
-                .collect::<Result<Vec<_>, _>>()?
+                    .collect::<Result<Vec<_>, _>>()?
+            }
         } else {
             Vec::new()
         };
@@ -620,13 +629,24 @@ impl Lab {
         }
         match name {
             "git_read" => {
+                let single = self.spec.single_checkout();
+                if single.is_some() && input.get("checkout").is_some() {
+                    return Err("git_read uses the session checkout; omit checkout".into());
+                }
                 let request: git::Request =
                     serde_json::from_value(input).map_err(|e| format!("git_read: {e}"))?;
-                let root = self
-                    .spec
-                    .checkouts
-                    .get(&request.checkout)
-                    .ok_or_else(|| format!("unknown checkout {:?}", request.checkout))?;
+                let root = if let Some(root) = single {
+                    root
+                } else {
+                    let checkout = request
+                        .checkout
+                        .as_deref()
+                        .ok_or("git_read requires checkout when a lab has several checkouts")?;
+                    self.spec
+                        .checkouts
+                        .get(checkout)
+                        .ok_or_else(|| format!("unknown checkout {checkout:?}"))?
+                };
                 request.read(root).await
             }
             "submit" => self.submit(input).await,
@@ -951,14 +971,20 @@ fn tool_definitions(spec: &Spec, scope: &HistoryScope) -> Result<Vec<Value>, Str
         Ok(())
     };
     if spec.tools.contains(&Tool::GitRead) {
-        add("git_read", "Read local Git history in a named lab checkout. Omitted refs default to HEAD except diff (two refs) and ls-files (none).",
-            json!({"type":"object","additionalProperties":false,"required":["checkout","command"],"properties":{
-                "checkout":{"type":"string","enum":spec.checkouts.keys().collect::<Vec<_>>(),"description":"Name of the lab checkout to read, from the listed choices."},
-                "command":{"type":"string","enum":git::commands().collect::<Vec<_>>(),"description":"Git subcommand to run, from the listed choices."},
-                "refs":{"type":"array","items":{"type":"string"},"description":"List of local commit refs, such as branch names, tags or commit IDs."},
-                "paths":{"type":"array","items":{"type":"string"},"description":"Literal paths relative to the checkout; blame takes one path."},
-                "options":{"type":"array","items":{"type":"string","enum":git::options()},"description":"List of literal Git flags allowed for the chosen subcommand."}
-            }}), true)?;
+        let mut schema = json!({"type":"object","additionalProperties":false,"required":["command"],"properties":{
+            "command":{"type":"string","enum":git::commands().collect::<Vec<_>>(),"description":"Git subcommand to run, from the listed choices."},
+            "refs":{"type":"array","items":{"type":"string"},"description":"List of local commit refs, such as branch names, tags or commit IDs."},
+            "paths":{"type":"array","items":{"type":"string"},"description":"Literal paths relative to the checkout; blame takes one path."},
+            "options":{"type":"array","items":{"type":"string","enum":git::options()},"description":"List of literal Git flags allowed for the chosen subcommand."}
+        }});
+        let description = if spec.single_checkout().is_some() {
+            "Read local Git history in the session's project. Omitted refs default to HEAD except diff (two refs) and ls-files (none)."
+        } else {
+            schema["required"] = json!(["checkout", "command"]);
+            schema["properties"]["checkout"] = json!({"type":"string","enum":spec.checkouts.keys().collect::<Vec<_>>(),"description":"Name of the lab checkout to read, from the listed choices."});
+            "Read local Git history in a named lab checkout. Omitted refs default to HEAD except diff (two refs) and ls-files (none)."
+        };
+        add("git_read", description, schema, true)?;
     }
     if spec.tools.contains(&Tool::MemorySearch) {
         add(

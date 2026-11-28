@@ -12,7 +12,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Request {
-    pub checkout: String,
+    pub checkout: Option<String>,
     command: String,
     #[serde(default)]
     refs: Vec<String>,

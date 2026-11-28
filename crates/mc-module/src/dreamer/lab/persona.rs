@@ -82,7 +82,7 @@ impl Persona {
         memories_text: &str,
     ) -> Result<(String, String), String> {
         context.tools = GrantMap(tools.clone());
-        if !checkout_paths.is_empty() {
+        if tools.get("sidekick") == Some(&true) {
             context = context.with_root(
                 "checkout_paths",
                 cortexkit_persona::Value::list(

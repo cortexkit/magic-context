@@ -306,7 +306,7 @@ async fn scripted_lab_records_verdicts_and_request_with_only_attribution_in_the_
     let sends = client.sends.lock().unwrap();
     assert_eq!(sends.len(), 1);
     let (child, sent) = &sends[0];
-    assert_eq!(child.project_root.as_deref(), fixture.root.to_str());
+    assert_eq!(child.project_root.as_deref(), fixture.checkout.to_str());
     assert_eq!(request["first_message"].as_str(), sent.prompt.as_deref());
     assert_eq!(
         request["system_text"],
@@ -488,7 +488,7 @@ async fn lab_without_sidekick_keeps_its_send_and_request_bytes() {
         pins,
         [
             "d783f1e07f770e8c2cadcffddb512a7e81650db0dd661083b80121152caccbce",
-            "5c7055802be61e109e0599105f084b2d68c6ba983df8b92030eca6d7c0caa811",
+            "0c85d80ebcfacba3f9235cef8b818352e932a153c3e3db4d3860f8cbad152e42",
         ]
     );
 }
@@ -613,7 +613,7 @@ async fn sidekick_lab_uses_a_worker_scope_and_asks_aft_for_reader() {
     }
     assert_eq!(
         worker.sends.lock().unwrap()[0].0.project_root.as_deref(),
-        fixture.root.to_str()
+        fixture.checkout.to_str()
     );
 
     let plain_out = fixture.root.join("plain");
@@ -637,7 +637,101 @@ async fn sidekick_lab_uses_a_worker_scope_and_asks_aft_for_reader() {
         .all(|(provider, _)| provider == "aft"));
     assert_eq!(
         plain.sends.lock().unwrap()[0].0.project_root.as_deref(),
-        fixture.root.to_str()
+        fixture.checkout.to_str()
+    );
+}
+
+#[tokio::test]
+async fn lab_single_checkout_is_the_read_and_git_root_without_a_folder_hint() {
+    let fixture = Fixture::new();
+    let checkout = fixture.root.join("code");
+    fs::rename(&fixture.checkout, &checkout).unwrap();
+    fs::create_dir(checkout.join("src")).unwrap();
+    let path = "src/review.rs";
+    let old_path = "code/src/review.rs";
+    let text = "pub const VERDICT: bool = true;\n";
+    fs::write(checkout.join(path), text).unwrap();
+    for args in [
+        vec!["add", path],
+        vec![
+            "-c",
+            "user.name=Lab",
+            "-c",
+            "user.email=lab@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&checkout)
+            .status()
+            .unwrap()
+            .success());
+    }
+    fs::write(fixture.persona.join("first-message.md"), format!(
+        "{MESSAGE}{{% if tools.sidekick %}}{{% for path in checkout_paths %}}{{{{ path }}}}{{% endfor %}}{{% endif %}}"
+    )).unwrap();
+    let mut spec = fixture.spec_value();
+    spec["checkouts"] = json!({"code":checkout});
+    spec["tools"] = json!(["reader", "sidekick", "git_read"]);
+    let git_read =
+        |path: &str| json!({"name":"git_read","arguments":{"command":"blame","paths":[path]}});
+    let client = fixture
+        .run_with(
+            spec,
+            Ends::LabTools(vec![git_read(path), git_read(old_path)]),
+            available_sidekick,
+        )
+        .await;
+
+    let sends = client.sends.lock().unwrap();
+    let (child, send) = &sends[0];
+    let plan = send.plan.as_ref().unwrap();
+    assert_eq!(
+        plan["tool_items"][0],
+        json!({"provider":"aft","preset":"reader","params":{}})
+    );
+    assert!(plan["composition"]["providers"][0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "read"));
+    // The mock runner binds the provider to the same child root; read resolves
+    // the literal path from that root without help from the lab.
+    let root = Path::new(child.project_root.as_deref().unwrap());
+    let read = |path| fs::read_to_string(root.join(path));
+    assert_eq!(read(path).unwrap(), text);
+    assert_eq!(
+        read(old_path).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+
+    let calls = client.lab_tool_results.lock().unwrap();
+    assert!(calls[0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains(text.trim_end()));
+    assert!(
+        calls[1]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("no such path"),
+        "{}",
+        calls[1]
+    );
+    let request = fixture.output("request.json");
+    assert!(
+        !request["first_message"].as_str().unwrap().contains("code"),
+        "{request}"
+    );
+    assert!(request["lab_tools"][0]["input_schema"]["properties"]
+        .get("checkout")
+        .is_none());
+    assert_eq!(
+        fixture.output("run.json")["session_binding"],
+        json!({"root":checkout,"reason":"single checkout"})
     );
 }
 
@@ -651,7 +745,7 @@ async fn sidekick_lab_ends_each_worker_scope_without_touching_the_ordinary_scope
     let recorder = Arc::new(Recorder::default());
     scopes.set_publisher(recorder.clone());
     let plain = scopes
-        .for_child(fixture.root.to_str().unwrap())
+        .for_child(fixture.checkout.to_str().unwrap())
         .await
         .unwrap();
     for (out, tool_names, stop) in [
@@ -670,7 +764,7 @@ async fn sidekick_lab_ends_each_worker_scope_without_touching_the_ordinary_scope
         assert_eq!(fixture.output("run.json")["stop"], stop);
         assert_eq!(
             scopes
-                .for_child(fixture.root.to_str().unwrap())
+                .for_child(fixture.checkout.to_str().unwrap())
                 .await
                 .unwrap(),
             plain
@@ -851,7 +945,7 @@ async fn opted_in_lab_plan_offers_only_sidekick_from_prefrontal() {
 }
 
 #[tokio::test]
-async fn persona_facts_report_sidekick_and_checkout_paths_only_when_offered() {
+async fn multiple_checkouts_keep_lab_root_and_expose_paths_only_with_sidekick() {
     for enabled in [false, true] {
         let fixture = Fixture::new();
         let fact = "{% if tools.sidekick %}{% for path in checkout_paths %} {{ path }}{% endfor %}{% else %} unavailable{% endif %}";
@@ -866,6 +960,15 @@ async fn persona_facts_report_sidekick_and_checkout_paths_only_when_offered() {
         )
         .unwrap();
         let mut spec = fixture.spec_value();
+        let other = fixture.root.join("other-checkout");
+        fs::create_dir(&other).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&other)
+            .status()
+            .unwrap()
+            .success());
+        spec["checkouts"]["other"] = json!(other);
         spec["history_sessions"] = json!(["session-p"]);
         if enabled {
             spec["tools"]
@@ -873,12 +976,12 @@ async fn persona_facts_report_sidekick_and_checkout_paths_only_when_offered() {
                 .unwrap()
                 .push(json!("sidekick"));
         }
-        fixture
+        let client = fixture
             .run_with(spec, Ends::LabTools(vec![]), available_sidekick)
             .await;
         let request = fixture.output("request.json");
         let expected = if enabled {
-            fixture.checkout.to_str().unwrap()
+            other.to_str().unwrap()
         } else {
             "unavailable"
         };
@@ -889,7 +992,16 @@ async fn persona_facts_report_sidekick_and_checkout_paths_only_when_offered() {
                 request[field]
             );
         }
-        assert_eq!(fixture.output("run.json")["sidekick_offered"], enabled);
+        let run = fixture.output("run.json");
+        assert_eq!(run["sidekick_offered"], enabled);
+        assert_eq!(
+            run["session_binding"],
+            json!({"root":fixture.root,"reason":"multiple checkouts; use the lab root"})
+        );
+        assert_eq!(
+            client.sends.lock().unwrap()[0].0.project_root.as_deref(),
+            fixture.root.to_str()
+        );
     }
 }
 
@@ -1657,19 +1769,16 @@ async fn git_read_refuses_escape_option_ref_sixth_subcommand_and_write_option() 
     let fixture = Fixture::new();
     let cases = [
         (
-            json!({"checkout":"0.50","command":"log","paths":["../context.md"]}),
+            json!({"command":"log","paths":["../context.md"]}),
             "inside the checkout",
         ),
         (
-            json!({"checkout":"0.50","command":"log","refs":["--output=other"]}),
+            json!({"command":"log","refs":["--output=other"]}),
             "not a local commit ref",
         ),
+        (json!({"command":"status"}), "does not allow the"),
         (
-            json!({"checkout":"0.50","command":"status"}),
-            "does not allow the",
-        ),
-        (
-            json!({"checkout":"0.50","command":"diff","refs":["HEAD","HEAD"],"options":["--output=other"]}),
+            json!({"command":"diff","refs":["HEAD","HEAD"],"options":["--output=other"]}),
             "does not allow option",
         ),
     ];
