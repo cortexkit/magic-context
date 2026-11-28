@@ -305,7 +305,7 @@ pub fn measure(
     let mut candidates: Vec<(u8, u64, PartRef)> = Vec::new();
     for entry in context.index.entries() {
         let protected_entry = crate::neutral::protects_from_automatic_reclaim(entry);
-        for part in crate::neutral::authored_parts(entry) {
+        for part in crate::neutral::carried_authored_parts(entry) {
             if context.edited.covers(&entry.mid, &part.id) {
                 continue;
             }

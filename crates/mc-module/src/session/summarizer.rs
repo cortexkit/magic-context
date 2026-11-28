@@ -427,7 +427,7 @@ impl Session {
             .index
             .entries()
             .iter()
-            .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+            .flat_map(|entry| crate::neutral::carried_parts(entry).map(move |part| (entry, part)))
             .filter(|(entry, part)| !edited.covers(&entry.mid, &part.id))
             .filter(|(entry, part)| !lanes::stripped_by_floor(context.signed_floor, entry, part))
             .map(|(_, part)| tokens::part(part))

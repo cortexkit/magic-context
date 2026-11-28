@@ -935,13 +935,15 @@ fn freed_tokens(context: &lanes::Context, covered: &[lanes::PartKey]) -> u64 {
 
 /// A message's estimated size for the summarizer's boundary.
 fn entry_tokens(entry: &cortexkit_role_compaction::read::Entry) -> u64 {
-    entry.parts.iter().map(tokens::part).sum()
+    crate::neutral::carried_parts(entry).map(tokens::part).sum()
 }
 
 /// What summarizing a message removes from the model's view: its text and
 /// tool calls (see [`tokens::removed_by_summary`]).
 fn entry_removed_tokens(entry: &cortexkit_role_compaction::read::Entry) -> u64 {
-    entry.parts.iter().map(tokens::removed_by_summary).sum()
+    crate::neutral::carried_parts(entry)
+        .map(tokens::removed_by_summary)
+        .sum()
 }
 
 #[cfg(test)]

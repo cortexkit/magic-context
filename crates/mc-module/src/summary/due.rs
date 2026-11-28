@@ -345,11 +345,11 @@ impl Window {
                 });
             self.facts.push(Fact {
                 raw: before.map_or(0, |fact| fact.raw)
-                    + entry.parts.iter().map(crate::tokens::part).sum::<u64>(),
+                    + crate::neutral::carried_parts(entry)
+                        .map(crate::tokens::part)
+                        .sum::<u64>(),
                 removed: before.map_or(0, |fact| fact.removed)
-                    + entry
-                        .parts
-                        .iter()
+                    + crate::neutral::carried_parts(entry)
                         .map(crate::tokens::removed_by_summary)
                         .sum::<u64>(),
                 body: before.map_or(0, |fact| fact.body) + body,

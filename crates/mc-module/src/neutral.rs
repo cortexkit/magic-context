@@ -9,6 +9,20 @@
 use cortexkit_role_compaction::part::{Part, PartBody, Seal, ToolStatus};
 use cortexkit_role_compaction::read::{Entry, HostPart, Role};
 
+/// Whether the runner sends this part on a model request. An unnumbered
+/// part can still be carried; system text has no number, for example.
+pub(crate) fn carries_part(_part: &Part) -> bool {
+    true
+}
+
+pub(crate) fn all_parts(entry: &Entry) -> std::slice::Iter<'_, Part> {
+    entry.parts.iter()
+}
+
+pub(crate) fn carried_parts(entry: &Entry) -> impl DoubleEndedIterator<Item = &Part> {
+    all_parts(entry).filter(|part| carries_part(part))
+}
+
 /// Runner-authored content is still on the wire, but is not a speaker's words.
 pub(crate) fn host_part<'a>(entry: &'a Entry, part: &Part) -> Option<&'a HostPart> {
     entry.host_parts.iter().find(|fact| fact.part == part.id)
@@ -33,10 +47,11 @@ pub(crate) fn has_verified_host_frames(entry: &Entry) -> bool {
 
 /// Parts eligible for attribution to the entry's user or assistant speaker.
 pub(crate) fn authored_parts(entry: &Entry) -> impl Iterator<Item = &Part> {
-    entry
-        .parts
-        .iter()
-        .filter(|part| host_part(entry, part).is_none())
+    all_parts(entry).filter(|part| host_part(entry, part).is_none())
+}
+
+pub(crate) fn carried_authored_parts(entry: &Entry) -> impl Iterator<Item = &Part> {
+    carried_parts(entry).filter(|part| host_part(entry, part).is_none())
 }
 
 /// Runners can prefix tool names with `mcp_`; the prefix is case-insensitive.

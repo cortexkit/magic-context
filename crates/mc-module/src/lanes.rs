@@ -694,7 +694,7 @@ fn far_behind_matching(
     let mut far = Vec::new();
     let mut first_young = u64::MAX;
     for entry in context.index.entries().iter().rev() {
-        for part in entry.parts.iter().rev() {
+        for part in crate::neutral::carried_parts(entry).rev() {
             if let Some(tag) = part.tag.filter(|_| eligible(entry, part)) {
                 if newer_turns >= FAR_BEHIND_USER_TURNS || newer_tokens as f64 >= token_distance {
                     far.push(tag);
@@ -1637,7 +1637,7 @@ pub(crate) fn emergency_drop_excluding(
         .index
         .entries()
         .iter()
-        .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+        .flat_map(|entry| crate::neutral::carried_parts(entry).map(move |part| (entry, part)))
         .filter(|(entry, part)| !context.edited.covers(&entry.mid, &part.id))
         .map(|(_, part)| tokens::part(part))
         .sum();

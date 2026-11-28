@@ -25,6 +25,9 @@ pub fn bytes(bytes: u64) -> u64 {
 /// one, else an estimate. Reasoning is counted from its visible text only;
 /// [`crate::lanes`] uses the step's reported count when it has one.
 pub fn part(part: &Part) -> u64 {
+    if !crate::neutral::carries_part(part) {
+        return 0;
+    }
     match (&part.body, part.tokens) {
         // The contract's W4.11 tool output count already includes delivered text.
         (PartBody::Tool(_), Some(PartTokens::Tool(counted))) => counted.input + counted.output,
@@ -67,6 +70,9 @@ pub fn removed_by_summary(part: &Part) -> u64 {
 /// What a tool part's result costs: its output, attachments and delivered
 /// module text, without the call. `part` is the tool part holding `tool`.
 pub fn tool_result(part: &Part, tool: &ToolPart) -> u64 {
+    if !crate::neutral::carries_part(part) {
+        return 0;
+    }
     match part.tokens {
         // W4.11 includes delivered text in this full-result count already.
         Some(PartTokens::Tool(counted)) => counted.output,
@@ -78,6 +84,9 @@ pub fn tool_result(part: &Part, tool: &ToolPart) -> u64 {
 /// out: the newest tool outputs kept from automatic drops are weighed by
 /// their output text, as the standalone plugin weighs them.
 pub fn tool_output(part: &Part, tool: &ToolPart) -> u64 {
+    if !crate::neutral::carries_part(part) {
+        return 0;
+    }
     match part.tokens {
         Some(PartTokens::Tool(counted)) => counted.output,
         _ => bytes(tool.output_bytes.unwrap_or(0)),

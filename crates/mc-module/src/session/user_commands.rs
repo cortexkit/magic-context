@@ -636,7 +636,7 @@ impl Session {
         let mut costs = BTreeMap::new();
         let signed_floor = self.signed_floor();
         for entry in self.index.entries() {
-            for part in &entry.parts {
+            for part in crate::neutral::carried_parts(entry) {
                 let key = (entry.mid.clone(), part.id.clone());
                 let mut cost = tokens::part(part);
                 if let Some(edits) = replacements.get(&key) {
@@ -752,7 +752,7 @@ impl Session {
             .iter()
             .filter(|e| e.ordinal >= first)
             .flat_map(|e| {
-                e.parts.iter().map(|p| {
+                crate::neutral::carried_parts(e).map(|p| {
                     old.get(&(e.mid.clone(), p.id.clone()))
                         .copied()
                         .unwrap_or(0)
