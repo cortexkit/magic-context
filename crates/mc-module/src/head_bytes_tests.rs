@@ -271,6 +271,7 @@ fn head_bytes_match_the_build_before_summary_attribution_was_shared() {
 
     if let Some(path) = std::env::var_os("MC_HEAD_BYTES_OUT") {
         std::fs::write(path, serde_json::to_string_pretty(&states).unwrap()).unwrap();
+        drop((session, restored, store));
         std::fs::remove_dir_all(dir).unwrap();
         return;
     }
@@ -321,5 +322,6 @@ fn head_bytes_match_the_build_before_summary_attribution_was_shared() {
         .query_row("SELECT state FROM sessions", [], |row| row.get(0))
         .unwrap();
     assert_eq!(saved, last["state"].as_str().unwrap());
+    drop((session, restored, store, earlier));
     std::fs::remove_dir_all(dir).unwrap();
 }

@@ -130,6 +130,7 @@ fn a_rebuild_that_only_lands_drops_keeps_an_undated_head_byte_for_byte() {
     );
     assert_eq!(head_ops(&view), served);
     assert_eq!(session.baseline.as_ref().unwrap().newer_days, None);
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -151,6 +152,7 @@ fn a_history_refresh_dates_m1s_summaries_and_keeps_m0() {
     session.queued.insert(("m40".into(), "p".into()));
     build(&mut session, &settings).unwrap();
     assert_eq!(shown(&session, head::M1_ID), m1);
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -173,6 +175,7 @@ fn a_fold_dates_every_summary() {
         assert!(m0.contains(heading), "{heading}: {m0}");
     }
     assert_eq!(shown(&session, head::M1_ID), head::M1_EMPTY);
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -196,6 +199,7 @@ fn a_fold_finds_times_the_index_let_go_and_m1_dates_newer_summaries() {
     let m0 = shown(&session, head::M0_ID);
     assert!(m0.contains("## 9-12 · 2026-03-03→04 · Work 3"), "{m0}");
     assert!(m0.contains("## 13-16 · 2026-03-05→06 · Work 4"), "{m0}");
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -209,6 +213,7 @@ fn a_summary_with_an_unknown_time_shows_no_date() {
     assert!(m0.contains("## 5-8 · Work 2"), "{m0}");
     assert!(m0.contains("## 1-4 · 2026-03-01→02 · Work 1"), "{m0}");
     assert!(m0.contains("## 9-12 · 2026-03-03→04 · Work 3"), "{m0}");
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -246,6 +251,7 @@ fn a_fold_keeps_the_days_m1_showed_for_the_same_summary() {
         m0.contains("## 1-4 · Work 1"),
         "only m[1] recorded days: {m0}"
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 
     // The same, but `m[1]`'s entry for sequence 4 named other messages.

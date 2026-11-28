@@ -160,6 +160,7 @@ async fn check_refused_cut_restores_stamps(cumulative: bool) {
         "refusing the cut hid a stamp from the restored queue"
     );
     assert!(session.app.stamps.contains_key(&("m2".into(), "p".into())));
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -193,6 +194,7 @@ async fn review_probe_older_no_cut_reindexes_visible_tail() {
             .unwrap(),
         "4 tags stamped."
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -246,6 +248,7 @@ async fn review_probe_missing_cut_backs_off_until_runner_can_place_it() {
     assert!(!session.latest_unknown && session.index_ready);
     assert_eq!(session.cut, Some(2));
     assert_eq!(session.latest.as_ref().unwrap().checksum, reported.checksum);
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -291,6 +294,7 @@ async fn audit_views_adopt_older_cut_reindexes_visible_tail() {
             .queued
             .contains(&(format!("m{ordinal}"), "p".into())));
     }
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -307,6 +311,7 @@ async fn audit_views_cut_preserves_the_final_non_system_turn() {
         head(&dir, entries, &[((1, "older"), (2, "final-user"))]).await;
     let view = session.build(&settings, None, false, None).0;
     assert_eq!(view.as_ref().and_then(cut_through), Some("older"));
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -394,6 +399,7 @@ async fn review_probe_over_limit_reselects_after_cut_refusal() {
         )),
         "the proposed cut must not get credit for removing the large tool result"
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -422,6 +428,7 @@ async fn confirmed_numbers_only_cut_does_not_rebuild_on_a_warm_notice() {
     assert!(client.offered.lock().unwrap().is_empty());
     assert!(session.queued.contains(&("m4".into(), "p".into())));
     assert_eq!(session.cut, None, "no summary backs the numbers-only cut");
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -451,6 +458,7 @@ async fn review_probe_numbers_only_cut_preserves_pending_stamp_on_restore() {
     );
     session.ride_undelivered(view.version);
     assert!(session.queued.contains(&key));
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -819,6 +827,7 @@ async fn numbers_unknown_contract_views_wait_for_a_summary_through_the_last_mark
     assert_eq!(offered.len(), 1, "no view after the summary passed m6");
     assert_eq!(cut_through(&offered[0]), Some("m7"));
     assert_eq!(logs.count("views publish again"), 1);
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -866,6 +875,7 @@ async fn numbers_unknown_contract_a_cut_before_numbers_refusal_is_not_resent() {
     let (view, _) = session.build(&settings, None, false, None);
     let view = view.expect("the hold ended");
     assert_eq!(cut_through(&view), Some("message-a"));
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -925,5 +935,6 @@ async fn numbers_unknown_contract_a_running_call_below_the_floor_is_named_once()
         assert!(view.is_none(), "a view cut before m5: {view:?}");
     }
     assert_eq!(logs.count("tool=bash call_id=call-7"), 1);
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }

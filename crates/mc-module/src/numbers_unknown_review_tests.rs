@@ -72,6 +72,7 @@ async fn numbers_review_the_summary_due_before_any_view_can_reach_a_floor_the_su
     let view = view.expect("a view once the hold ends");
     assert_eq!(cut_through(&view), Some("m4"));
     assert_eq!(logs.count("hold nothing a summary would keep"), 1);
+    drop(session);
     std::fs::remove_dir_all(&dir).unwrap();
 
     let dir = scratch("numbers-review-notice-floor-later");
@@ -127,6 +128,7 @@ async fn kept_notice_alone_at_the_numbers_floor_requires_a_summary() {
     assert!(run.force_keep_last_compartment);
     assert!(session.short_of_numbers_floor());
     assert!(session.build(&settings, None, false, None).0.is_none());
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -169,6 +171,7 @@ async fn numbers_review_the_summary_due_before_any_view_keeps_the_per_run_cap() 
         run.from,
         run.until
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -238,6 +241,7 @@ async fn numbers_review_the_flush_preview_does_not_misreport_a_numbers_hold() {
         Some("waiting_for_numbers_summary")
     );
     assert_eq!(logs.count("cut_before_numbers"), 0);
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 

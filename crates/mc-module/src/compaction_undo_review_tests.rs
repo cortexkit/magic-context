@@ -108,6 +108,7 @@ async fn reoffer_review_a_restart_with_the_runner_on_the_current_view_offers_not
     assert!(!restored.head_stale);
     notice_applying(&mut restored, &client, &settings, 1, Some(&view_2), vec![]).await;
     assert_eq!(offered_count(&client), before, "the notice offered a view");
+    drop((session, restored));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -131,6 +132,7 @@ async fn reoffer_review_a_restart_with_the_handed_view_applied_offers_nothing() 
     assert_eq!(offered_count(&client), before, "Setup offered a view");
     assert!(restored.unconfirmed.is_empty(), "view 3 is confirmed");
     assert_eq!(restored.latest.as_ref(), Some(&view_3));
+    drop((session, restored));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -165,6 +167,7 @@ async fn reoffer_review_a_restart_with_the_handed_view_pending_offers_only_that_
         );
         assert_eq!(restored.latest.as_ref(), Some(&view_3));
         assert!(!restored.head_stale);
+        drop((session, restored));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
@@ -201,6 +204,7 @@ async fn reoffer_review_a_restart_after_a_lost_apply_answer_offers_only_that_vie
             offered.iter().map(|view| view.version).collect::<Vec<_>>()
         );
         assert_eq!(restored.latest.as_ref(), Some(&view_3));
+        drop((session, restored));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
@@ -229,6 +233,7 @@ async fn reoffer_review_a_refused_and_rolled_back_view_offers_nothing_at_setup()
         before,
         "Setup after a restart offered a view"
     );
+    drop((session, restored));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -264,6 +269,7 @@ async fn reoffer_review_a_ride_view_the_runner_never_got_offers_nothing_new_at_s
                 "each Setup offers view 3 again, and nothing else"
             );
         }
+        drop((session, restored));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
@@ -290,6 +296,7 @@ async fn reoffer_review_a_session_whose_runner_never_held_a_view_gets_no_offer()
         1,
         "the notice after the refused view 1 offered another view"
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -339,6 +346,7 @@ async fn reoffer_review_a_first_view_refused_at_its_step_boundary_is_not_a_lost_
         offered.iter().map(|view| view.version).collect::<Vec<_>>(),
         session.conditions.last_prompt_tokens
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -376,6 +384,7 @@ async fn reoffer_review_a_drop_refused_twice_is_forgotten() {
     notice_applying(&mut session, &client, &settings, 3, None, vec![]).await;
     let offered = offered_since(&client, before);
     assert!(offered.iter().all(|view| !names_part(view, &queued)));
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -396,6 +405,7 @@ async fn reoffer_review_a_view_refused_on_every_offer_is_not_offered_on_every_no
         offered <= 2,
         "{offered} views offered on 5 notices, each refused for the same reason"
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -429,6 +439,7 @@ async fn reoffer_review_a_view_dropped_after_every_apply_is_not_offered_after_ev
         forced.len() <= 2,
         "forced views {forced:?} after 3 drops, each applied and so a cache rewrite"
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -445,7 +456,9 @@ async fn setup_after_a_refused_forced_view(restart: bool) {
     *client.refuse.lock().unwrap() = false;
     assert!(session.latest.is_none(), "ck-mc holds no view of its own");
     let mut session = if restart {
-        restarted(&session, &dir)
+        let restored = restarted(&session, &dir);
+        drop(session);
+        restored
     } else {
         session
     };
@@ -456,6 +469,7 @@ async fn setup_after_a_refused_forced_view(restart: bool) {
         1,
         "restart {restart}: Setup offered no view to a runner that applies none, with the head due"
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -493,6 +507,7 @@ async fn reoffer_review_a_moved_session_with_its_view_installed_gets_no_offer() 
     assert_eq!(session.latest.as_ref(), Some(&view));
     notice_applying(&mut session, &client, &settings, 1, Some(&view), vec![]).await;
     assert_eq!(offered_count(&client), 0, "the notice offered a view");
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -510,6 +525,7 @@ async fn reoffer_review_a_moved_session_without_its_view_gets_one_at_setup() {
         1,
         "Setup offered no view to a moved session whose runner applies none"
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -523,6 +539,7 @@ async fn lost_view_setup_replaces_the_head_when_readback_fails() {
     let offered = offered_since(&client, before);
     assert_eq!(offered.len(), 1, "the runner cannot step without a head");
     assert_eq!(move_floor::cut_of(&offered[0]), Some(mid(18).as_str()));
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -563,6 +580,7 @@ async fn reoffered_view_remains_the_base_before_the_runner_can_apply_it() {
         assert_eq!(move_floor::cut_of(&view), move_floor::cut_of(&confirmed));
         notice_applying(&mut session, &client, &settings, 2, None, vec![]).await;
         assert_eq!(session.latest.as_ref(), Some(&view));
+        drop(session);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
@@ -593,5 +611,6 @@ async fn adopting_a_cut_restores_stamps_only_beyond_the_adopted_cut() {
     assert_eq!(session.latest, Some(adopted));
     assert_eq!(session.queued, BTreeSet::from([key(20)]));
     assert!(session.index.find(&mid(20), "0").is_some());
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }

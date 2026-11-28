@@ -189,6 +189,7 @@ async fn compaction_undo_v1_an_undo_behind_the_cut_offers_a_view_on_its_notice()
         session.latest.as_ref().map(|latest| latest.version),
         Some(view.version)
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -276,6 +277,7 @@ async fn compaction_undo_v1_a_stale_window_offers_a_view_on_its_notice() {
         .notice(&client, &settings, notice(&session, 2, newest))
         .await;
     assert_eq!(client.offered.lock().unwrap().len(), pending);
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -303,6 +305,7 @@ async fn compaction_undo_v1_a_refused_rebuild_stays_due() {
         session.latest.as_ref().map(|latest| latest.version),
         offered.last().map(|view| view.version)
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -343,6 +346,7 @@ async fn compaction_undo_v1_an_edit_before_cut_refusal_is_an_ordinary_refusal() 
     assert!(names_part(&view, &queued));
     assert!(session.publish(&client, view).await);
     assert!(!session.queued.contains(&queued), "the drop landed");
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -404,6 +408,7 @@ async fn compaction_undo_v1_a_setup_without_the_runners_view_offers_one() {
         !restored.head_stale,
         "the view the runner took shows the head"
     );
+    drop((session, restored));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -454,6 +459,7 @@ async fn compaction_undo_v1_a_setup_with_an_older_view_offers_a_newer_one() {
     assert!(shows_second_summary(view), "{:?}", view.edits);
     cortexkit_compaction_view::render::apply(&runner, view)
         .expect("the runner can apply the view to its transcript");
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -477,6 +483,7 @@ async fn compaction_undo_v1_a_setup_with_the_current_view_offers_nothing() {
         session.latest.as_ref().map(|latest| latest.version),
         Some(2)
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -508,6 +515,7 @@ async fn compaction_undo_v1_a_refused_setup_offer_stays_due() {
         session.latest.as_ref().map(|latest| latest.version),
         offered.last().map(|view| view.version)
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -545,6 +553,7 @@ async fn compaction_undo_v1_forced_views_resume_once_the_transcript_grows() {
         3,
         "a new message did not let ck-mc force a view again"
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -575,5 +584,6 @@ async fn compaction_undo_v1_a_setup_without_a_view_offers_one_when_the_read_back
     assert_eq!(cut_through(view), Some(mid(18).as_str()));
     cortexkit_compaction_view::render::apply(&runner, view)
         .expect("the runner can apply the view to its transcript");
+    drop((session, restored));
     std::fs::remove_dir_all(dir).unwrap();
 }

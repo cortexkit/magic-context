@@ -82,6 +82,7 @@ fn only_summaries_newer_than_the_baseline_stay_in_memory() {
     assert_eq!(restored.summaries.held(), 4);
     restored.restore(store.load(&session.key).unwrap());
     assert_eq!(restored.summaries.held(), 1);
+    drop((session, restored, store));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -140,6 +141,7 @@ fn a_refresh_shows_what_it_showed_and_a_fold_reads_older_text_from_context_db() 
     assert!(m0.contains("## 1-4 · Edited title 1"), "{m0}");
     assert!(m0.contains("## 13-16 · 1970-01-01 · Work 4"), "{m0}");
     assert!(m0.contains("## 17-20 · 1970-01-01 · Work 5"), "{m0}");
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -182,6 +184,7 @@ fn a_fold_whose_summaries_cannot_be_read_keeps_the_head_as_shown() {
     build(&mut session, &settings).expect("the fold lands");
     assert!(!session.fold_due);
     assert!(shown(&session, head::M0_ID).contains("## 13-16 · 1970-01-01 · Work 4"));
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -257,6 +260,7 @@ fn the_newest_summary_deleted_elsewhere_moves_the_cut_back_and_keeps_earlier_edi
         build(&mut session, &settings).is_none(),
         "nothing else rebuilds"
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -288,6 +292,7 @@ fn a_restore_keeps_one_copy_of_the_head_text() {
     let current = restored.baseline.clone().unwrap();
     assert_eq!(before.m0, current.m0);
     assert!(Arc::ptr_eq(&before.m0, &current.m0), "one copy of m[0]");
+    drop((session, restored, store));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
