@@ -23,6 +23,25 @@ pub(crate) fn carried_parts(entry: &Entry) -> impl DoubleEndedIterator<Item = &P
     all_parts(entry).filter(|part| carries_part(part))
 }
 
+pub(crate) fn has_carried_parts(entry: &Entry) -> bool {
+    carried_parts(entry).next().is_some()
+}
+
+/// A row whose parts are all left out is absent from the request. A runner
+/// can also open a genuinely empty row, which reasoning cleanup still treats
+/// as a step.
+pub(crate) fn is_absent_from_request(entry: &Entry) -> bool {
+    omitted_only(entry, || has_carried_parts(entry))
+}
+
+fn omitted_only(entry: &Entry, has_carried_parts: impl FnOnce() -> bool) -> bool {
+    !entry.parts.is_empty() && !has_carried_parts()
+}
+
+pub(crate) fn first_request_entry(entries: &[Entry]) -> Option<&Entry> {
+    entries.iter().find(|entry| !is_absent_from_request(entry))
+}
+
 /// Runner-authored content is still on the wire, but is not a speaker's words.
 pub(crate) fn host_part<'a>(entry: &'a Entry, part: &Part) -> Option<&'a HostPart> {
     entry.host_parts.iter().find(|fact| fact.part == part.id)
@@ -135,4 +154,24 @@ pub fn without_tag_notation(text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_omitted_only_row_is_absent_but_a_genuinely_empty_row_is_not() {
+        let empty = Entry::new(1, "empty", Role::Assistant, 0, vec![]);
+        let nonempty = Entry::new(
+            2,
+            "nonempty",
+            Role::Assistant,
+            0,
+            vec![Part::new("part", PartBody::Text { text: "a".into() })],
+        );
+        assert!(!omitted_only(&empty, || false));
+        assert!(!omitted_only(&nonempty, || true));
+        assert!(omitted_only(&nonempty, || false));
+    }
 }

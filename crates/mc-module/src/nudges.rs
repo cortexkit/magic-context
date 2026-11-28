@@ -294,11 +294,7 @@ pub fn measure(
     let first = context
         .keep_first_message
         .then(|| {
-            context
-                .index
-                .entries()
-                .first()
-                .map(|entry| entry.mid.as_str())
+            crate::neutral::first_request_entry(context.index.entries()).map(|e| e.mid.as_str())
         })
         .flatten();
     let mut measurement = Measurement::default();

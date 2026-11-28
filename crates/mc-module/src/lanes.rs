@@ -277,7 +277,7 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
     let recent = index.newest_tool_tags(RECENT_TOOL_WINDOW);
     let protected = protected_tool_parts(index, context.protected_tools);
     let newest_mid = transcript_end_mid(index);
-    let first_mid = index.entries().first().map(|entry| entry.mid.as_str());
+    let first_mid = crate::neutral::first_request_entry(index.entries()).map(|e| e.mid.as_str());
     let mut shapes: BTreeMap<&PartKey, Shape> = BTreeMap::new();
     for (key, shape) in parts {
         shapes.entry(key).or_insert(*shape);
@@ -287,6 +287,9 @@ pub fn drop_ops(context: &Context, parts: &[(PartKey, Shape)]) -> (Vec<EditOp>, 
     for (key, shape) in shapes {
         let (mid, part_id) = key;
         let found = index.find(mid, part_id);
+        if found.is_some_and(|(_, part)| !crate::neutral::carries_part(part)) {
+            continue;
+        }
         if found.is_some_and(|(entry, _)| match shape {
             Shape::Requested => protects_from_explicit_drop(entry),
             _ => protects_from_automatic_reclaim(entry),
@@ -594,7 +597,7 @@ pub fn protected_tool_parts(index: &Index, counts: &BTreeMap<String, u64>) -> BT
     let mut left: BTreeMap<String, u64> = counts.clone();
     let mut protected = BTreeSet::new();
     for entry in index.entries().iter().rev() {
-        for part in entry.parts.iter().rev() {
+        for part in crate::neutral::carried_parts(entry).rev() {
             let PartBody::Tool(tool) = &part.body else {
                 continue;
             };
@@ -706,7 +709,7 @@ fn far_behind_matching(
                 newer_tokens += tokens::part(part);
             }
         }
-        if starts_turn(entry) {
+        if !crate::neutral::is_absent_from_request(entry) && starts_turn(entry) {
             newer_turns += 1;
         }
     }
@@ -740,7 +743,7 @@ pub fn age_sweep(
         .iter()
         .filter(|entry| !protects_from_automatic_reclaim(entry))
     {
-        for part in &entry.parts {
+        for part in crate::neutral::carried_parts(entry) {
             let Some(tag) = part.tag else {
                 continue;
             };
@@ -782,9 +785,7 @@ pub const UNKNOWN_REASONING_STEP_TOKENS: u64 = 1_000;
 /// thinking a rebuild would invalidate (`pass.rs`), so it measures how hard
 /// the model just thought, not what sending the reasoning again costs.
 pub fn step_reasoning_tokens(entry: &Entry) -> u64 {
-    let reasoning: Vec<&Part> = entry
-        .parts
-        .iter()
+    let reasoning: Vec<&Part> = crate::neutral::carried_parts(entry)
         .filter(|part| matches!(part.body, PartBody::Reasoning { .. }))
         .collect();
     if reasoning.is_empty() {
@@ -860,13 +861,13 @@ pub fn reasoning_over_budget(
         .index
         .entries()
         .iter()
-        .filter(|entry| entry.role == Role::Assistant)
+        .filter(|entry| {
+            entry.role == Role::Assistant && !crate::neutral::is_absent_from_request(entry)
+        })
         .map(|entry| {
             // Reasoning the runner strips under its signed floor is not sent,
             // so it neither counts against the budget nor needs a drop.
-            let reasoning = entry
-                .parts
-                .iter()
+            let reasoning = crate::neutral::carried_parts(entry)
                 .filter(|part| matches!(part.body, PartBody::Reasoning { .. }))
                 .filter(|part| !context.edited.covers(&entry.mid, &part.id))
                 .filter(|part| !stripped_by_floor(context.signed_floor, entry, part))
@@ -881,9 +882,7 @@ pub fn reasoning_over_budget(
     // The first assistant that is exempt; every later one is too.
     let mut exempt_from = assistants.len() - 1;
     if let Some(latest) = assistants.iter().rposition(|(entry, _)| {
-        entry
-            .parts
-            .iter()
+        crate::neutral::carried_parts(entry)
             .any(|part| matches!(part.body, PartBody::Reasoning { .. }))
     }) {
         exempt_from = exempt_from.min(latest);
@@ -951,7 +950,7 @@ pub fn protected_cutoff(context: &Context, floor: u64) -> Option<u64> {
         .entries()
         .iter()
         .rev()
-        .flat_map(|entry| entry.parts.iter().rev())
+        .flat_map(|entry| crate::neutral::carried_parts(entry).rev())
         .filter_map(|part| match (&part.body, part.tag) {
             (PartBody::Tool(tool), Some(tag)) => Some((tag, tokens::tool_output(part, tool))),
             _ => None,
@@ -990,7 +989,7 @@ fn tool_parts<'a>(
         .iter()
         .filter(|entry| !protects_from_automatic_reclaim(entry))
         .flat_map(|entry| {
-            entry.parts.iter().filter_map(move |part| match &part.body {
+            crate::neutral::carried_parts(entry).filter_map(move |part| match &part.body {
                 PartBody::Tool(tool) if !is_person_facing_tool(&tool.name) => {
                     Some((entry, part, tool))
                 }
@@ -1179,7 +1178,7 @@ pub fn injected_text(context: &Context, cutoff: Option<u64>) -> Vec<(PartKey, Sh
         // A notice is already a distinct instruction from the runner, not
         // injected framing inside a person's prompt. Keep it actionable.
         .filter(|entry| entry.notice.is_none() && !has_verified_host_frames(entry))
-        .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+        .flat_map(|entry| crate::neutral::carried_parts(entry).map(move |part| (entry, part)))
         .filter(|(entry, part)| {
             !in_tail(part, cutoff) && !context.edited.touches(&entry.mid, &part.id)
         })
@@ -1262,7 +1261,7 @@ pub fn caveman(
         .entries()
         .iter()
         .filter(|entry| entry.role != Role::System && !protects_from_automatic_reclaim(entry))
-        .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+        .flat_map(|entry| crate::neutral::carried_parts(entry).map(move |part| (entry, part)))
         .filter_map(|(entry, part)| {
             let (PartBody::Text { text }, Some(tag)) = (&part.body, part.tag) else {
                 return None;
@@ -1353,7 +1352,7 @@ pub fn image_results(index: &Index, edited: &Edited) -> Vec<PartKey> {
     index
         .entries()
         .iter()
-        .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+        .flat_map(|entry| crate::neutral::carried_parts(entry).map(move |part| (entry, part)))
         .filter(|(entry, part)| match &part.body {
             PartBody::Tool(tool) => {
                 tool.status == ToolStatus::Completed
@@ -1398,11 +1397,15 @@ pub fn answered_images(context: &Context, images: &Images) -> (Vec<EditOp>, Vec<
         return (Vec::new(), Vec::new());
     }
     let protected = protected_tool_parts(context.index, context.protected_tools);
+    let first_mid = crate::neutral::first_request_entry(entries).map(|entry| entry.mid.as_str());
     // Each message's age: its own highest tag, or the next tagged message's.
     let mut ages = vec![None; entries.len()];
     let mut next = None;
     for (position, entry) in entries.iter().enumerate().rev() {
-        if let Some(own) = entry.parts.iter().filter_map(|part| part.tag).max() {
+        if let Some(own) = crate::neutral::carried_parts(entry)
+            .filter_map(|part| part.tag)
+            .max()
+        {
             next = Some(own);
         }
         ages[position] = next;
@@ -1412,7 +1415,7 @@ pub fn answered_images(context: &Context, images: &Images) -> (Vec<EditOp>, Vec<
     let mut changed = Vec::new();
     for (position, entry) in entries.iter().enumerate().rev() {
         let was_answered = answered;
-        if entry.role == Role::Assistant {
+        if entry.role == Role::Assistant && !crate::neutral::is_absent_from_request(entry) {
             answered = true;
         }
         let Some(age) = ages[position] else {
@@ -1421,14 +1424,14 @@ pub fn answered_images(context: &Context, images: &Images) -> (Vec<EditOp>, Vec<
         let eligible = was_answered
             && age <= images.watermark
             && (images.over_limit || images.cutoff.is_none_or(|cutoff| age < cutoff))
-            && !(context.keep_first_message && position == 0);
+            && !(context.keep_first_message && Some(entry.mid.as_str()) == first_mid);
         if !eligible
             || protects_from_automatic_reclaim(entry)
             || !matches!(entry.role, Role::User | Role::Assistant)
         {
             continue;
         }
-        for part in &entry.parts {
+        for part in crate::neutral::carried_parts(entry) {
             let key = (entry.mid.clone(), part.id.clone());
             if part.seal != Seal::None
                 || context.edited.touches(&entry.mid, &part.id)
@@ -1495,7 +1498,7 @@ fn recent_owner_messages<'a>(context: &'a Context) -> BTreeSet<&'a str> {
         .entries()
         .iter()
         .rev()
-        .filter(|entry| entry.parts.iter().any(|part| part.tag.is_some()))
+        .filter(|entry| crate::neutral::carried_parts(entry).any(|part| part.tag.is_some()))
         .take(SUPERSESSION_RECENT_MESSAGE_WINDOW)
         .map(|entry| entry.mid.as_str())
         .collect()
