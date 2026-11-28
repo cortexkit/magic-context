@@ -6,7 +6,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $started = [DateTimeOffset]::Parse($StartedAt).UtcDateTime
 $workspacePath = [IO.Path]::GetFullPath($Workspace).TrimEnd([char[]]'\/')
 $targetPath = Join-Path $workspacePath 'target'

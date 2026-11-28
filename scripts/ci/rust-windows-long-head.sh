@@ -6,7 +6,7 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/rust-windows-home.sh"
 mkdir -p "$logs"
 printf 'command\texit\tseconds\n' > "$logs/results.tsv"
 
-start_windows_home
+start_windows_home x86_64-pc-windows-msvc
 
 record() {
     local label=$1 limit=$2 start rc=0

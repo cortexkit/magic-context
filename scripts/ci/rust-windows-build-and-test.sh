@@ -71,7 +71,7 @@ record fixture-eol bounded 2m git ls-files --eol -- \
     crates/mc-module/testdata/role-lease-v1.5/ \
     crates/mc-module/assets/catalog_tools_only.txt
 
-start_windows_home
+start_windows_home "$MC_WINDOWS_TARGET"
 
 live=(--features "agent-data,managed-settings,memory-replica")
 record module-default-build bounded 18m cargo build --locked -p mc-module
