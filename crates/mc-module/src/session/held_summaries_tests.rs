@@ -134,8 +134,8 @@ fn a_refresh_shows_what_it_showed_and_a_fold_reads_older_text_from_context_db() 
     // from context.db as it is now, the ones m[1] showed as it showed them.
     // The cut let their messages go, and this session has no sessions.db to
     // save their times in (every running session has one), so the fold
-    // finds no day for them: m[0] dates from the stores only, not from what
-    // m[1] showed.
+    // finds no day for them: m[0] dates from the stores and the messages
+    // the session still holds, not from what m[1] showed.
     session.fold_due = true;
     build(&mut session, &settings).expect("a fold");
     let m0 = shown(&session, head::M0_ID);

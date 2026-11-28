@@ -235,7 +235,9 @@ fn restart(session: &Session) -> Session {
 /// write to `sessions.db`), the days `m[1]` showed from those times are not
 /// carried into `m[0]`: the next full rebuild dates the summary by the
 /// nearest timed message the stores hold, and a rebuild after a restart
-/// shows the same bytes.
+/// shows the same bytes. The failure is simulated here by emptying the
+/// saved times; [`a_failed_save_at_a_cut_moves_a_day_to_the_nearest_message_once`]
+/// makes the write itself fail.
 #[test]
 fn a_summary_whose_times_were_not_saved_takes_the_approximation_warm_and_cold() {
     let dir = scratch("head-dates-unsaved");
@@ -362,9 +364,10 @@ fn a_boundary_without_a_time_takes_the_nearest_timed_message() {
 }
 
 /// A day `m[1]` showed is not carried into `m[0]` at a fold: `m[0]` dates
-/// every summary from what the stores hold. With the exact times gone, the
-/// nearest timed message's day is shown, and the next full rebuild shows
-/// the same day: nothing drifts between rebuilds over the same stores.
+/// every summary from the stores and the messages the session still holds.
+/// With the exact times gone from both, the nearest timed message's day is
+/// shown, and the next full rebuild shows the same day: nothing drifts
+/// between rebuilds over the same stores.
 #[test]
 fn a_day_m1_showed_gives_way_to_the_stores_at_a_fold_and_stays() {
     let dir = scratch("head-dates-recorded-first");
@@ -482,5 +485,123 @@ fn an_approximated_day_follows_the_stores_at_every_full_rebuild() {
     restored.fold_due = true;
     build(&mut restored, &settings);
     assert_eq!(shown(&restored, head::M0_ID), warm);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The times `sessions.db` saved for messages the index let go.
+fn saved_times(dir: &std::path::Path) -> Vec<(i64, String, i64)> {
+    let conn = rusqlite::Connection::open(dir.join("sessions.db")).unwrap();
+    let mut query = conn
+        .prepare("SELECT ordinal, message_id, at_ms FROM app_read_message_index ORDER BY ordinal")
+        .unwrap();
+    query
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// The session as a new process finds it: its saved state, both SQLite
+/// files opened anew, and the runner's tail of the transcript as the session
+/// held it.
+fn reopened(session: &Session, dir: &std::path::Path) -> Session {
+    let store = session.store.as_ref().unwrap();
+    store.save(&session.key, &session.durable()).unwrap();
+    let (mut restored, _, _, _, _) = fixture();
+    restored.db = Some(Arc::new(
+        crate::context_db::ContextDb::open(&dir.join("context.db")).unwrap(),
+    ));
+    let store = Arc::new(crate::store::Store::open(&dir.join("sessions.db")).unwrap());
+    restored.store = Some(store.clone());
+    restored.features.summarizer = true;
+    restored.project = session.project.clone();
+    restored.load_summaries();
+    restored.restore(store.load(&session.key).unwrap());
+    restored.index = crate::index::Index::starting_at(session.index.base());
+    restored.index.extend(session.index.entries().to_vec());
+    restored.index_ready = true;
+    restored
+}
+
+/// The one case where two full rebuilds in a row date a summary differently
+/// over unchanged stores: saving the times at a cut fails (here a SQLite
+/// trigger aborts the write). The rebuild before the cut still holds the
+/// messages and shows their exact days; the cut lets them go unsaved, and
+/// every later rebuild, warm or in a new process over the same files, shows
+/// the nearest timed message's day. History is rewritten only by those
+/// rebuilds: a refresh of `m[1]` and a drop keep `m[0]` as it was.
+#[test]
+fn a_failed_save_at_a_cut_moves_a_day_to_the_nearest_message_once() {
+    let dir = scratch("head-dates-failed-save");
+    let (mut session, settings) = timed_head(&dir, time_of);
+    let conn = rusqlite::Connection::open(dir.join("sessions.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER deny_time_save BEFORE INSERT ON app_read_message_index
+         BEGIN SELECT RAISE(ABORT, 'intentional failed save'); END;",
+    )
+    .unwrap();
+    let probe = crate::app_read::IndexRow {
+        mid: "probe".into(),
+        ordinal: 99,
+        at_ms: DAY0,
+    };
+    let refused = session
+        .store
+        .as_ref()
+        .unwrap()
+        .save_app_index(&session.key, &[probe], None)
+        .unwrap_err();
+    assert!(refused.contains("intentional failed save"), "{refused}");
+    // Summary 2's boundaries have no time but the one the index holds; the
+    // nearest timed message the search index knows is message 3.
+    search_rows(&session, &[(3, DAY0)]);
+    let heading = |m0: &str| {
+        m0.lines()
+            .find(|line| line.starts_with("## 5-8 · "))
+            .unwrap()
+            .to_owned()
+    };
+
+    build(&mut session, &settings).unwrap();
+    assert!(session.index.base() > 5, "the cut let messages 1-8 go");
+    let before = shown(&session, head::M0_ID);
+    assert_eq!(heading(&before), "## 5-8 · 2026-03-02→03 · Work 2");
+    assert!(saved_times(&dir).is_empty());
+
+    // Neither a refresh of m[1] nor a drop rewrites m[0].
+    publish(&mut session, 4);
+    build(&mut session, &settings).unwrap();
+    assert_eq!(shown(&session, head::M0_ID), before);
+    let served = head_ops(session.latest.as_ref().unwrap());
+    session.queued.insert(("m40".into(), "p".into()));
+    if let Some(view) = build(&mut session, &settings) {
+        assert_eq!(head_ops(&view), served);
+    }
+
+    session.fold_due = true;
+    build(&mut session, &settings);
+    let warm = (
+        shown(&session, head::M0_ID),
+        shown(&session, head::M1_ID),
+    );
+    assert_eq!(heading(&warm.0), "## 5-8 · 2026-03-01 · Work 2");
+    let mut cold = reopened(&session, &dir);
+    cold.fold_due = true;
+    let ops = cold.render_head(&settings);
+    let text_of = |id: &str| {
+        ops.iter()
+            .find_map(|op| match op {
+                EditOp::Insert { message, .. } if message.id == id => {
+                    Some(message.texts.join("\n"))
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!((text_of(head::M0_ID), text_of(head::M1_ID)), warm);
+    session.fold_due = true;
+    build(&mut session, &settings);
+    assert_eq!(shown(&session, head::M0_ID), warm.0);
+    assert!(saved_times(&dir).is_empty());
     std::fs::remove_dir_all(dir).unwrap();
 }

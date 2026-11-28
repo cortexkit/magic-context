@@ -338,19 +338,26 @@ impl Session {
     /// Fill in the days each of `rows` shows in its heading: the UTC days
     /// its first and last message were written ([`crate::summary::dates`]).
     /// Each time comes from the first place that knows it: the transcript
-    /// index, while it still holds the message; the times saved for the
-    /// messages the index let go at a cut; the message search index, which
-    /// also holds the standalone plugin's times for a session moved from
-    /// it (the messages before the move never enter this session's index).
-    /// Each store is read once, for every time the places before it left
-    /// unknown. A day still unknown comes from the nearest timed message
+    /// index, while the session still holds the message; the times saved for
+    /// the messages the index let go at a cut; the message search index,
+    /// which also holds the standalone plugin's times for a session moved
+    /// from it (the messages before the move never enter this session's
+    /// index). Each store is read once, for every time the places before it
+    /// left unknown. A day still unknown comes from the nearest timed message
     /// among the saved times and the search index
     /// ([`crate::summary::dates::summary_times`]): a boundary message
     /// without text has no time of its own. A row with either day still
-    /// unknown keeps no date. The days depend only on what the stores hold,
-    /// so a rebuild after a restart dates as a warm one does. Only a render
-    /// that writes headings anew calls this: a fold, or `m[1]` showing a
-    /// summary for the first time.
+    /// unknown keeps no date.
+    ///
+    /// So the days depend on the stores and on the messages the session
+    /// still holds, and a rebuild after a restart dates as a warm one does,
+    /// with one exception: when saving the times at a cut fails (logged), a
+    /// rebuild before the cut shows the exact days of the messages it let go,
+    /// and every rebuild after it, warm or restarted, the nearest timed
+    /// message's day. The times kept for the next try are not read here: a
+    /// warm process would then show a day a restarted one cannot. Only a
+    /// render that writes headings anew calls this: a fold, or `m[1]` showing
+    /// a summary for the first time.
     pub(super) fn date_summaries(&self, rows: &mut [StoredCompartment]) {
         use std::collections::{BTreeSet, HashMap};
         let _timing = crate::notice_cost_timing::span("head.dates");
