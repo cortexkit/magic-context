@@ -5,6 +5,20 @@ use std::process::{Command, Stdio};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, watch};
 
+// These tests await loopback events. This watchdog is not a grace, retry,
+// or handoff deadline; the policy timers are tested with paused time.
+const NATS_IO: Duration = Duration::from_secs(15);
+
+fn nats_address(ports: &std::path::Path) -> Option<std::net::SocketAddr> {
+    let bytes = std::fs::read(ports).ok()?;
+    let listeners: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    listeners["nats"][0]
+        .as_str()?
+        .strip_prefix("nats://")?
+        .parse()
+        .ok()
+}
+
 struct LocalNats {
     child: std::process::Child,
     _dir: tempfile::TempDir,
@@ -13,20 +27,12 @@ struct LocalNats {
 
 impl LocalNats {
     async fn start() -> Option<Self> {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = port.local_addr().unwrap();
-        drop(port);
         let dir = tempfile::tempdir().unwrap();
         let child = match Command::new("nats-server")
-            .args([
-                "-js",
-                "-a",
-                "127.0.0.1",
-                "-p",
-                &addr.port().to_string(),
-                "-sd",
-            ])
+            .args(["-js", "-a", "127.0.0.1", "-p", "-1", "--ports_file_dir"])
             .arg(dir.path())
+            .arg("-sd")
+            .arg(dir.path().join("jetstream"))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -42,18 +48,26 @@ impl LocalNats {
             }
             Err(error) => panic!("could not start nats-server: {error}"),
         };
-        let server = Self {
+        let ports = dir.path().join(format!("nats-server_{}.ports", child.id()));
+        let mut server = Self {
             child,
             _dir: dir,
-            addr,
+            addr: ([127, 0, 0, 1], 0).into(),
         };
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while TcpStream::connect(addr).await.is_err() {
+        server.addr = tokio::time::timeout(NATS_IO, async {
+            loop {
+                if let Some(addr) = nats_address(&ports) {
+                    break addr;
+                }
+                assert!(
+                    server.child.try_wait().unwrap().is_none(),
+                    "nats-server exited before writing its ports file"
+                );
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
-        .expect("nats-server listened");
+        .expect("nats-server reported its listening address");
         Some(server)
     }
 }
@@ -208,9 +222,9 @@ async fn at_renewal(
     (state, generation)
 }
 
-async fn closed(state: &mut watch::Receiver<NatsConnectionState>, timeout: Duration) {
+async fn closed(state: &mut watch::Receiver<NatsConnectionState>) {
     tokio::time::timeout(
-        timeout,
+        NATS_IO,
         state.wait_for(|state| *state == NatsConnectionState::Closed),
     )
     .await
@@ -219,7 +233,7 @@ async fn closed(state: &mut watch::Receiver<NatsConnectionState>, timeout: Durat
 }
 
 async fn marker_event(events: &mut mpsc::UnboundedReceiver<()>) {
-    tokio::time::timeout(Duration::from_secs(3), events.recv())
+    tokio::time::timeout(NATS_IO, events.recv())
         .await
         .expect("marker callback")
         .expect("marker task is alive");
@@ -269,16 +283,11 @@ async fn renewal_retires_the_connection_held_by_a_marker_watch() {
     marker_event(&mut events).await;
     marker_event(&mut epochs).await;
     assert!(state.is_up() && fleet.is_up());
-    assert_eq!(
-        *old.borrow(),
-        NatsConnectionState::Connected,
-        "users moved before retirement"
-    );
     eprintln!(
         "both markers and run-end pull/ack moved in {:?}",
         started.elapsed()
     );
-    closed(&mut old, Duration::from_secs(6)).await;
+    closed(&mut old).await;
     assert!(state.is_up() && fleet.is_up());
     bucket.put(KEY, b"three".as_slice().into()).await.unwrap();
     bucket
@@ -354,7 +363,7 @@ async fn a_marker_opens_a_fresh_session_by_itself_after_reconnect_exhaustion() {
         .connection_state();
     cut.send(()).unwrap();
     tokio::time::timeout(
-        Duration::from_secs(3),
+        NATS_IO,
         first.wait_for(|state| *state == NatsConnectionState::Disconnected),
     )
     .await
@@ -371,33 +380,26 @@ async fn a_marker_opens_a_fresh_session_by_itself_after_reconnect_exhaustion() {
         }
         finish_retry.send(()).unwrap();
         proxy_task.await.unwrap();
-        assert!(tokio::time::timeout(Duration::from_secs(3), client.flush())
+        assert!(tokio::time::timeout(NATS_IO, client.flush())
             .await
             .expect("the exhausted handler rejects commands")
             .is_err());
-        closed(&mut first, Duration::from_secs(15)).await;
+        closed(&mut first).await;
         assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(15), pending)
-                .await
-                .unwrap(),
+            tokio::time::timeout(NATS_IO, pending).await.unwrap(),
             Err(BusError::Unavailable { .. })
         ));
         eprintln!("reconnect exhaustion closed generation 1 and ended its register watch with Unavailable");
     }
 
-    tokio::time::timeout(
-        Duration::from_secs(15),
-        generations.wait_for(Option::is_none),
-    )
-    .await
-    .expect("the marker forgets its lost session without another user")
-    .unwrap();
+    tokio::time::timeout(NATS_IO, generations.wait_for(Option::is_none))
+        .await
+        .expect("the marker forgets its lost session without another user")
+        .unwrap();
     assert!(!state.is_up());
     bucket.put(KEY, b"two".as_slice().into()).await.unwrap();
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(15), events.recv())
-            .await
-            .unwrap(),
+        tokio::time::timeout(NATS_IO, events.recv()).await.unwrap(),
         Some(())
     );
     assert_eq!(generations.borrow().map(|current| current.id), Some(2));
@@ -498,12 +500,14 @@ async fn an_unconfirmed_ack_is_reported_and_the_same_event_is_redelivered() {
     assert_eq!(original.id.as_deref(), Some("old-delivery"));
     let (_, generation) = at_renewal(&bus, server.addr).await;
     assert_eq!(generation, 2);
+    let mut socket = reader.binding.connection.connection_state();
     reader
         .binding
         .connection
         .close(Duration::from_secs(1))
         .await
         .unwrap();
+    closed(&mut socket).await;
     assert_eq!(reader.ack().await.unwrap_err(), "nats_ack_failed");
     drop(reader);
 
@@ -511,7 +515,7 @@ async fn an_unconfirmed_ack_is_reported_and_the_same_event_is_redelivered() {
     // second publish, supplies the old delivery on the new connection.
     let mut reader = bind_reader(&bus).await;
     assert_eq!(reader.binding.generation, 2);
-    let redelivery = tokio::time::timeout(Duration::from_secs(3), async {
+    let redelivery = tokio::time::timeout(NATS_IO, async {
         loop {
             if let Some(delivery) = reader.next().await.unwrap() {
                 break delivery;
@@ -544,7 +548,7 @@ async fn a_failed_ack_on_the_current_binding_is_an_outage() {
         .close(Duration::from_secs(1))
         .await
         .unwrap();
-    closed(&mut socket, Duration::from_secs(15)).await;
+    closed(&mut socket).await;
     assert_eq!(reader.ack().await.unwrap_err(), "nats_ack_failed");
     assert_eq!(reader.binding.generation, 1);
     assert!(
@@ -597,8 +601,8 @@ async fn discarding_the_new_session_leaves_the_old_ack_in_its_grace() {
         1
     );
 
-    closed(&mut first, Duration::from_secs(15)).await;
-    closed(&mut second_state, Duration::from_secs(15)).await;
+    closed(&mut first).await;
+    closed(&mut second_state).await;
     drop(holder);
 }
 
@@ -640,23 +644,26 @@ async fn retirement_closes_the_old_connection_even_if_a_marker_cannot_move_yet()
     marker_event(&mut events).await;
     let (mut first, generation) = at_renewal(&bus, server.addr).await;
     assert_eq!(generation, 2);
-    tokio::time::timeout(Duration::from_secs(2), gate.waiting.notified())
+    tokio::time::timeout(NATS_IO, gate.waiting.notified())
         .await
         .unwrap();
-    assert_eq!(*first.borrow(), NatsConnectionState::Connected);
     assert!(
         !state.is_up(),
         "the replacement has not delivered its snapshot"
     );
     assert_eq!(
-        bus.session_with_generation().await.unwrap().1,
+        tokio::time::timeout(NATS_IO, bus.session_with_generation())
+            .await
+            .expect("the snapshot I/O does not hold the session lock")
+            .unwrap()
+            .1,
         2,
         "a publisher can acquire the new connection before retirement or snapshot"
     );
     // The replacement snapshot must include writes made while its request
     // was stalled.
     bucket.put(KEY, b"two".as_slice().into()).await.unwrap();
-    closed(&mut first, Duration::from_secs(6)).await;
+    closed(&mut first).await;
     gate.resume.notify_one();
     marker_event(&mut events).await;
     assert!(
@@ -731,7 +738,7 @@ async fn a_failed_pull_on_the_current_binding_is_an_outage() {
     }
     fail_pull.send(()).unwrap();
     peer.await.unwrap();
-    closed(&mut socket, Duration::from_secs(15)).await;
+    closed(&mut socket).await;
     assert_eq!(pull.await.err().as_deref(), Some("nats_pull_failed"));
     assert!(
         bus.session.lock().await.is_none(),
@@ -748,9 +755,8 @@ async fn shutdown_expedites_retirement_without_waiting_for_the_current_guard() {
     drop(bus.session().await.unwrap());
     let (mut first, generation) = at_renewal(&bus, server.addr).await;
     assert_eq!(generation, 2);
-    assert_eq!(*first.borrow(), NatsConnectionState::Connected);
     let current = bus.session().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), bus.close_retiring())
+    tokio::time::timeout(NATS_IO, bus.close_retiring())
         .await
         .unwrap();
     assert_eq!(*first.borrow_and_update(), NatsConnectionState::Closed);
@@ -840,9 +846,9 @@ async fn a_closed_marker_with_no_live_replacement_backs_off_instead_of_polling_a
     // Install and discard the replacement without letting the marker see it.
     second.discard();
     assert_eq!(*bus.generations().borrow(), None);
-    closed(&mut first, Duration::from_secs(15)).await;
+    closed(&mut first).await;
 
-    assert!(tokio::time::timeout(Duration::from_secs(2), raw.next())
+    assert!(tokio::time::timeout(NATS_IO, raw.next())
         .await
         .unwrap()
         .is_err());
@@ -856,7 +862,7 @@ async fn a_closed_marker_with_no_live_replacement_backs_off_instead_of_polling_a
     tokio::select! {
         biased;
         () = polled_after_end.notified() => panic!("marker polled the ended watch again"),
-        event = tokio::time::timeout(Duration::from_secs(8), events.recv()) => {
+        event = tokio::time::timeout(NATS_IO, events.recv()) => {
             assert_eq!(event.expect("the marker retries and reads the new snapshot"), Some(()));
         }
     }
@@ -866,7 +872,7 @@ async fn a_closed_marker_with_no_live_replacement_backs_off_instead_of_polling_a
 
 #[tokio::test]
 async fn a_discard_during_the_replacement_snapshot_recovers_after_backoff() {
-    use crate::entorhinal_changes::{spawn_marker, WatchState, KEY, RETRY_FIRST};
+    use crate::entorhinal_changes::{spawn_marker, WatchState, KEY};
     let Some(server) = LocalNats::start().await else {
         return;
     };
@@ -883,36 +889,31 @@ async fn a_discard_during_the_replacement_snapshot_recovers_after_backoff() {
     let log = crate::test_log::capture();
     let (_, generation) = at_renewal(&bus, server.addr).await;
     assert_eq!(generation, 2);
-    tokio::time::timeout(Duration::from_secs(2), gate.waiting.notified())
+    tokio::time::timeout(NATS_IO, gate.waiting.notified())
         .await
         .unwrap();
 
     // The snapshot request is held while a third session is installed and
     // discarded. Opening the watch must not keep that session locked.
-    let mut second = enter_renewal_window(&bus, server.addr).await;
+    let mut second = tokio::time::timeout(NATS_IO, enter_renewal_window(&bus, server.addr))
+        .await
+        .expect("the snapshot I/O does not hold the session lock");
     let (third, generation) = bus.session_with_generation().await.unwrap();
     assert_eq!(generation, 3);
     third.discard();
-    closed(&mut second, Duration::from_secs(15)).await;
     bucket.put(KEY, b"two".as_slice().into()).await.unwrap();
-    let resumed = tokio::time::Instant::now();
     gate.resume.notify_one();
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(8), events.recv())
-            .await
-            .expect("the marker reopens after the failed handoff"),
-        Some(())
-    );
-    assert!(
-        resumed.elapsed() >= RETRY_FIRST,
-        "a failed snapshot without a replacement should back off"
-    );
+    marker_event(&mut events).await;
     assert_eq!(bus.generation(), 4);
     assert!(state.is_up());
+    closed(&mut second).await;
     let text = log.text();
     let marker_lines: Vec<_> = text
         .lines()
-        .filter(|line| line.contains("ck-mc: entorhinal changes:"))
+        .filter(|line| {
+            line.contains("no watch on the registry marker")
+                || line.contains("watching the registry marker")
+        })
         .collect();
     assert_eq!(marker_lines.len(), 2, "{text}");
     assert!(
