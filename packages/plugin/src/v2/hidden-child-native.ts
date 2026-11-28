@@ -16,13 +16,14 @@ import {
     extendHiddenChildDeadline,
     forgetHiddenChild,
     recordHiddenChild,
+    recordRetiringHiddenChild,
 } from "./hidden-child-sweep";
 import {
     hiddenRunPlacement,
     matchesHiddenRunLocation,
     supportsQuietHiddenChildren,
 } from "./hidden-run-holder";
-import type { HiddenChildHook } from "./hooks/hidden-child";
+import { type HiddenChildHook, noteTimedOutHiddenChild } from "./hooks/hidden-child";
 
 /**
  * The hidden-child lifecycle for OpenCode 2 hosts whose plugin session API has `session.remove`.
@@ -130,6 +131,34 @@ export function createNativeHiddenChildren(
         return done;
     };
 
+    const retireLate = async (
+        id: string,
+        directory: string,
+        createdAt: number,
+        cleanupMs: number,
+    ): Promise<void> => {
+        noteTimedOutHiddenChild(id);
+        liveChildren.delete(id);
+        try {
+            recordRetiringHiddenChild(options.db, { id, directory, created_at: createdAt });
+        } catch {
+            // Still try to remove the child when durable cleanup cannot be recorded.
+        }
+        try {
+            await removeBounded(id, cleanupMs);
+        } catch (error) {
+            if (!isSessionNotFound(error)) {
+                options.log(`[magic-context] late hidden child ${id} could not be removed`);
+                return;
+            }
+        }
+        try {
+            forgetHiddenChild(options.db, id);
+        } catch {
+            // A remaining record is harmless: the sweep treats not-found as confirmation.
+        }
+    };
+
     const create = async (
         identity: HiddenRunIdentity,
         role: HiddenChildRole,
@@ -141,20 +170,17 @@ export function createNativeHiddenChildren(
         if (quiet) {
             if (!host.createHolder)
                 throw new Error("OpenCode 2 background holder API is not wired");
-            const placement = await hiddenRunPlacement(host.createHolder, directory, budget?.work);
+            const placement = await hiddenRunPlacement(host.createHolder, directory, budget);
             input.id = placement.id;
             input.parentID = placement.parentID;
             delete input.location;
         }
+        budget?.setStage("creating the child session");
         const start = () => host.create(input);
         const removeLate = ({ id }: Awaited<ReturnType<typeof start>>) => {
             if (!id || !budget) return;
-            // Setup already timed out or was cancelled. Remove the child without
-            // registering its hook or writing to the store.
-            void removeBounded(id, budget.cleanupMs).catch((error) => {
-                if (!isSessionNotFound(error))
-                    options.log(`[magic-context] late hidden child ${id} could not be removed`);
-            });
+            // The child was never admitted, but the sweep needs its ID if removal fails.
+            void retireLate(id, directory, Date.now(), budget.cleanupMs);
         };
         const created = await (budget?.work(start, removeLate) ?? start());
         try {
@@ -223,6 +249,9 @@ export function createNativeHiddenChildren(
     return {
         open: create,
         create,
+        retireLate(child, cleanupMs) {
+            void retireLate(child.id, child.directory ?? "", child.created_at, cleanupMs);
+        },
         retire(child) {
             if (kept(child)) {
                 liveChildren.delete(child.id);

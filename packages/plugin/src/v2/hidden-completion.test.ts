@@ -35,6 +35,7 @@ import {
 } from "../shared/model-suggestion-retry";
 import { Database } from "../shared/sqlite";
 import { createTestTempDir } from "../shared/test-temp-dir";
+import * as nativeChildren from "./hidden-child-native";
 import {
     HIDDEN_CHILD_DEADLINE_GRACE_MS,
     HIDDEN_CHILD_MAX_AGE_MS,
@@ -48,6 +49,7 @@ import {
 } from "./hidden-completion";
 import { HiddenModelActivity } from "./hidden-model-activity";
 import {
+    __resetDisposedChildrenForTests,
     HIDDEN_CURATE_AGENT,
     HIDDEN_DREAMER_AGENT,
     HIDDEN_HISTORIAN_AGENT,
@@ -385,6 +387,7 @@ async function setup(
     let readableSessionError: unknown;
     let eventSessionError: unknown;
     let removeError: Error | undefined;
+    let removeHook: HiddenChildHost["removeSession"];
     let delayRowMs = 0;
     let omitUsage = false;
     let omitCache = false;
@@ -481,6 +484,7 @@ async function setup(
             updates.push(structuredClone(input));
         },
         async removeSession(input) {
+            if (removeHook) await removeHook(input);
             if (removeError) throw removeError;
             removed.push(input.sessionID);
         },
@@ -545,6 +549,9 @@ async function setup(
         setRemoveError(value: Error | undefined) {
             removeError = value;
         },
+        setRemoveHook(hook: HiddenChildHost["removeSession"]) {
+            removeHook = hook;
+        },
         setDelayRow(value: number) {
             delayRowMs = value;
         },
@@ -580,7 +587,538 @@ async function close(
 }
 
 describe("OpenCode 2 hidden child completion", () => {
-    afterEach(() => jest.useRealTimers());
+    afterEach(() => {
+        jest.useRealTimers();
+        __resetDisposedChildrenForTests();
+    });
+    const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+    test("time spent queued for a role leaves the first attempt its full work budget", async () => {
+        const f = await setup();
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        const first = await f.executor.open(run);
+        const queued = f.executor.open(run);
+        await flush();
+        jest.advanceTimersByTime(run.timeoutMs - 5);
+        expect(f.creates).toHaveLength(1);
+        await close(f.executor, first, true);
+        const next = await queued;
+        f.host.wait = () => new Promise(() => {});
+        let failure: unknown;
+        const result = f.executor.attempt(next, request());
+        void result.catch((error) => {
+            failure = error;
+        });
+        try {
+            await flush();
+            expect(f.requests.map(({ sessionID }) => sessionID)).toEqual([next.id]);
+            jest.advanceTimersByTime(run.timeoutMs - 1);
+            await flush();
+            expect(failure).toBeUndefined();
+            jest.advanceTimersByTime(1);
+            await expect(result).rejects.toThrow(`prompt timed out after ${run.timeoutMs}ms`);
+            expect(f.interrupts).toEqual([next.id]);
+        } finally {
+            await close(f.executor, next, false);
+            await flush();
+            f.db.close();
+        }
+    });
+
+    test("bounds waiting for the role without starting a child", async () => {
+        const f = await setup();
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        const first = await f.executor.open(run);
+        const other = f.executor.open(run);
+        let failure: unknown;
+        void other.catch((error) => {
+            failure = error;
+        });
+        try {
+            jest.advanceTimersByTime(run.timeoutMs - 1);
+            await flush();
+            expect(failure).toBeUndefined();
+            jest.advanceTimersByTime(1);
+            await flush();
+            expect(failure).toMatchObject({ code: "hidden_setup_timeout", terminal: true });
+            expect(String(failure)).toContain("waiting for its role");
+            expect(f.creates).toHaveLength(1);
+        } finally {
+            await close(f.executor, first, true);
+            const handle = await other.catch(() => undefined);
+            if (handle) await close(f.executor, handle, false);
+            f.db.close();
+        }
+    });
+
+    test("retires without dispatching if setup leaves less than five percent of the budget", async () => {
+        const f = await setup();
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        const handle = await f.executor.open(run);
+        f.host.switchModel = async () => {
+            jest.advanceTimersByTime(run.timeoutMs - 5);
+        };
+        try {
+            const outcome = await promptSyncWithValidatedOutputRetry(
+                undefined,
+                request("fallback"),
+                {
+                    transport: (args) => f.executor.attempt(handle, args),
+                    timeoutMs: run.timeoutMs,
+                    fallbackModels: ["mock/cheap"],
+                    fetchOutput: () => f.executor.collect(handle),
+                    validateOutput: (completion) => completion.text,
+                },
+            ).catch((error: unknown) => error);
+            expect(outcome).toMatchObject({ code: "hidden_setup_timeout", terminal: true });
+            expect(getPromptFailureDetail(outcome)?.failureClass).toBe("local_refusal");
+            expect(f.requests).toEqual([]);
+            expect(f.interrupts).toEqual([]);
+            expect(f.removed).toEqual([handle.id]);
+        } finally {
+            await close(f.executor, handle, false);
+            f.db.close();
+        }
+    });
+
+    test("rechecks the deadline before committing a model switch that just answered", async () => {
+        const make = nativeChildren.createNativeHiddenChildren;
+        const updateModel = spyOn(nativeChildren, "createNativeHiddenChildren");
+        let updates = 0;
+        updateModel.mockImplementation((...args) => {
+            const owned = make(...args);
+            const update = owned.updateModel;
+            owned.updateModel = (...input) => {
+                updates++;
+                return update(...input);
+            };
+            return owned;
+        });
+        const f = await setup();
+        updateModel.mockRestore();
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        const startedAt = Date.now();
+        const handle = await f.executor.open(run);
+        let switchAnswered = false;
+        let reads = 0;
+        const now = spyOn(Date, "now").mockImplementation(() =>
+            // First the timer is armed, then the returned promise passes its guard.
+            // The next read belongs to the continuation that would publish the model.
+            switchAnswered && ++reads >= 3 ? startedAt + run.timeoutMs : startedAt,
+        );
+        f.host.switchModel = async () => {
+            switchAnswered = true;
+        };
+        try {
+            await expect(f.executor.attempt(handle, request("fallback"))).rejects.toThrow(
+                "switching the child model",
+            );
+            expect(updates).toBe(0);
+            expect(f.requests).toEqual([]);
+            expect(f.removed).toEqual([handle.id]);
+        } finally {
+            now.mockRestore();
+            await close(f.executor, handle, false);
+            f.db.close();
+        }
+    });
+
+    for (const order of [
+        "executor first",
+        "shared timer first on equal retry budgets",
+        "shorter shared budget after a silent primary",
+        "shorter shared budget leaves a sliver after a silent primary",
+    ]) {
+        test(`reports a stalled model switch as a local setup timeout (${order})`, async () => {
+            const silentPrimary = order.startsWith("shorter shared budget");
+            const sharedSliver = order.includes("leaves a sliver");
+            const equalRetry = order === "shared timer first on equal retry budgets";
+            const make = nativeChildren.createNativeHiddenChildren;
+            const lifecycle = spyOn(
+                nativeChildren,
+                "createNativeHiddenChildren",
+            ).mockImplementation((...args) => {
+                const owned = make(...args);
+                const create = owned.create;
+                // Exercise a replacement whose host model still needs the switch.
+                if (silentPrimary)
+                    owned.create = async (...args) => ({
+                        ...(await create(...args)),
+                        model: { providerID: "mock", modelID: "cheap" },
+                    });
+                return owned;
+            });
+            const f = await setup();
+            lifecycle.mockRestore();
+            jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+            const handle = await f.executor.open(run);
+            const spentInOpen = 100;
+            if (equalRetry) await f.executor.attempt(handle, request());
+            else if (!silentPrimary) jest.advanceTimersByTime(spentInOpen);
+            const firstWait = Promise.withResolvers<void>();
+            const switching = Promise.withResolvers<void>();
+            const switchedAnswer = Promise.withResolvers<void>();
+            const switched: string[] = [];
+            f.host.wait = () => {
+                firstWait.resolve();
+                return new Promise(() => {});
+            };
+            f.host.switchModel = (input) => {
+                switched.push(input.model.id);
+                switching.resolve();
+                return switchedAnswer.promise;
+            };
+            const silentMs = 60;
+            const outcome = promptSyncWithValidatedOutputRetry(
+                undefined,
+                request(silentPrimary ? "cheap" : "fallback"),
+                {
+                    transport: (args) => f.executor.attempt(handle, args),
+                    timeoutMs: run.timeoutMs,
+                    ...(silentPrimary
+                        ? { firstOutputTimeoutMs: silentMs, fallbackModels: ["mock/fallback"] }
+                        : { fallbackModels: ["mock/cheap"] }),
+                    fetchOutput: () => f.executor.collect(handle),
+                    validateOutput: (completion) => completion.text,
+                },
+            ).catch((error: unknown) => error);
+            try {
+                if (silentPrimary) {
+                    await firstWait.promise;
+                    jest.advanceTimersByTime(silentMs);
+                }
+                await switching.promise;
+                let result: unknown;
+                void outcome.then((settled) => {
+                    result = settled;
+                });
+                const remaining =
+                    run.timeoutMs - (silentPrimary ? silentMs : equalRetry ? 0 : spentInOpen);
+                jest.advanceTimersByTime(remaining - 1);
+                await flush();
+                expect(result).toBeUndefined();
+                if (sharedSliver) {
+                    // 1 ms remains on the shared retry timer, but 61 ms remain on
+                    // the executor's 1,200 ms budget: only the shared limit refuses dispatch.
+                    switchedAnswer.resolve();
+                    await flush();
+                    expect(f.requests).toHaveLength(1);
+                    expect(result).toMatchObject({ code: "hidden_setup_timeout" });
+                } else {
+                    jest.advanceTimersByTime(1);
+                }
+                const error = await outcome;
+                expect(error).toMatchObject({ code: "hidden_setup_timeout", terminal: true });
+                expect((error as Error).message).toBe(
+                    `hidden_setup_timeout: Hidden completion setup timed out while ${sharedSliver ? "preparing to send the prompt" : "switching the child model"}`,
+                );
+                expect(getPromptFailureDetail(error)?.failureClass).toBe("local_refusal");
+                expect(switched).toEqual(["fallback"]);
+                expect(f.requests).toHaveLength(equalRetry || silentPrimary ? 1 : 0);
+            } finally {
+                await flush();
+                await close(f.executor, handle, false);
+                await flush();
+                f.db.close();
+            }
+        });
+    }
+
+    test("refuses a timed-out curate child's memory writes before the interrupt answers", async () => {
+        const f = await setup();
+        const identity = { ...dreamerRun, agent: HIDDEN_CURATE_AGENT };
+        const interrupt = Promise.withResolvers<{ interrupted: boolean }>();
+        f.host.wait = () => new Promise(() => {});
+        f.host.interrupt = () => interrupt.promise;
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        const first = await f.executor.open(identity);
+        const result = f.executor.attempt(first, request());
+        void result.catch(() => {});
+        const gate = (sessionID: string) =>
+            hiddenToolCallRefusal(
+                { tool: "ctx_memory", sessionID, agent: HIDDEN_CURATE_AGENT },
+                f.hook,
+            );
+        await flush();
+        expect(gate(first.id)).toBeUndefined();
+        jest.advanceTimersByTime(identity.timeoutMs);
+        await expect(result).rejects.toThrow("timed out");
+        await close(f.executor, first, false);
+        expect(gate(first.id)).toContain("timed out");
+        const opening = f.executor.open({ ...identity, timeoutMs: 4_000 });
+        jest.advanceTimersByTime(2_000);
+        const next = await opening;
+        try {
+            expect(gate(first.id)).toContain("ctx_memory refused");
+            expect(gate(next.id)).toBeUndefined();
+        } finally {
+            interrupt.resolve({ interrupted: true });
+            await close(f.executor, next, true);
+            f.db.close();
+        }
+    });
+
+    test("a retry on the same handle waits for the prior child to retire before sending", async () => {
+        const f = await setup();
+        const interrupt = Promise.withResolvers<{ interrupted: boolean }>();
+        const wait = f.host.wait;
+        f.host.wait = () => new Promise(() => {});
+        f.host.interrupt = () => interrupt.promise;
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        const handle = await f.executor.open(run);
+        const first = f.executor.attempt(handle, request());
+        void first.catch(() => {});
+        await flush();
+        jest.advanceTimersByTime(run.timeoutMs);
+        await expect(first).rejects.toThrow("timed out");
+        f.host.wait = wait;
+        const retry = f.executor.attempt(handle, request("fallback"));
+        void retry.catch(() => {});
+        try {
+            await flush();
+            expect(f.requests.map((draft) => draft.sessionID)).toEqual(["child-1"]);
+            expect(f.creates).toHaveLength(1);
+            interrupt.resolve({ interrupted: true });
+            await retry;
+            expect(f.requests.map((draft) => draft.sessionID)).toEqual(["child-1", "child-2"]);
+        } finally {
+            interrupt.resolve({ interrupted: true });
+            await retry.catch(() => {});
+            await close(f.executor, handle, true);
+            f.db.close();
+        }
+    });
+
+    test("an assistant poll that wakes after the deadline does not read the store again", async () => {
+        const f = await setup();
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        const startedAt = Date.now();
+        const handle = await f.executor.open(run);
+        // The host accepted the marker but has not persisted any assistant output.
+        f.setDelayRow(run.timeoutMs + 100);
+        const latest = f.rows.latestAssistant.bind(f.rows);
+        let lateReads = 0;
+        f.rows.latestAssistant = (id) => {
+            if (Date.now() >= startedAt + run.timeoutMs) {
+                lateReads++;
+                throw new Error("late store read");
+            }
+            return latest(id);
+        };
+        const result = f.executor.attempt(handle, request());
+        void result.catch(() => {});
+        try {
+            await flush();
+            expect(f.rows.latestAssistantCalls).toBeGreaterThan(0);
+            jest.advanceTimersByTime(run.timeoutMs);
+            await expect(result).rejects.toThrow("timed out");
+            await flush();
+            expect(lateReads).toBe(0);
+        } finally {
+            await close(f.executor, handle, false);
+            f.db.close();
+        }
+    });
+
+    test("releases a role acquired after its timer fired even when the wall clock stepped back", async () => {
+        const f = await setup();
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        const first = await f.executor.open(run);
+        const startedAt = Date.now();
+        const expiring = f.executor.open(run);
+        void expiring.catch(() => {});
+        await flush();
+        jest.advanceTimersByTime(run.timeoutMs);
+        await expect(expiring).rejects.toThrow("timed out");
+        const now = spyOn(Date, "now").mockReturnValue(startedAt + run.timeoutMs - 1);
+        try {
+            await close(f.executor, first, true);
+            await flush();
+        } finally {
+            now.mockRestore();
+        }
+        const next = f.executor.open({ ...run, timeoutMs: 50 });
+        let outcome: unknown;
+        void next.then(
+            (handle) => {
+                outcome = handle;
+            },
+            (error) => {
+                outcome = error;
+            },
+        );
+        try {
+            await flush();
+            jest.advanceTimersByTime(50);
+            await flush();
+            expect(outcome).toMatchObject({ id: "child-2" });
+            expect(f.creates).toHaveLength(2);
+        } finally {
+            const handle = await next.catch(() => undefined);
+            if (handle) await close(f.executor, handle, true);
+            f.db.close();
+        }
+    });
+
+    test("removes a child returned after its timer fired even when the wall clock stepped back", async () => {
+        const f = await setup();
+        const answer = Promise.withResolvers<void>();
+        const creating = Promise.withResolvers<void>();
+        const create = f.host.create;
+        f.host.create = async (input) => {
+            creating.resolve();
+            await answer.promise;
+            return create(input);
+        };
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        const startedAt = Date.now();
+        const opening = f.executor.open(run);
+        void opening.catch(() => {});
+        await creating.promise;
+        jest.advanceTimersByTime(run.timeoutMs);
+        await expect(opening).rejects.toThrow("timed out");
+        const now = spyOn(Date, "now").mockReturnValue(startedAt + run.timeoutMs - 1);
+        try {
+            answer.resolve();
+            await flush();
+            expect(f.removed).toEqual(["child-1"]);
+            expect(f.hook.owns("child-1")).toBe(false);
+        } finally {
+            now.mockRestore();
+            f.db.close();
+        }
+    });
+
+    for (const [method, label] of [
+        ["open", "initial"],
+        ["create", "replacement"],
+    ] as const) {
+        test(`retires an admitted ${label} child whose lifecycle answer reaches the executor late`, async () => {
+            const logs: string[] = [];
+            const childReady = Promise.withResolvers<string>();
+            const deliver = Promise.withResolvers<void>();
+            const make = nativeChildren.createNativeHiddenChildren;
+            const lifecycle = spyOn(
+                nativeChildren,
+                "createNativeHiddenChildren",
+            ).mockImplementation((...args) => {
+                const owned = make(...args);
+                const create = owned[method];
+                owned[method] = async (...args) => {
+                    const child = await create(...args);
+                    childReady.resolve(child.id);
+                    await deliver.promise;
+                    return child;
+                };
+                return owned;
+            });
+            const f = await setup(undefined, { logs });
+            lifecycle.mockRestore();
+            jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+            const prior = method === "create" ? await f.executor.open(run) : undefined;
+            if (prior) {
+                f.setProviderError({ type: "provider.error", message: "primary refused" });
+                await expect(f.executor.attempt(prior, request())).rejects.toBeInstanceOf(
+                    HiddenProviderError,
+                );
+            }
+            const stalled = prior
+                ? f.executor.attempt(prior, request("fallback"))
+                : f.executor.open(run);
+            void stalled.catch(() => {});
+            const id = await childReady.promise;
+            const removing = Promise.withResolvers<{ sessionID: string }>();
+            f.setRemoveHook(async (input) => {
+                if (input.sessionID === id) {
+                    removing.resolve(input);
+                    await new Promise(() => {});
+                }
+            });
+            try {
+                jest.advanceTimersByTime(run.timeoutMs);
+                await expect(stalled).rejects.toThrow("creating the child session");
+                expect(nativeChildren.isLiveHiddenChild(id)).toBe(true);
+                let removalID: string | undefined;
+                void removing.promise.then(({ sessionID }) => {
+                    removalID = sessionID;
+                });
+                deliver.resolve();
+                await flush();
+                expect(removalID).toBe(id);
+                expect(nativeChildren.isLiveHiddenChild(id)).toBe(false);
+                expect(f.requests.some((draft) => draft.sessionID === id)).toBe(false);
+                const note = `[magic-context] late hidden child ${id} could not be removed`;
+                jest.advanceTimersByTime(1_999);
+                await flush();
+                expect(logs).not.toContain(note);
+                jest.advanceTimersByTime(1);
+                await flush();
+                expect(logs.filter((line) => line === note)).toEqual([note]);
+            } finally {
+                deliver.resolve();
+                if (prior) await close(f.executor, prior, false);
+                f.db.close();
+            }
+        });
+    }
+
+    test("retains a retiring late child in the store until the sweep confirms removal", async () => {
+        const logs: string[] = [];
+        const f = await setup(undefined, { logs });
+        const creating = Promise.withResolvers<void>();
+        const answer = Promise.withResolvers<void>();
+        const create = f.host.create;
+        f.host.create = async (input) => {
+            creating.resolve();
+            await answer.promise;
+            return create(input);
+        };
+        const record = () => {
+            const row = f.db
+                .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
+                .get("hidden_child:child-1") as { value: string } | undefined;
+            return row ? JSON.parse(row.value) : null;
+        };
+        let recordAtRemove: unknown;
+        f.setRemoveHook(async () => {
+            recordAtRemove = record();
+            throw new Error("host refused a private path and error body");
+        });
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        const opening = f.executor.open(run);
+        void opening.catch(() => {});
+        try {
+            await creating.promise;
+            jest.advanceTimersByTime(run.timeoutMs);
+            await expect(opening).rejects.toThrow("creating the child session");
+            answer.resolve();
+            await flush();
+            expect(recordAtRemove).toMatchObject({ id: "child-1", retiring: true });
+            expect(record()).toEqual(recordAtRemove);
+            expect(nativeChildren.isLiveHiddenChild("child-1")).toBe(false);
+            expect(f.hook.owns("child-1")).toBe(false);
+            expect(logs.filter((line) => line.includes("late hidden child"))).toEqual([
+                "[magic-context] late hidden child child-1 could not be removed",
+            ]);
+            const removed: string[] = [];
+            await sweepHiddenChildren(
+                f.db,
+                async ({ sessionID }) => {
+                    removed.push(sessionID);
+                },
+                () => {},
+                {
+                    now: Date.now() + HIDDEN_CHILD_MAX_AGE_MS + 1,
+                    isLive: nativeChildren.isLiveHiddenChild,
+                },
+            );
+            expect(removed).toEqual(["child-1"]);
+            expect(record()).toBeNull();
+        } finally {
+            answer.resolve();
+            f.db.close();
+        }
+    });
 
     test("times out a stalled child creation, releases its leases, and retires the late child", async () => {
         let holds = 0;
@@ -731,6 +1269,7 @@ describe("OpenCode 2 hidden child completion", () => {
             expect(holds).toBe(0);
         } finally {
             interrupt.resolve({ interrupted: true });
+            if (failure === undefined) jest.advanceTimersByTime(run.timeoutMs);
             await result.catch(() => {});
             await close(f.executor, handle, false);
             f.db.close();

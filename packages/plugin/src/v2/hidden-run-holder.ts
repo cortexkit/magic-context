@@ -28,8 +28,10 @@ export function matchesHiddenRunLocation(wanted: string, returned: string | unde
 export async function hiddenRunPlacement(
     createHolder: NonNullable<HiddenChildHost["createHolder"]>,
     directory: string,
-    work: HiddenChildSetupBudget["work"] = (start) => start(),
+    budget?: HiddenChildSetupBudget,
 ): Promise<{ id: string; parentID: string }> {
+    const work: HiddenChildSetupBudget["work"] = budget?.work ?? ((start) => start());
+    budget?.setStage("checking the holder directory");
     if (!(await work(() => stat(directory))).isDirectory())
         throw new Error(`Not a run directory: ${directory}`);
     // The child inherits its parent's location. Keep the spelling OpenCode used
@@ -42,6 +44,7 @@ export async function hiddenRunPlacement(
         // This root is permanent: removing it would cascade to its live or retained runs.
         // OpenCode returns the existing session on duplicate create, including after restart
         // or when two instances ask at once. A moved holder must not lend its new location.
+        budget?.setStage("creating the background holder");
         const holder = await work(() =>
             createHolder({
                 id,

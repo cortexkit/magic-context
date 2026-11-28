@@ -203,10 +203,29 @@ export class ModelProducedNoOutputError extends Error {
 interface ModelActivity {
     monitored: boolean;
     received: boolean;
+    readonly timeoutMs: number;
+    readonly deadline: number;
+    setupTimeout?: () => HiddenCompletionRefusal | undefined;
 }
 
 /** Keyed by the per-attempt abort signal that `promptWithTimeout` hands the transport. */
 const modelActivityBySignal = new WeakMap<AbortSignal, ModelActivity>();
+
+/** The caller's unchanged timer, for a transport deciding whether it is too late to dispatch. */
+export function promptTransportBudget(
+    signal: AbortSignal | undefined,
+): Pick<ModelActivity, "deadline" | "timeoutMs"> | undefined {
+    return signal ? modelActivityBySignal.get(signal) : undefined;
+}
+
+/** Lets the transport identify a local setup timeout before the model was called. */
+export function notePromptSetupTimeout(
+    signal: AbortSignal | undefined,
+    read?: () => HiddenCompletionRefusal | undefined,
+): void {
+    const activity = signal ? modelActivityBySignal.get(signal) : undefined;
+    if (activity) activity.setupTimeout = read;
+}
 
 /** A transport calls this once it is watching the child for model output. */
 export function noteModelActivityMonitored(signal: AbortSignal | undefined): void {
@@ -343,9 +362,22 @@ async function promptWithTimeout(
         throw new Error(externalAbortMessage(signal));
     }
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    const activity: ModelActivity = { monitored: false, received: false };
+    const activity: ModelActivity = {
+        monitored: false,
+        received: false,
+        timeoutMs,
+        deadline: Date.now() + timeoutMs,
+    };
     modelActivityBySignal.set(controller.signal, activity);
+    let setupTimeout: HiddenCompletionRefusal | undefined;
+    const timeout = setTimeout(() => {
+        try {
+            setupTimeout = activity.setupTimeout?.();
+        } catch {
+            // Diagnostics cannot prevent the timeout from aborting the prompt.
+        }
+        controller.abort();
+    }, timeoutMs);
     // Set when the first-output deadline, not the attempt timeout, ended the attempt.
     let silent = false;
     const firstOutputTimer =
@@ -358,9 +390,10 @@ async function promptWithTimeout(
               }, firstOutputTimeoutMs)
             : undefined;
     const timeoutError = () =>
-        silent && firstOutputTimeoutMs !== undefined
+        setupTimeout ??
+        (silent && firstOutputTimeoutMs !== undefined
             ? new ModelProducedNoOutputError(firstOutputTimeoutMs)
-            : new Error(`prompt timed out after ${timeoutMs}ms`);
+            : new Error(`prompt timed out after ${timeoutMs}ms`));
 
     // Link external signal to internal controller so external abort cancels the fetch
     const onExternalAbort = () => controller.abort();
@@ -406,6 +439,7 @@ async function promptWithTimeout(
         }
         throw error;
     } finally {
+        activity.setupTimeout = undefined;
         clearTimeout(timeout);
         if (firstOutputTimer) clearTimeout(firstOutputTimer);
         signal?.removeEventListener("abort", onExternalAbort);

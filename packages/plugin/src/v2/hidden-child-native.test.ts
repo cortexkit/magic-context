@@ -10,6 +10,7 @@ import {
     isSessionNotFound,
     nativeSessionRemove,
 } from "./hidden-child-native";
+import type { HiddenChildSetupBudget } from "./hidden-child-record";
 import { HIDDEN_CHILD_MAX_AGE_MS, sweepHiddenChildren } from "./hidden-child-sweep";
 import { createV2HiddenCompletionExecutor, type HiddenChildHost } from "./hidden-completion";
 import { HIDDEN_DREAMER_AGENT, HiddenChildHook } from "./hooks/hidden-child";
@@ -41,6 +42,51 @@ const request = () => ({
         model: { providerID: "mock", modelID: "cheap" },
         parts: [{ type: "text", text: "chunk", synthetic: true }],
     },
+});
+
+test("checks for a lost budget again before admitting a child returned by create", async () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE schema_migrations_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    const hook = new HiddenChildHook();
+    const id = "child-before-native-admission";
+    const expired = new Error("creation expired before admission");
+    let lost = false;
+    const budget: HiddenChildSetupBudget = {
+        stage: "creating the child session",
+        cleanupMs: 2_000,
+        setStage() {},
+        check() {
+            if (lost) throw expired;
+        },
+        async work(start) {
+            const answer = await start();
+            lost = true;
+            return answer;
+        },
+    };
+    const removed: string[] = [];
+    const lifecycle = createNativeHiddenChildren(
+        { create: async () => ({ id }) } as HiddenChildHost,
+        async ({ sessionID }) => {
+            removed.push(sessionID);
+        },
+        { db, hook, generation: "test", keepSubagents: false, log() {} },
+    );
+    try {
+        await expect(
+            lifecycle.open(
+                historian,
+                "historian",
+                { providerID: "mock", modelID: "cheap" },
+                budget,
+            ),
+        ).rejects.toBe(expired);
+        expect(removed).toEqual([id]);
+        expect(isLiveHiddenChild(id)).toBe(false);
+        expect(hook.owns(id)).toBe(false);
+    } finally {
+        db.close();
+    }
 });
 
 async function setup(

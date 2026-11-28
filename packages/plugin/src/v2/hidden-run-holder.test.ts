@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, symlinkSync } from "node:fs";
 import { join, sep } from "node:path";
 import { createTestTempDir } from "../shared/test-temp-dir";
-import type { HiddenChildHost } from "./hidden-child-record";
+import type { HiddenChildHost, HiddenChildSetupBudget } from "./hidden-child-record";
 import {
     hiddenRunPlacement,
     matchesHiddenRunLocation,
@@ -10,6 +10,50 @@ import {
 } from "./hidden-run-holder";
 
 type CreateHolder = NonNullable<HiddenChildHost["createHolder"]>;
+
+test("holder creation stops waiting at the holder's guard even if the host never answers", async () => {
+    const { dir, cleanup } = createTestTempDir("oc2-holder-guard-");
+    const entered = Promise.withResolvers<void>();
+    const answer = Promise.withResolvers<void>();
+    const deadline = Promise.withResolvers<never>();
+    const timeout = new Error("holder creation timed out");
+    let stage = "";
+    const budget: HiddenChildSetupBudget = {
+        get stage() {
+            return stage;
+        },
+        setStage(value) {
+            stage = value;
+        },
+        check() {},
+        cleanupMs: 2_000,
+        work: (start) => Promise.race([start(), deadline.promise]),
+    };
+    const placement = hiddenRunPlacement(
+        async (input) => {
+            entered.resolve();
+            await answer.promise;
+            return input;
+        },
+        dir,
+        budget,
+    );
+    let refused: unknown;
+    void placement.catch((error) => {
+        refused = error;
+    });
+    try {
+        await entered.promise;
+        expect(stage).toBe("creating the background holder");
+        deadline.reject(timeout);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(refused).toBe(timeout);
+    } finally {
+        answer.resolve();
+        await placement.catch(() => {});
+        cleanup();
+    }
+});
 
 test.each([
     ["2.0.22", true],

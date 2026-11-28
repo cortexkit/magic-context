@@ -1555,6 +1555,9 @@ async function setupContext(
                 hostVersion: context.app?.version,
                 keepSubagents: config.keep_subagents === true,
                 ensureAgent: () => (hiddenAgentsReady ??= context.agent.reload()),
+                forgetAgent: (pending) => {
+                    if (hiddenAgentsReady === pending) hiddenAgentsReady = undefined;
+                },
                 modelCatalog: () => Promise.resolve(context.model.list()),
                 historianTemperature: () => config.historian?.temperature,
                 openReader: openStoreReader,

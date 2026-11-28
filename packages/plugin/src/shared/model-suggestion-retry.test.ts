@@ -6,6 +6,7 @@ import {
     getPromptFailureDetail,
     noteModelActivityMonitored,
     noteModelOutputReceived,
+    notePromptSetupTimeout,
     promptSyncWithModelSuggestionRetry,
     promptSyncWithValidatedOutputRetry,
 } from "./model-suggestion-retry";
@@ -682,6 +683,42 @@ function hostFetchTimeout(): Error {
 }
 
 describe("host fetch TimeoutError is a timeout", () => {
+    test.each([
+        "no setup callback",
+        "registered callback reports an already dispatched prompt",
+        "callback throws",
+    ])("the shared timer still reports a provider timeout when %s", async (caseName) => {
+        jest.useFakeTimers();
+        try {
+            const entered = Promise.withResolvers<void>();
+            const dispatched = true;
+            let read = 0;
+            const run = promptSyncWithValidatedOutputRetry(undefined, createArgs(), {
+                transport: ({ signal }) => {
+                    if (caseName !== "no setup callback")
+                        notePromptSetupTimeout(signal, () => {
+                            read++;
+                            if (caseName === "callback throws") throw new Error("bad diagnostic");
+                            if (dispatched) return undefined;
+                            throw new Error("the test transport never waits for setup");
+                        });
+                    entered.resolve();
+                    return new Promise(() => {});
+                },
+                timeoutMs: 50,
+                fetchOutput: async () => "unreachable",
+                validateOutput: (output) => output,
+            }).catch((error: unknown) => error);
+            await entered.promise;
+            jest.advanceTimersByTime(50);
+            const caught = await run;
+            expect((caught as Error).message).toBe("prompt timed out after 50ms");
+            expect(getPromptFailureDetail(caught)?.failureClass).toBe("provider_timeout");
+            expect(read).toBe(caseName === "no setup callback" ? 0 : 1);
+        } finally {
+            jest.useRealTimers();
+        }
+    });
     test("validated retry stops the chain, aborts the child, and reports provider_timeout", async () => {
         const prompt = mock(async () => {
             throw hostFetchTimeout();

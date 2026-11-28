@@ -100,7 +100,10 @@ export const HIDDEN_RUN_DISPOSED_REASON =
  * this set is refused exactly as any other unregistered hidden child is.
  */
 const DISPOSED_CHILDREN_KEY = Symbol.for("@cortexkit/magic-context/v2/disposed-hidden-children");
+const TIMED_OUT_CHILDREN_KEY = Symbol.for("@cortexkit/magic-context/v2/timed-out-hidden-children");
 const DISPOSED_CHILDREN_LIMIT = 512;
+const HIDDEN_RUN_RETIRED_REASON =
+    "the Magic Context hidden run was cancelled or timed out and is being retired";
 
 function disposedChildren(): Set<string> {
     const store = globalThis as { [DISPOSED_CHILDREN_KEY]?: Set<string> };
@@ -110,7 +113,20 @@ function disposedChildren(): Set<string> {
 
 /** Record that `sessionID` belonged to a plugin instance that has been disposed. */
 export function noteChildOfDisposedInstance(sessionID: string): void {
-    const children = disposedChildren();
+    rememberStoppedChild(disposedChildren(), sessionID);
+}
+
+function timedOutChildren(): Set<string> {
+    const store = globalThis as { [TIMED_OUT_CHILDREN_KEY]?: Set<string> };
+    return (store[TIMED_OUT_CHILDREN_KEY] ??= new Set<string>());
+}
+
+/** Refuse the child's remaining work even before the host answers the interrupt. */
+export function noteTimedOutHiddenChild(sessionID: string): void {
+    rememberStoppedChild(timedOutChildren(), sessionID);
+}
+
+function rememberStoppedChild(children: Set<string>, sessionID: string): void {
     children.delete(sessionID);
     children.add(sessionID);
     // Oldest first: a Set iterates in insertion order.
@@ -129,6 +145,7 @@ export function isChildOfDisposedInstance(sessionID: string): boolean {
 /** Clears the process-wide record, for tests. */
 export function __resetDisposedChildrenForTests(): void {
     disposedChildren().clear();
+    timedOutChildren().clear();
 }
 
 /** One OpenCode 2 permission rule: the action is the tool id, the resource a pattern. */
@@ -200,6 +217,8 @@ export function hiddenToolCallRefusal(
     call: { tool: string; sessionID: string; agent?: string },
     hook: Pick<HiddenChildHook, "owns" | "agentFor">,
 ): string | undefined {
+    if (timedOutChildren().has(call.sessionID))
+        return `Magic Context hidden child ${call.sessionID} refused: ${HIDDEN_RUN_RETIRED_REASON}; ${call.tool} refused`;
     const owned = hook.owns(call.sessionID);
     // A child of a disposed instance has no run left to serve: its instance
     // cancelled the run, so none of its tool calls may execute here.
@@ -562,6 +581,8 @@ export class HiddenChildHook {
      * here exactly as the context guard would refuse its prompt.
      */
     compactionSummary(sessionID: string, agent?: string): string | undefined {
+        if (timedOutChildren().has(sessionID))
+            this.refuse(HIDDEN_RUN_RETIRED_REASON, { sessionID, messages: [] }, undefined);
         if (!this.owns(sessionID)) {
             // Another instance's hidden child: refused here exactly as `apply`
             // refuses its turn, rather than summarized as a user conversation.
@@ -696,6 +717,8 @@ export class HiddenChildHook {
      * the run, and this instance has no record of the prompt it was sent.
      */
     apply(draft: SessionContext): boolean {
+        if (timedOutChildren().has(draft.sessionID))
+            this.refuse(HIDDEN_RUN_RETIRED_REASON, draft, undefined);
         if (!this.owns(draft.sessionID)) {
             if (isChildOfDisposedInstance(draft.sessionID)) {
                 this.refuse(

@@ -13,6 +13,8 @@ export interface HiddenChildCleanupRecord {
     directory: string;
     created_at: number;
     deadline_at?: number;
+    /** Created for an expired attempt; never protected as in-flight work. */
+    retiring?: true;
     /** Set by the sweep to the wall-clock time of the latest removal attempt that failed. */
     failed_at?: number;
 }
@@ -22,6 +24,14 @@ export function recordHiddenChild(db: Database, child: HiddenChildCleanupRecord)
     db.prepare("INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)").run(
         `${PREFIX}${child.id}`,
         JSON.stringify(child),
+    );
+}
+
+export function recordRetiringHiddenChild(db: Database, child: HiddenChildCleanupRecord): void {
+    db.prepare(`INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = json_set(value, '$.retiring', json('true'))`).run(
+        `${PREFIX}${child.id}`,
+        JSON.stringify({ ...child, retiring: true }),
     );
 }
 

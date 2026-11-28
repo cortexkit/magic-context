@@ -22,6 +22,8 @@ import {
     ModelProducedNoOutputError,
     noteModelActivityMonitored,
     noteModelOutputReceived,
+    notePromptSetupTimeout,
+    promptTransportBudget,
 } from "../shared/model-suggestion-retry";
 import { parseProviderModel, toModelEntry } from "../shared/resolve-fallbacks";
 import { runTokenLog } from "../shared/run-token-log";
@@ -48,6 +50,7 @@ import {
     type HiddenChildHook,
     hiddenToolLoop,
     noteChildOfDisposedInstance,
+    noteTimedOutHiddenChild,
 } from "./hooks/hidden-child";
 import type { StoreRow } from "./store-reader";
 
@@ -62,6 +65,7 @@ export interface V2HiddenCompletionOptions {
     hook: HiddenChildHook;
     openReader: () => HiddenChildRows & { close?: () => void };
     ensureAgent?(): Promise<void>;
+    forgetAgent?(pending: Promise<void>): void;
     generation?: string;
     hostVersion?: string;
     /** Maximum time shutdown waits for the host to remove a child. */
@@ -117,6 +121,12 @@ class HiddenWorkTimeout extends Error {
     }
 }
 
+class HiddenSetupTimeout extends HiddenCompletionRefusal {
+    constructor(stage: string) {
+        super("hidden_setup_timeout", `Hidden completion setup timed out while ${stage}`, true);
+    }
+}
+
 class HiddenWorkAborted extends Error {
     constructor() {
         super("Hidden completion prompt aborted");
@@ -125,15 +135,25 @@ class HiddenWorkAborted extends Error {
 
 function setupBudget(
     deadline: number,
-    timeoutMs: number,
+    timeout: (stage: string) => Error,
     signal?: AbortSignal,
 ): HiddenChildSetupBudget {
+    let stage = "preparing the attempt";
+    let lost: Error | undefined;
     const check = () => {
-        if (Date.now() >= deadline) throw new HiddenWorkTimeout(timeoutMs);
-        if (signal?.aborted) throw new HiddenWorkAborted();
+        // Once a timer or abort wins, a wall-clock adjustment cannot admit its answer.
+        if (lost) throw lost;
+        if (Date.now() >= deadline) throw (lost = timeout(stage));
+        if (signal?.aborted) throw (lost = new HiddenWorkAborted());
     };
     return {
         check,
+        setStage: (value) => {
+            stage = value;
+        },
+        get stage() {
+            return stage;
+        },
         cleanupMs: DEFAULT_DISPOSE_DRAIN_MS,
         async work(start, onLate) {
             check();
@@ -152,10 +172,10 @@ function setupBudget(
                     }),
                     new Promise<never>((_, reject) => {
                         timer = setTimeout(
-                            () => reject(new HiddenWorkTimeout(timeoutMs)),
+                            () => reject((lost ??= timeout(stage))),
                             Math.max(0, deadline - Date.now()),
                         );
-                        abort = () => reject(new HiddenWorkAborted());
+                        abort = () => reject((lost ??= new HiddenWorkAborted()));
                         if (signal?.aborted) abort();
                         else signal?.addEventListener("abort", abort, { once: true });
                     }),
@@ -511,11 +531,11 @@ async function awaitAssistantRow(
     afterSeq: number,
     deadline: number,
     signal?: AbortSignal,
+    checkDeadline?: () => void,
 ): Promise<{ row: StoreRow<"assistant">; outputLimit?: true }> {
     for (;;) {
         // Checked before reading: a cancelled run must not open another reader.
-        if (Date.now() >= deadline)
-            throw new Error("Hidden completion timed out waiting for a persisted assistant row");
+        checkDeadline?.();
         const refusedBefore = localFailure();
         if (refusedBefore) throw refusedBefore;
         const { assistant, idle } = withReader(openReader, (reader) => ({
@@ -707,7 +727,7 @@ export async function createV2HiddenCompletionExecutor(
             }
             return { providerID: model.providerID, modelID: model.modelID };
         } catch (error) {
-            if (error instanceof HiddenWorkTimeout || error instanceof HiddenWorkAborted)
+            if (error instanceof HiddenSetupTimeout || error instanceof HiddenWorkAborted)
                 throw error;
             return model;
         }
@@ -803,14 +823,19 @@ export async function createV2HiddenCompletionExecutor(
         if (run.retired) return run.retirement ?? Promise.resolve();
         return (run.retirement ??= (async () => {
             const id = run.child.id;
-            const warn = () => note(`[magic-context] hidden child ${id} could not be interrupted`);
+            const warn = (error: unknown) => {
+                const kind = error instanceof Error ? error.constructor.name : typeof error;
+                const message = `[magic-context] hidden child ${id} could not be interrupted (${kind})`;
+                if (options.log) options.log(message);
+                else log(message);
+            };
             try {
                 await settleWithin(
                     host.interrupt({ sessionID: id }).catch(warn),
                     DEFAULT_DISPOSE_DRAIN_MS,
                 );
-            } catch {
-                warn();
+            } catch (error) {
+                warn(error);
             } finally {
                 retire(run, reason);
             }
@@ -821,25 +846,42 @@ export async function createV2HiddenCompletionExecutor(
         capabilities: V2_HIDDEN_EXECUTOR_CAPABILITIES,
         async open(identity) {
             if (disposed) throw disposed;
-            const deadline = Date.now() + identity.timeoutMs;
-            const setup = setupBudget(deadline, identity.timeoutMs);
-            const work = setup.work;
+            const roleWait = setupBudget(
+                Date.now() + identity.timeoutMs,
+                (stage) => new HiddenSetupTimeout(stage),
+            );
+            roleWait.setStage("waiting for its role");
             const role = roleFor(identity);
             const releaseStore = options.holdStore?.() ?? (() => {});
             let releaseRole: (() => void) | undefined;
             let openedChild: PersistedHiddenChild | undefined;
             let opened: RunState | undefined;
             try {
-                releaseRole = await work(
+                releaseRole = await roleWait.work(
                     () => acquireRole(role),
                     (release) => release(),
                 );
                 if (disposed) throw disposed;
-                if (options.ensureAgent) await work(options.ensureAgent);
+                const deadline = Date.now() + identity.timeoutMs;
+                const setup = setupBudget(deadline, (stage) => new HiddenSetupTimeout(stage));
+                const work = setup.work;
+                const ensureAgent = options.ensureAgent;
+                if (ensureAgent) {
+                    setup.setStage("reloading the hidden agent");
+                    let pending: Promise<void> | undefined;
+                    try {
+                        await work(() => (pending = ensureAgent.call(options)));
+                    } catch (error) {
+                        if (pending) options.forgetAgent?.(pending);
+                        throw error;
+                    }
+                }
+                setup.setStage("resolving the hidden model");
                 const head = await resolveHead(identity, work);
+                setup.setStage("creating the child session");
                 const active = await work(
                     () => lifecycle.open(identity, role, head, setup),
-                    (child) => lifecycle.retire(child, "hidden-run-open-timeout"),
+                    (child) => lifecycle.retireLate(child, setup.cleanupMs),
                 );
                 openedChild = active;
                 const configuredModel = toModelEntry(identity.model);
@@ -870,12 +912,17 @@ export async function createV2HiddenCompletionExecutor(
                 opened = run;
                 openRuns.add(run);
                 if (disposed) noteChildOfDisposedInstance(active.id);
+                setup.setStage("switching the child model");
                 await switchChildModel(run, head, setup);
                 setup.check();
                 return handle;
             } catch (error) {
                 try {
-                    if (openedChild) lifecycle.retire(openedChild, "hidden-run-open-failed");
+                    if (openedChild) {
+                        if (error instanceof HiddenSetupTimeout)
+                            noteTimedOutHiddenChild(openedChild.id);
+                        lifecycle.retire(openedChild, "hidden-run-open-failed");
+                    }
                 } finally {
                     if (opened) openRuns.delete(opened);
                     releaseRole?.();
@@ -891,8 +938,32 @@ export async function createV2HiddenCompletionExecutor(
             const timeoutMs = run.identity.timeoutMs;
             const deadline = run.firstDeadline ?? startedAt + timeoutMs;
             run.firstDeadline = undefined;
-            const setup = setupBudget(deadline, timeoutMs, request.signal);
+            let dispatched = false;
+            const setup = setupBudget(
+                deadline,
+                (stage) =>
+                    dispatched ? new HiddenWorkTimeout(timeoutMs) : new HiddenSetupTimeout(stage),
+                request.signal,
+            );
             const work = setup.work;
+            const sharedBudget = promptTransportBudget(request.signal);
+            const refuseSliver = () => {
+                const now = Date.now();
+                if (
+                    deadline - now < timeoutMs * 0.05 ||
+                    (sharedBudget && sharedBudget.deadline - now < sharedBudget.timeoutMs * 0.05)
+                )
+                    throw new HiddenSetupTimeout("preparing to send the prompt");
+            };
+            const retireFailedSetup = (error: Error) => {
+                if (error instanceof HiddenSetupTimeout) {
+                    run.deadlineExpired = true;
+                    noteTimedOutHiddenChild(run.child.id);
+                }
+                run.failed = true;
+                run.unsettledFailure = true;
+                if (!run.retirement) retire(run, "hidden-attempt-setup-cancelled");
+            };
             const stopWithinWork = async (reason: string) => {
                 const retirement = interruptAndRetire(run, reason);
                 if (Date.now() < deadline) await settleWithin(retirement, deadline - Date.now());
@@ -913,9 +984,12 @@ export async function createV2HiddenCompletionExecutor(
 
             let requested: Model;
             let requestedRef: string;
+            notePromptSetupTimeout(request.signal, () => new HiddenSetupTimeout(setup.stage));
             try {
                 const previousRetirement = run.retirement;
+                setup.setStage("waiting for the previous child to retire");
                 if (previousRetirement) await work(() => previousRetirement);
+                setup.setStage("resolving the hidden model");
                 requested = await validateVariant(requestModel(request, run.child.model), work);
                 requestedRef = modelKey(requested);
                 const configuredModel = [
@@ -954,7 +1028,7 @@ export async function createV2HiddenCompletionExecutor(
                         );
                     } catch (error) {
                         if (
-                            error instanceof HiddenWorkTimeout ||
+                            error instanceof HiddenSetupTimeout ||
                             error instanceof HiddenWorkAborted
                         )
                             throw error;
@@ -983,9 +1057,10 @@ export async function createV2HiddenCompletionExecutor(
                     // Fallback retries share the original handle. A terminal provider failure has
                     // already retired its child, so give the retry a fresh child session instead of
                     // prompting a session that is queued for deletion.
+                    setup.setStage("creating the replacement child session");
                     run.child = await work(
                         () => lifecycle.create(run.identity, run.role, requested, setup),
-                        (child) => lifecycle.retire(child, "hidden-run-replacement-timeout"),
+                        (child) => lifecycle.retireLate(child, setup.cleanupMs),
                     );
                     run.retirement = undefined;
                     run.deadlineExpired = false;
@@ -995,16 +1070,18 @@ export async function createV2HiddenCompletionExecutor(
                     handle.id = run.child.id;
                     handle.childSessionId = run.child.id;
                 }
+                setup.setStage("switching the child model");
                 await switchChildModel(run, requested, setup);
                 setup.check();
+                setup.setStage("preparing to send the prompt");
+                refuseSliver();
             } catch (error) {
-                if (error instanceof HiddenWorkTimeout || error instanceof HiddenWorkAborted) {
-                    if (error instanceof HiddenWorkTimeout) run.deadlineExpired = true;
-                    run.failed = true;
-                    run.unsettledFailure = true;
-                    if (!run.retirement) retire(run, "hidden-attempt-setup-cancelled");
-                }
+                if (error instanceof HiddenSetupTimeout || error instanceof HiddenWorkAborted)
+                    retireFailedSetup(error);
                 throw error;
+            } finally {
+                // From here to host.prompt the remaining preparation is synchronous.
+                notePromptSetupTimeout(request.signal);
             }
             // Every await above can span a dispose; nothing is prompted after one.
             refuseDisposed();
@@ -1100,6 +1177,7 @@ export async function createV2HiddenCompletionExecutor(
             });
             const onAbort = () => {
                 const reason = request.signal?.reason;
+                if (dispatched) noteTimedOutHiddenChild(run.child.id);
                 if (
                     reason instanceof ModelProducedNoOutputError &&
                     run.identity.kind === "dreamer-task"
@@ -1124,14 +1202,6 @@ export async function createV2HiddenCompletionExecutor(
                     abortReject(new Error("Hidden completion prompt aborted")),
                 );
             };
-            const deadlineTimer = setTimeout(
-                () => {
-                    run.deadlineExpired = true;
-                    void interruptAndRetire(run, "prompt-timeout");
-                    abortReject(new HiddenWorkTimeout(timeoutMs));
-                },
-                Math.max(0, deadline - Date.now()),
-            );
             request.signal?.addEventListener("abort", onAbort, { once: true });
             let settle!: () => void;
             const entry: InFlightAttempt = {
@@ -1161,7 +1231,11 @@ export async function createV2HiddenCompletionExecutor(
             if (stopWatching) noteModelActivityMonitored(request.signal);
             try {
                 await Promise.race([
-                    work(() => host.prompt({ sessionID: run.child.id, text: marker })),
+                    work(() => {
+                        refuseSliver();
+                        dispatched = true;
+                        return host.prompt({ sessionID: run.child.id, text: marker });
+                    }),
                     aborted,
                     ...(budget ? [budgetStopped] : []),
                 ]);
@@ -1171,26 +1245,31 @@ export async function createV2HiddenCompletionExecutor(
                     ...(budget ? [budgetStopped] : []),
                 ]);
                 const { row, outputLimit } = await Promise.race([
-                    awaitAssistantRow(
-                        options.openReader,
-                        async () => {
-                            try {
-                                const id = run.child.id;
-                                const terminalError = host.terminalError;
-                                const eventError = terminalError
-                                    ? await work(() => terminalError.call(host, { sessionID: id }))
-                                    : undefined;
-                                if (eventError !== undefined) return eventError;
-                                return (await work(() => host.get({ sessionID: id }))).error;
-                            } catch {
-                                return undefined;
-                            }
-                        },
-                        () => attempt.refusal ?? attempt.stepLimit ?? attempt.budgetExceeded,
-                        run.child.id,
-                        baseline,
-                        deadline,
-                        request.signal,
+                    work(() =>
+                        awaitAssistantRow(
+                            options.openReader,
+                            async () => {
+                                try {
+                                    const id = run.child.id;
+                                    const terminalError = host.terminalError;
+                                    const eventError = terminalError
+                                        ? await work(() =>
+                                              terminalError.call(host, { sessionID: id }),
+                                          )
+                                        : undefined;
+                                    if (eventError !== undefined) return eventError;
+                                    return (await work(() => host.get({ sessionID: id }))).error;
+                                } catch {
+                                    return undefined;
+                                }
+                            },
+                            () => attempt.refusal ?? attempt.stepLimit,
+                            run.child.id,
+                            baseline,
+                            deadline,
+                            request.signal,
+                            setup.check,
+                        ),
                     ),
                     aborted,
                     ...(budget ? [budgetStopped] : []),
@@ -1303,8 +1382,14 @@ export async function createV2HiddenCompletionExecutor(
                 if (!(error instanceof HiddenProviderError)) {
                     run.unsettledFailure = true;
                 }
-                if (error instanceof HiddenWorkTimeout || Date.now() >= deadline) {
+                if (error instanceof HiddenSetupTimeout) {
+                    retireFailedSetup(error);
+                } else if (
+                    dispatched &&
+                    (caught instanceof HiddenWorkTimeout || Date.now() >= deadline)
+                ) {
                     run.deadlineExpired = true;
+                    noteTimedOutHiddenChild(run.child.id);
                     void interruptAndRetire(run, "prompt-timeout");
                 } else if (request.signal?.aborted && !run.retired) {
                     await stopWithinWork("prompt-aborted");
@@ -1332,7 +1417,6 @@ export async function createV2HiddenCompletionExecutor(
                 throw error;
             } finally {
                 stopWatching?.();
-                clearTimeout(deadlineTimer);
                 if (budgetPoll) clearInterval(budgetPoll);
                 request.signal?.removeEventListener("abort", onAbort);
                 options.hook.releaseAttempt(marker);

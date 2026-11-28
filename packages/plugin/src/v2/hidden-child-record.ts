@@ -101,7 +101,9 @@ export interface HiddenChildRows {
 
 /** The attempt's work deadline and the separate allowance for removing a late child. */
 export interface HiddenChildSetupBudget {
+    readonly stage: string;
     check(): void;
+    setStage(stage: string): void;
     work<T>(start: () => Promise<T>, onLate?: (result: T) => void): Promise<T>;
     cleanupMs: number;
 }
@@ -127,6 +129,7 @@ export interface HiddenChildLifecycle {
     ): Promise<PersistedHiddenChild>;
     /** The child must never carry another run. Returns at once; cleanup happens off the run. */
     retire(child: PersistedHiddenChild, reason: string): void;
+    retireLate(child: PersistedHiddenChild, cleanupMs: number): void;
     /**
      * The run holding this child has ended. `retired` says whether `retire` already ran for it.
      * Resolves once any cleanup this lifecycle does for a finished run is over; never rejects.

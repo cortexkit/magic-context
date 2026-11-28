@@ -96,6 +96,66 @@ function mockConfig(dreamer: { disable: boolean }, gitIndexing = false) {
 }
 
 describe("OpenCode 2 dream schedule timer registration", () => {
+    test("a hung agent reload does not poison the next hidden run", async () => {
+        mockConfig({ disable: false });
+        const directory = projectDirectory();
+        const host = fakeHost(directory);
+        const ready = Promise.withResolvers<hiddenCompletion.V2HiddenCompletionExecutor>();
+        const createExecutor = hiddenCompletion.createV2HiddenCompletionExecutor;
+        const capture = spyOn(
+            hiddenCompletion,
+            "createV2HiddenCompletionExecutor",
+        ).mockImplementation(async (...args) => {
+            const executor = await createExecutor(...args);
+            ready.resolve(executor);
+            return executor;
+        });
+        const entered = Promise.withResolvers<void>();
+        const reload = spyOn(host.agent, "reload")
+            .mockImplementationOnce(() => {
+                entered.resolve();
+                return new Promise(() => {});
+            })
+            .mockResolvedValue(undefined);
+        let children = 0;
+        host.session.create = (async () => ({
+            id: `reload-test-child-${++children}`,
+        })) as typeof host.session.create;
+        jest.useFakeTimers({ doNotFake: ["setImmediate"] });
+        const duties = await registerContext(host);
+        const executor = await ready.promise;
+        const identity = {
+            agent: "historian",
+            kind: "historian",
+            system: "test",
+            model: "mock/cheap",
+            timeoutMs: 100,
+            title: "reload test",
+            directory,
+        } as const;
+        const opening = executor.open(identity);
+        void opening.catch(() => {});
+        try {
+            await entered.promise;
+            jest.advanceTimersByTime(identity.timeoutMs);
+            await expect(opening).rejects.toThrow("reloading the hidden agent");
+            expect(children).toBe(0);
+            const next = await executor.open(identity);
+            expect(reload).toHaveBeenCalledTimes(2);
+            expect(next.id).toBe("reload-test-child-1");
+            await executor.close(next, {
+                promptSettled: false,
+                privacySensitive: true,
+                context: "test",
+                log() {},
+            });
+        } finally {
+            await duties?.dispose();
+            reload.mockRestore();
+            capture.mockRestore();
+            jest.useRealTimers();
+        }
+    });
     test("normal disposal logs only the class of a failing step and still closes the pool", async () => {
         mockConfig({ disable: false });
         const lines = spyOn(logger, "log");
