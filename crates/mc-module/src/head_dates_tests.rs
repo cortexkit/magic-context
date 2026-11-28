@@ -553,8 +553,8 @@ fn a_failed_save_at_a_cut_moves_a_day_to_the_nearest_message_once() {
         .save_app_index(&session.key, &[probe], None)
         .unwrap_err();
     assert!(refused.contains("intentional failed save"), "{refused}");
-    // Summary 2's boundaries have no time but the one the index holds; the
-    // nearest timed message the search index knows is message 3.
+    // Summary 2's boundary messages have their times only in the transcript
+    // index; the nearest timed message the search index knows is message 3.
     search_rows(&session, &[(3, DAY0)]);
     let heading = |m0: &str| {
         m0.lines()
@@ -581,10 +581,7 @@ fn a_failed_save_at_a_cut_moves_a_day_to_the_nearest_message_once() {
 
     session.fold_due = true;
     build(&mut session, &settings);
-    let warm = (
-        shown(&session, head::M0_ID),
-        shown(&session, head::M1_ID),
-    );
+    let warm = (shown(&session, head::M0_ID), shown(&session, head::M1_ID));
     assert_eq!(heading(&warm.0), "## 5-8 · 2026-03-01 · Work 2");
     let mut cold = reopened(&session, &dir);
     cold.fold_due = true;

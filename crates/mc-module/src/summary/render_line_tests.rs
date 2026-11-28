@@ -1106,7 +1106,15 @@ fn uneven_rows(count: usize, style: usize) -> Vec<DecayRenderCompartment> {
                 "μ = \"x\" ",
             ][i % 6];
             let tail = [
-                " ordinary", "···", "。", "///", "}", "\"", "!", ">", "</tag>",
+                " ordinary",
+                "···",
+                "。",
+                "///",
+                "}",
+                "\"",
+                "!",
+                ">",
+                "</tag>",
             ][i % 9];
             DecayRenderCompartment {
                 start_message,
@@ -1156,7 +1164,8 @@ fn past_the_plan_cap_the_newest_two_sections_are_left() {
     assert_eq!(left, [118, 119]);
 }
 
-/// What the title fill costs at its worst, with the exact Claude counter:
+/// What the title fill costs at its worst, counted with the tokenizer a fold
+/// uses for Claude models:
 /// the newest summary larger than the budget in every form but its title,
 /// and room for about every older title, on one day or with the day changing
 /// every two summaries. Without the fill, cold (nothing counted yet) and

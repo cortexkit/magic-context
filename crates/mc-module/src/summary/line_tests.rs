@@ -1319,10 +1319,10 @@ fn the_title_fill_chooses_what_counting_every_plan_again_chooses() {
 
 /// Through the whole plan: the title fill after the line, the floor (whose
 /// titles can sit inside a run of one day) and any step down gives what
-/// the first fill gave, on generated sessions with both score scales and
-/// on the two shapes that made the first fill slowest (a newest summary
-/// larger than the budget, then room for every older title, on one day or
-/// in pairs of days).
+/// [`fill_titles_reference`] gives, on generated sessions with both score
+/// scales and on the two shapes that make the reference slowest (a newest
+/// summary larger than the budget, then room for every older title, on one
+/// day or in pairs of days).
 #[test]
 fn the_title_fill_in_a_plan_chooses_what_the_first_fill_chose() {
     let compare = |summaries: &[Summary],
