@@ -75,3 +75,27 @@ jobs:
           name: rust-windows-x64-lib-timing-${{ github.run_attempt }}
           path: target/windows-rust-timing/
           if-no-files-found: error
+
+  rust-windows-long-head:
+    name: Rust (Windows x64 long-head scenario)
+    needs: rust-windows
+    if: ${{ !cancelled() }}
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+      - name: Trace the single long-head integration scenario
+        shell: bash
+        timeout-minutes: 35
+        env:
+          RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-msvc
+        run: bash scripts/ci/rust-windows-long-head.sh
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: rust-windows-x64-long-head-${{ github.run_attempt }}
+          path: target/windows-rust-long-head/
+          if-no-files-found: error
