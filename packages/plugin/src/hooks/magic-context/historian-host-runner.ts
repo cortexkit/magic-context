@@ -7,7 +7,11 @@ import { getSdkOutputLimit, getSdkWindowGeometry } from "../../shared/models-dev
 import { modelBodyField } from "../../shared/resolve-fallbacks";
 import type { Database } from "../../shared/sqlite";
 import { createV1HiddenCompletionExecutor } from "./compartment-runner-historian";
-import type { HiddenCompletion, HiddenCompletionExecutor } from "./compartment-runner-types";
+import {
+    type HiddenCompletion,
+    type HiddenCompletionExecutor,
+    HiddenCompletionRefusal,
+} from "./compartment-runner-types";
 import {
     resolveHistorianProducerLimits,
     resolveKnownHistorianContextLimit,
@@ -314,6 +318,7 @@ function describeError(error: unknown): string {
  */
 function failureCode(error: unknown, aborted: boolean): string {
     if (aborted) return "aborted";
+    if (error instanceof HiddenCompletionRefusal) return "local_refusal";
     const text = describeError(error).toLowerCase();
     if (text.includes("all models exhausted") || text.includes("all fallback models failed")) {
         return "chain_exhausted";

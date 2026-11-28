@@ -813,8 +813,15 @@ async function runHistorianPrompt(args: {
                     parentSessionId,
                     `historian: prompt attempt ${retryIndex + 1} failed: ${errorMsg}`,
                 );
+                // Setup can also refuse when too little time remains to send the prompt.
+                // Neither case is a transient provider error, even if the text says "timeout".
                 const shouldRetry =
-                    retryIndex < MAX_HISTORIAN_RETRIES && isTransientHistorianPromptError(errorMsg);
+                    retryIndex < MAX_HISTORIAN_RETRIES &&
+                    !(
+                        error instanceof HiddenCompletionRefusal &&
+                        error.code === "hidden_setup_timeout"
+                    ) &&
+                    isTransientHistorianPromptError(errorMsg);
                 if (!shouldRetry) {
                     throw error;
                 }

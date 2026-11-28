@@ -19,6 +19,7 @@ import { needsBlockedRead } from "../shared/hidden-zen-read";
 import { log } from "../shared/logger";
 import type { PromptArgs } from "../shared/model-suggestion-retry";
 import {
+    isPromptTimeoutError,
     ModelProducedNoOutputError,
     noteModelActivityMonitored,
     noteModelOutputReceived,
@@ -141,7 +142,8 @@ function setupBudget(
     let stage = "preparing the attempt";
     let lost: Error | undefined;
     const check = () => {
-        // Once a timer or abort wins, a wall-clock adjustment cannot admit its answer.
+        // Whichever sees expiry first, the timer or this check, keeps the same failure for
+        // every waiter. A clock read can retire a result but cannot admit one after expiry.
         if (lost) throw lost;
         if (Date.now() >= deadline) throw (lost = timeout(stage));
         if (signal?.aborted) throw (lost = new HiddenWorkAborted());
@@ -1382,6 +1384,7 @@ export async function createV2HiddenCompletionExecutor(
                 if (!(error instanceof HiddenProviderError)) {
                     run.unsettledFailure = true;
                 }
+                const dispatchedTimeout = dispatched && isPromptTimeoutError(error);
                 if (error instanceof HiddenSetupTimeout) {
                     retireFailedSetup(error);
                 } else if (
@@ -1394,10 +1397,11 @@ export async function createV2HiddenCompletionExecutor(
                 } else if (request.signal?.aborted && !run.retired) {
                     await stopWithinWork("prompt-aborted");
                 } else if (
-                    error instanceof Error &&
-                    error.message.includes("timed out") &&
-                    !run.retired
+                    !run.retired &&
+                    (dispatchedTimeout ||
+                        (error instanceof Error && error.message.includes("timed out")))
                 ) {
+                    if (dispatchedTimeout) noteTimedOutHiddenChild(run.child.id);
                     await stopWithinWork("prompt-timeout");
                 } else if (
                     (error instanceof HiddenAgentStepLimit ||

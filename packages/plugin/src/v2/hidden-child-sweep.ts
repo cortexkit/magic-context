@@ -13,7 +13,7 @@ export interface HiddenChildCleanupRecord {
     directory: string;
     created_at: number;
     deadline_at?: number;
-    /** Created for an expired attempt; never protected as in-flight work. */
+    /** Diagnostic only: nothing reads this flag, and the sweep treats the record like any other. */
     retiring?: true;
     /** Set by the sweep to the wall-clock time of the latest removal attempt that failed. */
     failed_at?: number;

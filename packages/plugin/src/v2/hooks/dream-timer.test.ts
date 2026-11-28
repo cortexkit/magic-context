@@ -96,7 +96,10 @@ function mockConfig(dreamer: { disable: boolean }, gitIndexing = false) {
 }
 
 describe("OpenCode 2 dream schedule timer registration", () => {
-    test("a hung agent reload does not poison the next hidden run", async () => {
+    test.each([
+        "hung",
+        "rejected",
+    ] as const)("a %s agent reload does not poison the next hidden run", async (failure) => {
         mockConfig({ disable: false });
         const directory = projectDirectory();
         const host = fakeHost(directory);
@@ -111,10 +114,11 @@ describe("OpenCode 2 dream schedule timer registration", () => {
             return executor;
         });
         const entered = Promise.withResolvers<void>();
+        const reloadError = new Error("agent reload rejected");
         const reload = spyOn(host.agent, "reload")
             .mockImplementationOnce(() => {
                 entered.resolve();
-                return new Promise(() => {});
+                return failure === "hung" ? new Promise(() => {}) : Promise.reject(reloadError);
             })
             .mockResolvedValue(undefined);
         let children = 0;
@@ -137,8 +141,12 @@ describe("OpenCode 2 dream schedule timer registration", () => {
         void opening.catch(() => {});
         try {
             await entered.promise;
-            jest.advanceTimersByTime(identity.timeoutMs);
-            await expect(opening).rejects.toThrow("reloading the hidden agent");
+            if (failure === "hung") {
+                jest.advanceTimersByTime(identity.timeoutMs);
+                await expect(opening).rejects.toThrow("reloading the hidden agent");
+            } else {
+                await expect(opening).rejects.toBe(reloadError);
+            }
             expect(children).toBe(0);
             const next = await executor.open(identity);
             expect(reload).toHaveBeenCalledTimes(2);

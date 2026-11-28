@@ -2077,6 +2077,7 @@ const TEMPLATE_DATA = [
 "transform: reading the host compaction head failed:",
 "ignored notification held \x01 (session active); queued",
 "[magic-context] hidden child \x01 kept (keep_subagents)",
+"[magic-context] late hidden child \x01 record failed (\x01)",
 "[magic-context] compaction-marker: removal failed: \x01",
 "[magic-context] embedding provider dispose failed: \x01",
 "[magic-context] failed to persist transform error: \x01",

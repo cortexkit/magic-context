@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 
-import type { HiddenCompletionExecutor, HiddenRunHandle } from "./compartment-runner-types";
+import {
+    type HiddenCompletionExecutor,
+    HiddenCompletionRefusal,
+    type HiddenRunHandle,
+} from "./compartment-runner-types";
 import { HistorianHostRunner, type HistorianHostRunnerDeps } from "./historian-host-runner";
 
 /**
@@ -127,6 +131,46 @@ async function attemptsWithin(
 }
 
 describe("historian host runner: per-attempt timeout", () => {
+    it("reports a typed setup timeout to the module as a local refusal", async () => {
+        const models: string[] = [];
+        const reports: string[] = [];
+        const done = Promise.withResolvers<void>();
+        const call = claimOnlyModule(reports, 1_000);
+        const executor = slowModelExecutor(models, "attempt");
+        executor.attempt = async (_handle, request) => {
+            models.push(request.body.model?.modelID ?? "?");
+            throw new HiddenCompletionRefusal(
+                "hidden_setup_timeout",
+                "Hidden completion setup timed out while switching the child model",
+                true,
+            );
+        };
+        const runner = new HistorianHostRunner({
+            call: async (input) => {
+                const response = await call(input);
+                if (input.method === "historian.complete") done.resolve();
+                return response;
+            },
+            claimantInstanceId: "install",
+            openExecutor: () => ({ executor, sessionDirectory: "/project" }),
+            enabled: () => true,
+        });
+        try {
+            void runner.pump("ses-1");
+            await done.promise;
+            expect(models).toEqual(["first"]);
+            expect(reports.map((report) => JSON.parse(report))).toEqual([
+                {
+                    code: "local_refusal",
+                    message:
+                        "hidden_setup_timeout: Hidden completion setup timed out while switching the child model",
+                },
+            ]);
+        } finally {
+            await runner.stop();
+        }
+    });
+
     it("attempts one claimed run the same way whichever host claims it", async () => {
         const shortHost = await attemptsWithin(1_500, 150, 150);
         const defaultHost = await attemptsWithin(1_500, undefined, 150);

@@ -141,7 +141,9 @@ export function createNativeHiddenChildren(
         liveChildren.delete(id);
         try {
             recordRetiringHiddenChild(options.db, { id, directory, created_at: createdAt });
-        } catch {
+        } catch (error) {
+            const kind = error instanceof Error ? error.constructor.name : typeof error;
+            options.log(`[magic-context] late hidden child ${id} record failed (${kind})`);
             // Still try to remove the child when durable cleanup cannot be recorded.
         }
         try {
