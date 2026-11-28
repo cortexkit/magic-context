@@ -165,9 +165,7 @@ fn startup_refuses_an_unrenamed_session_store() {
             .unwrap();
         assert!(!output.status.success());
         let error = stderr(&output);
-        // Rust prints the error returned by main with Debug, escaping path separators.
-        let path = format!("{:?}", data.display().to_string());
-        assert!(error.contains(path.trim_matches('"')), "{error}");
+        assert!(error.contains(data.to_str().unwrap()), "{error}");
         assert!(
             error.contains("mode3.db") && error.contains("sessions.db"),
             "{error}"
