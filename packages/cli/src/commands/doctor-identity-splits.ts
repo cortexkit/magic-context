@@ -66,12 +66,59 @@ export function orphanedPathReason(directory: string): string | undefined {
     return "directory is empty and has no git metadata";
 }
 
+/**
+ * Inherited variables that point git at a repository, work tree, index, object store,
+ * history rewrite (grafts, shallow file, replace refs) or ref namespace other than the
+ * one discovered from the probed folder. These are git's own repository-local variables
+ * (`git rev-parse --local-env-vars`, minus the configuration ones) plus `GIT_NAMESPACE`
+ * and `GIT_QUARANTINE_PATH`. A CLI started from a git hook or a shell with `GIT_DIR`
+ * exported would otherwise report another checkout's identity for the folder.
+ */
+const REPOSITORY_SELECTING_GIT_ENV = new Set([
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_QUARANTINE_PATH",
+    "GIT_NAMESPACE",
+    "GIT_GRAFT_FILE",
+    "GIT_SHALLOW_FILE",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_PREFIX",
+]);
+
+/**
+ * Environment for the read-only identity probe: the caller's environment, minus the
+ * variables above, plus settings that keep git off the network.
+ *
+ * In a partial clone, reading a missing object makes git fetch it from the promisor
+ * remote, which runs transports and remote helpers the repository's configuration
+ * chooses. `GIT_NO_LAZY_FETCH=1` (honoured from git 2.44) stops that fetch. Older git
+ * ignores it, so `GIT_ALLOW_PROTOCOL` set to an empty list (honoured from git 2.6.1)
+ * also refuses every transport, remote helpers included, whatever the repository's
+ * `protocol.*.allow` says. `GIT_TERMINAL_PROMPT=0` (from git 2.3) rules out a
+ * credential prompt. A probe that cannot answer without fetching then fails, and the
+ * folder stays unresolved rather than guessed.
+ */
+function readOnlyProbeEnv(): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = {};
+    for (const [key, value] of Object.entries(process.env))
+        if (!REPOSITORY_SELECTING_GIT_ENV.has(key.toUpperCase())) env[key] = value;
+    return { ...env, GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "", GIT_TERMINAL_PROMPT: "0" };
+}
+
 /** Probe Git without populating the resolver's durable cache during a preview. */
 export function resolveReadOnly(directory: string): string | undefined {
     if (!existsSync(directory)) return undefined;
+    const env = readOnlyProbeEnv();
     try {
         const roots = execFileSync("git", ["rev-list", "--max-parents=0", "HEAD"], {
             cwd: directory,
+            env,
             windowsHide: true,
             encoding: "utf8",
             timeout: 5000,
@@ -88,6 +135,7 @@ export function resolveReadOnly(directory: string): string | undefined {
     try {
         const result = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
             cwd: directory,
+            env,
             windowsHide: true,
             encoding: "utf8",
             timeout: 5000,
