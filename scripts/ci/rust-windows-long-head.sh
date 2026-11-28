@@ -1,35 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-finished=0
-home=
-cleanup() {
-    local status=$?
-    local cleanup_status
-    if [ "$status" -eq 0 ] && [ "${finished:-0}" != 1 ]; then
-        printf '%s\n' "$0: exited before successful completion" >&2
-        status=1
-    fi
-    if [ -n "$home" ]; then
-        rm -rf -- "$home" || { cleanup_status=$?; [ "$status" -ne 0 ] || status=$cleanup_status; }
-    fi
-    exit "$status"
-}
-trap cleanup EXIT
-
 logs=target/windows-rust-long-head
+source "$(dirname -- "${BASH_SOURCE[0]}")/rust-windows-home.sh"
 mkdir -p "$logs"
 printf 'command\texit\tseconds\n' > "$logs/results.tsv"
 
-export CARGO_HOME=${CARGO_HOME:-$USERPROFILE/.cargo}
-export RUSTUP_HOME=${RUSTUP_HOME:-$USERPROFILE/.rustup}
-home=$(mktemp -d "$(cygpath -u "$RUNNER_TEMP")/mc-windows-long-head.XXXXXX")
-HOME=$(cygpath -am "$home")
-export HOME
-export USERPROFILE=$HOME
-export XDG_DATA_HOME=$HOME/data XDG_CONFIG_HOME=$HOME/config
-export LOCALAPPDATA=$HOME/local APPDATA=$HOME/roaming
-mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$LOCALAPPDATA" "$APPDATA"
+start_windows_home
 
 record() {
     local label=$1 limit=$2 start rc=0
@@ -43,6 +20,7 @@ record() {
     fi
     printf '%s\t%s\t%s\n' "$label" "$rc" "$((SECONDS-start))" >> "$logs/results.tsv"
     printf '%s: exit %s in %ss (%s/%s.log)\n' "$label" "$rc" "$((SECONDS-start))" "$logs" "$label"
+    windows_home_after_command "$label"
     return "$rc"
 }
 
@@ -53,5 +31,4 @@ status=0
 record scenario 12m "${command[@]}" a_long_head_session_keeps_ck_mcs_index_window_sized \
     -- --exact --nocapture || status=$?
 
-finished=1
-exit "$status"
+finish_windows_home "$status"
