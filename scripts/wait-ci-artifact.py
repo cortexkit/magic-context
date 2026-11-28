@@ -134,6 +134,15 @@ def _api_error_kind(error):
     return type(error).__name__
 
 
+def _close_error_response(error):
+    # An HTTP error is also an open response. Close it here, so it is not left
+    # for the garbage collector, which on Python 3.14 prints the error text in
+    # a warning. Its status code and message stay readable after the close.
+    # An error built without a response has nothing to close.
+    if isinstance(error, HTTPError) and error.fp is not None:
+        error.close()
+
+
 def _request_json(request, deadline, clock=time.monotonic, pause=time.sleep, open_url=urlopen, *, max_retries=None, on_retry=None):
     retries = 0
     while True:
@@ -144,20 +153,19 @@ def _request_json(request, deadline, clock=time.monotonic, pause=time.sleep, ope
             with open_url(request, timeout=max(0.001, min(30, remaining))) as response:
                 return json.load(response)
         except Exception as error:
+            # Closed on every path: a caller that catches the error and goes
+            # on (the job history is optional) must not hold it open either.
             if not _is_transient_api_error(error) or (max_retries is not None and retries >= max_retries):
+                _close_error_response(error)
                 raise
             remaining = deadline - clock()
             if remaining <= 0:
+                _close_error_response(error)
                 raise
             delay = TRANSIENT_RETRY_DELAYS[min(retries, len(TRANSIENT_RETRY_DELAYS) - 1)]
             if on_retry is not None:
                 on_retry(error)
-            # An HTTP error is also an open response. Close it before the
-            # retry, so it is not left for the garbage collector, which on
-            # Python 3.14 prints the error text in a warning. An error built
-            # without a response has nothing to close.
-            if isinstance(error, HTTPError) and error.fp is not None:
-                error.close()
+            _close_error_response(error)
             pause(min(delay, remaining))
             retries += 1
 
