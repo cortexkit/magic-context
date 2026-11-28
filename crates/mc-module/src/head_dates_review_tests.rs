@@ -139,5 +139,6 @@ fn a_summary_written_again_at_a_reverted_sequence_shows_its_own_days() {
         m1.contains("## 13-16 · 2026-04-20→21 · Work 4"),
         "the new summary 4 covers r13-r16, written 2026-04-20→21: {m1}"
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }

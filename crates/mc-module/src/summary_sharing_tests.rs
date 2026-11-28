@@ -60,5 +60,6 @@ fn a_rebuild_with_no_new_summary_shares_the_summary_attribution() {
         .header
         .breakdown
         .shares_summaries(&after.header.breakdown));
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }

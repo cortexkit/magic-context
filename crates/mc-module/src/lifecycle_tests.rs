@@ -825,6 +825,7 @@ async fn lifecycle_a_second_shrink_below_the_cut_stops_catchup() {
     );
     assert!(client.offered.lock().unwrap().is_empty());
     assert_eq!(client.reads.lock().unwrap().len(), 2);
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -885,6 +886,7 @@ async fn lifecycle_setup_reconciles_a_revert_acknowledged_before_a_crash() {
         .unwrap()
         .is_empty());
     assert!(restored.head_stale);
+    drop((session, restored));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -903,6 +905,7 @@ async fn lifecycle_setup_preserves_legacy_summaries_without_endpoint_metadata() 
         1,
         "missing legacy endpoint metadata is not evidence of a revert"
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -933,6 +936,7 @@ async fn lifecycle_a_delayed_revert_preserves_summaries_of_the_replacement_branc
             .len(),
         1
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -990,6 +994,7 @@ async fn lifecycle_failed_write_ahead_save_never_hands_over_a_view() {
         "view escaped a failed durable save"
     );
     assert!(session.head_stale);
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1011,6 +1016,7 @@ fn lifecycle_store_save_reports_failure_and_never_waits_on_a_writer() {
         "save swallowed its error: {result}"
     );
     blocker.execute_batch("ROLLBACK").unwrap();
+    drop((blocker, store));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1044,6 +1050,7 @@ fn lifecycle_context_writes_wait_briefly_for_an_external_writer() {
             .execute_batch("BEGIN IMMEDIATE; ROLLBACK")
             .map_err(|error| error.to_string()))
         .is_ok());
+    drop((blocker, db));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1129,6 +1136,7 @@ async fn lifecycle_revert_removes_summary_rows_and_raw_search_rows() {
     assert!(db.compartments("mock", "s1").unwrap().is_empty());
     let removed: u64 = db.with_connection(|conn| conn.query_row("SELECT COUNT(*) FROM message_history_source WHERE session_id = 's1' AND message_id = 'removed'", [], |row| row.get(0))).unwrap();
     assert_eq!(removed, 0);
+    drop((search, session));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1241,6 +1249,7 @@ fn a_restarted_session_serves_the_same_mural_image_from_the_store() {
     assert_eq!(restarted.mural_png("layout-1"), Some(before));
     // A mural the store doesn't hold is left out, not invented.
     assert_eq!(restarted.mural_png("layout-2"), None);
+    drop((session, restarted));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1358,6 +1367,7 @@ async fn lifecycle_restored_state_ahead_of_context_db_moves_the_cut_back() {
     });
     assert_eq!(cut.as_deref(), Some("b"), "{offered:?}");
     drop(offered);
+    drop((session, restored));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1399,6 +1409,7 @@ async fn lifecycle_the_cut_stops_before_the_message_the_request_ends_on() {
         _ => None,
     });
     assert_eq!(cut.as_deref(), Some("c"), "{view:?}");
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 

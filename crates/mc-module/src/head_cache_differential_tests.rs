@@ -305,7 +305,9 @@ fn kept_newer_summaries_give_the_bytes_a_fresh_computation_gives() {
             );
         }
     }
+    drop((kept.session, kept.store));
     std::fs::remove_dir_all(kept.dir).unwrap();
+    drop((fresh.session, fresh.store));
     std::fs::remove_dir_all(fresh.dir).unwrap();
 }
 

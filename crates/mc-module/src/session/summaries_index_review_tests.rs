@@ -132,6 +132,7 @@ fn a_due_fold_lands_after_another_writer_deletes_a_summary_the_session_let_go() 
         "the due fold never landed (fold_due {}) and summary 5 never reached the head:\n{head}",
         session.fold_due
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -156,6 +157,7 @@ fn a_summary_run_builds_its_references_after_another_writer_deletes_one() {
         read.is_ok(),
         "a deleted reference stops every summary run: {read:?}"
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -218,6 +220,7 @@ fn a_summary_run_shows_its_references_as_context_db_holds_them_now() {
         read, edited,
         "the same references, summary 2 as context.db holds it now"
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -241,5 +244,6 @@ fn a_summary_run_under_way_reads_its_references_after_a_revert_reaches_them() {
         read.is_ok(),
         "a revert during a run turns the run into a failed summary: {read:?}"
     );
+    drop(session);
     std::fs::remove_dir_all(dir).unwrap();
 }

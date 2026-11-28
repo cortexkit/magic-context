@@ -241,6 +241,7 @@ async fn surface_reminder_ids_survive_saved_state_and_setup_notice_resets() {
     assert_eq!(sends.len(), 3);
     assert_eq!(ids.len(), 3, "send ids must never repeat");
     assert!(ids.iter().all(|id| id.contains(":counter:")));
+    drop((first, store));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -402,6 +403,7 @@ async fn surface_search_without_a_project_still_finds_session_notes_and_messages
             .is_ok_and(|answer| answer.contains("[message]") && answer.contains("[note]")),
         "{note:?}"
     );
+    drop((session, db));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -465,6 +467,7 @@ async fn surface_search_returns_fully_dropped_messages_but_not_partially_visible
         .unwrap();
     assert!(result.contains("ordinal=2"), "{result}");
     assert!(!result.contains("ordinal=3"), "{result}");
+    drop((session, db));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -501,6 +504,7 @@ async fn surface_hint_deadline_includes_waiting_for_the_database() {
         elapsed < std::time::Duration::from_millis(1200),
         "{elapsed:?}"
     );
+    drop((session, db));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -540,6 +544,7 @@ async fn surface_hint_reads_while_the_shared_connection_is_busy() {
         elapsed < std::time::Duration::from_millis(1200),
         "{elapsed:?}"
     );
+    drop((session, db));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -600,6 +605,7 @@ fn surface_search_does_not_promise_an_expand_archive_fallback() {
         !answer.contains("returns indexed text from the search archive"),
         "{answer}"
     );
+    drop(db);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -624,6 +630,7 @@ fn surface_session_note_updates_refuse_conditions_without_changing_content() {
         db.note_in_scope(id, &scope).unwrap().unwrap().content,
         "original"
     );
+    drop(db);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -650,6 +657,7 @@ fn surface_note_batch_dismiss_is_atomic() {
         db.note_in_scope(one, &scope).unwrap().unwrap().status,
         "active"
     );
+    drop(db);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -677,6 +685,7 @@ fn surface_unknown_note_actions_and_filters_fall_back_to_read() {
         ),
         read
     );
+    drop(db);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -707,5 +716,6 @@ fn surface_memory_accepts_legacy_categories_at_runtime() {
             "{answer:?}"
         );
     }
+    drop(db);
     std::fs::remove_dir_all(dir).unwrap();
 }
