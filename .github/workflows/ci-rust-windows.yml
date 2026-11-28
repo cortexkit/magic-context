@@ -1,11 +1,21 @@
-name: CI (Windows Rust diagnostics)
+name: CI (Windows Rust)
 
 # Keep this separate while Windows is not required: the release gate checks
 # the conclusion of the main CI workflow, not only its aggregate jobs.
+#
+# A push runs only the two native jobs (x64 and ARM64), which hold every
+# assertion. The timing and trace jobs measure where time goes and assert
+# nothing new, so they run only when someone starts the workflow by hand
+# with `diagnostics` switched on.
 on:
   push:
-    branches: [master, main, "train/**"]
+    branches: [master, main, "0.50", mode3-clean, "train/**"]
   workflow_dispatch:
+    inputs:
+      diagnostics:
+        description: Also run the per-test timing job and the long-head trace job
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -52,7 +62,7 @@ jobs:
     needs: rust-windows
     # Use a fresh runner after the matrix so the diagnostic cannot consume
     # either normal job's time budget or interfere with its test files.
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.diagnostics }}
     runs-on: windows-latest
     timeout-minutes: 65
     steps:
@@ -79,7 +89,7 @@ jobs:
   rust-windows-long-head:
     name: Rust (Windows x64 long-head scenario)
     needs: rust-windows
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.diagnostics }}
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
