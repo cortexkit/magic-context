@@ -148,28 +148,59 @@ impl WatchState {
     }
 }
 
-/// Start the watch: open the bus session and watch `key`. A watch the bus
-/// refused leaves the session to the others that use it; any other failure
-/// drops it, since its connection may be gone.
+/// Capture the watch's binding under the session lock. Release it before
+/// reading the bucket so publishers and the run-end reader can use the bus.
 async fn open(bus: &Bus, key: &str) -> Result<(Box<dyn RegisterWatch>, u64), WatchFailure> {
     let attempted = bus.generation();
-    let (session, generation) =
-        bus.session_with_generation()
-            .await
-            .map_err(|reason| WatchFailure {
-                reason,
-                generation: attempted,
-            })?;
-    match session.watch(OWNER, BUCKET, key).await {
+    let (bucket, generation) = {
+        let (session, generation) =
+            bus.session_with_generation()
+                .await
+                .map_err(|reason| WatchFailure {
+                    reason,
+                    generation: attempted,
+                })?;
+        let bucket = session
+            .register_bucket(OWNER, BUCKET)
+            .map_err(|reason| WatchFailure { reason, generation })?;
+        (bucket, generation)
+    };
+    match bucket.watch(key).await {
         Ok(watch) => Ok((watch, generation)),
-        Err(error) => {
-            if error == "nats_watch_failed" {
-                session.discard();
+        Err(reason) => {
+            if reason == "nats_watch_failed" {
+                bus.forget(generation).await;
             }
-            Err(WatchFailure {
-                reason: error,
+            Err(WatchFailure { reason, generation })
+        }
+    }
+}
+
+async fn open_ready(
+    bus: &Bus,
+    key: &str,
+    generations: &watch::Receiver<Option<u64>>,
+) -> Result<(Box<dyn RegisterWatch>, u64, WatchEvent), WatchFailure> {
+    loop {
+        let (mut marker, generation) = open(bus, key).await?;
+        // NATS reads the snapshot in watch(), so next() takes the result
+        // already buffered in the newly opened watch.
+        let Ok(snapshot @ WatchEvent::Snapshot { .. }) = marker.next().await else {
+            bus.forget(generation).await;
+            return Err(WatchFailure {
+                reason: "register watch ended before its snapshot".into(),
                 generation,
-            })
+            });
+        };
+        match *generations.borrow() {
+            Some(current) if current == generation => return Ok((marker, generation, snapshot)),
+            Some(_) => continue,
+            None => {
+                return Err(WatchFailure {
+                    reason: "bus session discarded while opening register watch".into(),
+                    generation,
+                })
+            }
         }
     }
 }
@@ -259,7 +290,8 @@ async fn follow(
     changed: &(impl Fn() + Sync),
 ) -> Result<std::convert::Infallible, WatchFailure> {
     let mut generations = bus.generations();
-    let (mut marker, mut generation) = open(bus, key).await?;
+    let (mut marker, mut generation, snapshot) = open_ready(bus, key, &generations).await?;
+    observe(state, key, generation, snapshot, changed);
     loop {
         tokio::select! {
             biased;
@@ -276,30 +308,13 @@ async fn follow(
                 }
             },
         }
-        loop {
-            let (mut next, new_generation) = open(bus, key).await?;
-            let snapshot = tokio::select! {
-                biased;
-                _ = replacement(&mut generations, new_generation) => continue,
-                event = next.next() => event,
-            };
-            let Ok(snapshot @ WatchEvent::Snapshot { .. }) = snapshot else {
-                if can_move_after_end(bus, &generations, new_generation).await {
-                    continue;
-                }
-                return Err(WatchFailure {
-                    reason: "register watch ended before its snapshot".into(),
-                    generation: new_generation,
-                });
-            };
-            // A marker requests a reread of current state. Read the
-            // replacement snapshot before dropping the old watch, then
-            // take any later updates from the new subscription.
-            observe(state, key, new_generation, snapshot, changed);
-            marker = next;
-            generation = new_generation;
-            break;
-        }
+        // A marker requests a reread of current state. Read the replacement
+        // snapshot before dropping the old watch, then take later updates
+        // from the new subscription.
+        let (next, new_generation, snapshot) = open_ready(bus, key, &generations).await?;
+        observe(state, key, new_generation, snapshot, changed);
+        marker = next;
+        generation = new_generation;
     }
 }
 

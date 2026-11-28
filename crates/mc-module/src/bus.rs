@@ -632,7 +632,7 @@ pub(crate) struct BusSession {
     credential: Option<Credential>,
     pub(crate) account: AccountNames,
     pub(crate) publisher: Box<dyn EventPublisher>,
-    registers: Box<dyn Registers>,
+    registers: Arc<dyn Registers>,
     route: Option<Arc<dyn CredentialProvider>>,
     /// The NATS connection itself, for the run-end reader; a test's session
     /// has none.
@@ -651,7 +651,7 @@ impl BusSession {
             credential: None,
             account,
             publisher,
-            registers: Box::new(NoRegisters),
+            registers: Arc::new(NoRegisters),
             route: None,
             connection: None,
             payloads: None,
@@ -668,23 +668,46 @@ impl BusSession {
     /// The same session, with `registers` as its KV buckets.
     #[cfg(test)]
     pub(crate) fn with_registers(mut self, registers: Box<dyn Registers>) -> Self {
-        self.registers = registers;
+        self.registers = registers.into();
         self
     }
 
-    /// Watch `key` of the bucket `name` that the module `owner` writes, by
-    /// the bucket's name in this session's account.
+    #[cfg(test)]
     pub(crate) async fn watch(
         &self,
         owner: &str,
         name: &str,
         key: &str,
     ) -> Result<Box<dyn RegisterWatch>, String> {
+        self.register_bucket(owner, name)?.watch(key).await
+    }
+
+    /// Capture a bucket binding without keeping the session locked during
+    /// the network round trips to open its watch and read its snapshot.
+    pub(crate) fn register_bucket(
+        &self,
+        owner: &str,
+        name: &str,
+    ) -> Result<RegisterBucket, String> {
         let bucket = self
             .account
             .module_bucket_name(owner, name)
             .map_err(|error| format!("bucket_name: {error}"))?;
-        self.registers.watch(&bucket, key).await
+        Ok(RegisterBucket {
+            registers: self.registers.clone(),
+            bucket,
+        })
+    }
+}
+
+pub(crate) struct RegisterBucket {
+    registers: Arc<dyn Registers>,
+    bucket: String,
+}
+
+impl RegisterBucket {
+    pub(crate) async fn watch(&self, key: &str) -> Result<Box<dyn RegisterWatch>, String> {
+        self.registers.watch(&self.bucket, key).await
     }
 }
 
@@ -712,7 +735,7 @@ async fn build_session(
     Ok(BusSession {
         credential: Some(credential),
         account,
-        registers: Box::new(NatsRegisters(connection.clone())),
+        registers: Arc::new(NatsRegisters(connection.clone())),
         publisher: Box::new(NatsEventPublisher {
             connection: connection.clone(),
             stream_name,

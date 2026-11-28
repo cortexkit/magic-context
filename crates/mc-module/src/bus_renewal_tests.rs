@@ -114,7 +114,7 @@ impl SessionFactory for LocalSessions {
     async fn renew(&self, session: &mut BusSession) -> Result<(), String> {
         self.production.renew(session).await?;
         if let Some(gate) = &self.stall_next_snapshot {
-            session.registers = Box::new(GatedRegisters {
+            session.registers = Arc::new(GatedRegisters {
                 registers: NatsRegisters(session.connection.as_ref().unwrap().clone()),
                 gate: gate.clone(),
             });
@@ -598,7 +598,6 @@ async fn discarding_the_new_session_leaves_the_old_ack_in_its_grace() {
 struct SnapshotGate {
     waiting: tokio::sync::Notify,
     resume: tokio::sync::Notify,
-    replace_snapshot_with_update: bool,
 }
 
 struct GatedRegisters {
@@ -609,41 +608,9 @@ struct GatedRegisters {
 #[async_trait]
 impl Registers for GatedRegisters {
     async fn watch(&self, bucket: &str, key: &str) -> Result<Box<dyn RegisterWatch>, String> {
-        let inner = self.registers.watch(bucket, key).await?;
-        Ok(Box::new(GatedWatch {
-            inner,
-            gate: Some(self.gate.clone()),
-        }))
-    }
-}
-
-struct GatedWatch {
-    inner: Box<dyn RegisterWatch>,
-    gate: Option<Arc<SnapshotGate>>,
-}
-
-#[async_trait]
-impl RegisterWatch for GatedWatch {
-    async fn next(&mut self) -> cortexkit_bus_trait::BusResult<WatchEvent> {
-        if let Some(gate) = self.gate.take() {
-            gate.waiting.notify_one();
-            gate.resume.notified().await;
-            if gate.replace_snapshot_with_update {
-                let WatchEvent::Snapshot { mut entries, .. } = self.inner.next().await? else {
-                    unreachable!("the underlying watch starts with a snapshot")
-                };
-                return Ok(WatchEvent::Update(
-                    cortexkit_bus_trait::RegisterUpdate::Put(
-                        entries.pop().expect("the fixture wrote the marker"),
-                    ),
-                ));
-            }
-        }
-        self.inner.next().await
-    }
-
-    fn has_snapshot(&self) -> bool {
-        self.inner.has_snapshot()
+        self.gate.waiting.notify_one();
+        self.gate.resume.notified().await;
+        self.registers.watch(bucket, key).await
     }
 }
 
@@ -678,8 +645,8 @@ async fn retirement_closes_the_old_connection_even_if_a_marker_cannot_move_yet()
         2,
         "a publisher can acquire the new connection before retirement or snapshot"
     );
-    // The replacement subscription can buffer updates while the consumer
-    // is still waiting for its snapshot.
+    // The replacement snapshot must include writes made while its request
+    // was stalled.
     bucket.put(KEY, b"two".as_slice().into()).await.unwrap();
     closed(&mut first, Duration::from_secs(6)).await;
     gate.resume.notify_one();
@@ -837,7 +804,7 @@ async fn a_closed_marker_with_no_live_replacement_backs_off_instead_of_polling_a
     {
         let mut slot = bus.session.lock().await;
         let session = slot.as_mut().unwrap();
-        session.registers = Box::new(ProbedRegisters(
+        session.registers = Arc::new(ProbedRegisters(
             NatsRegisters(session.connection.as_ref().unwrap().clone()),
             polled_after_end.clone(),
         ));
@@ -879,17 +846,14 @@ async fn a_closed_marker_with_no_live_replacement_backs_off_instead_of_polling_a
 }
 
 #[tokio::test]
-async fn a_replacement_ending_before_its_snapshot_retries_after_backoff_if_none_is_live() {
+async fn a_discard_during_the_replacement_snapshot_recovers_after_backoff() {
     use crate::entorhinal_changes::{spawn_marker, WatchState, KEY, RETRY_FIRST};
     let Some(server) = LocalNats::start().await else {
         return;
     };
     let bucket = registry_bucket(&server).await;
     bucket.put(KEY, b"one".as_slice().into()).await.unwrap();
-    let gate = Arc::new(SnapshotGate {
-        replace_snapshot_with_update: true,
-        ..Default::default()
-    });
+    let gate = Arc::new(SnapshotGate::default());
     let bus = local_bus_with_gate(server.addr, Some(gate.clone()));
     let (change, mut events) = mpsc::unbounded_channel();
     let state = Arc::new(WatchState::default());
@@ -903,8 +867,8 @@ async fn a_replacement_ending_before_its_snapshot_retries_after_backoff_if_none_
         .await
         .unwrap();
 
-    // The next watch is held before its first event while a third generation
-    // is installed and discarded. The marker must not loop on either watch.
+    // The snapshot request is held while a third session is installed and
+    // discarded. Opening the watch must not keep that session locked.
     let mut second = enter_renewal_window(&bus, server.addr).await;
     let (third, generation) = bus.session_with_generation().await.unwrap();
     assert_eq!(generation, 3);
