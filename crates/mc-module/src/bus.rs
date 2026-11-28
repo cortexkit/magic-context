@@ -934,7 +934,8 @@ impl Bus {
 
     /// Drop the session after a reader found its connection lost,
     /// unless it got a new connection after `generation`, which another user
-    /// may already be using.
+    /// may already be using. A false result does not guarantee that the newer
+    /// session is still installed.
     pub(crate) async fn forget(&self, generation: u64) -> bool {
         let mut session = self.session.lock().await;
         if self.generation.load(Ordering::SeqCst) != generation {
@@ -1245,7 +1246,7 @@ impl run_ends::Cursor for RunEndCursor {
                 self.binding = bind_run_ends(&self.bus).await?;
             }
             let pulled = self.pull().await;
-            if pulled.is_err() && self.rebind_after_failure().await? {
+            if pulled.is_err() && self.rebind_after_failed_pull().await? {
                 continue;
             }
             return pulled;
@@ -1253,27 +1254,28 @@ impl run_ends::Cursor for RunEndCursor {
     }
 
     async fn ack(&mut self) -> Result<(), String> {
-        if self.binding.cursor.ack().await.is_ok() || self.rebind_after_failure().await? {
-            // If the old ack did not reach the server, the same durable can
-            // redeliver the event. The run-end reader deduplicates its wake.
-            Ok(())
-        } else {
-            Err("nats_ack_failed".into())
+        if self.binding.cursor.ack().await.is_ok() {
+            return Ok(());
         }
+        if self.connection_lost() {
+            self.bus.forget(self.binding.generation).await;
+        }
+        Err("nats_ack_failed".into())
     }
 }
 
 impl RunEndCursor {
-    /// A pull or acknowledgement can outlive its connection's generation.
-    /// Only a failure on the current generation is a run-end reader outage.
-    async fn rebind_after_failure(&mut self) -> Result<bool, String> {
+    fn connection_lost(&self) -> bool {
+        self.binding.connection.client().connection_state()
+            != async_nats::connection::State::Connected
+    }
+
+    /// Retry a failed pull immediately if its connection was replaced.
+    async fn rebind_after_failed_pull(&mut self) -> Result<bool, String> {
         let replaced = {
             let mut session = self.bus.session.lock().await;
             let replaced = self.bus.generation.load(Ordering::SeqCst) != self.binding.generation;
-            if !replaced
-                && self.binding.connection.client().connection_state()
-                    != async_nats::connection::State::Connected
-            {
+            if !replaced && self.connection_lost() {
                 self.bus.discard_session(&mut session);
             }
             replaced

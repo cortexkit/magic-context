@@ -33,6 +33,10 @@ impl LocalNats {
         {
             Ok(child) => child,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                assert!(
+                    std::env::var_os("MC_REQUIRE_NATS_SERVER").is_none(),
+                    "nats-server is required by MC_REQUIRE_NATS_SERVER; install NATS Server v2.15.0 from https://github.com/nats-io/nats-server/releases/tag/v2.15.0 and add it to PATH"
+                );
                 eprintln!("skipped: nats-server is not on PATH");
                 return None;
             }
@@ -369,6 +373,13 @@ async fn a_marker_recovers_on_the_next_generation_after_reconnect_exhaustion() {
 }
 
 async fn run_end_stream(server: &LocalNats) -> async_nats::jetstream::Context {
+    run_end_stream_with_ack_wait(server, Duration::from_secs(30)).await
+}
+
+async fn run_end_stream_with_ack_wait(
+    server: &LocalNats,
+    ack_wait: Duration,
+) -> async_nats::jetstream::Context {
     let jetstream =
         async_nats::jetstream::new(async_nats::connect(server.addr.to_string()).await.unwrap());
     let account = account();
@@ -385,6 +396,7 @@ async fn run_end_stream(server: &LocalNats) -> async_nats::jetstream::Context {
         .create_consumer(async_nats::jetstream::consumer::pull::Config {
             durable_name: Some(run_ends::DURABLE.to_owned()),
             filter_subjects: subjects.to_vec(),
+            ack_wait,
             ..Default::default()
         })
         .await
@@ -438,16 +450,17 @@ async fn the_next_run_end_pull_renews_credentials_in_the_window() {
 }
 
 #[tokio::test]
-async fn a_failed_ack_on_a_replaced_binding_rebinds_without_an_outage() {
+async fn an_unconfirmed_ack_is_reported_and_the_same_event_is_redelivered() {
     use run_ends::Cursor as _;
     let Some(server) = LocalNats::start().await else {
         return;
     };
-    let jetstream = run_end_stream(&server).await;
+    let jetstream = run_end_stream_with_ack_wait(&server, Duration::from_millis(100)).await;
     let bus = local_bus(server.addr);
     let mut reader = bind_reader(&bus).await;
     publish_run_end(&jetstream, "old-delivery").await;
-    assert!(reader.next().await.unwrap().is_some());
+    let original = reader.next().await.unwrap().unwrap();
+    assert_eq!(original.id.as_deref(), Some("old-delivery"));
     let (_, generation) = at_renewal(&bus, server.addr).await;
     assert_eq!(generation, 2);
     reader
@@ -456,16 +469,25 @@ async fn a_failed_ack_on_a_replaced_binding_rebinds_without_an_outage() {
         .close(Duration::from_secs(1))
         .await
         .unwrap();
-    reader
-        .ack()
-        .await
-        .expect("planned replacement is not an outage");
+    assert_eq!(reader.ack().await.unwrap_err(), "nats_ack_failed");
+    drop(reader);
+
+    // The reader binds again after its outage retry. The server, not a
+    // second publish, supplies the old delivery on the new connection.
+    let mut reader = bind_reader(&bus).await;
     assert_eq!(reader.binding.generation, 2);
-    publish_run_end(&jetstream, "new-delivery").await;
-    assert_eq!(
-        reader.next().await.unwrap().unwrap().id.as_deref(),
-        Some("new-delivery")
-    );
+    let redelivery = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(delivery) = reader.next().await.unwrap() {
+                break delivery;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the same durable redelivers the unacknowledged event");
+    assert_eq!(redelivery.id, original.id);
+    assert_eq!(redelivery.subject, original.subject);
     reader.ack().await.unwrap();
 }
 
@@ -527,6 +549,7 @@ async fn a_second_rotation_expedites_the_older_retirement() {
 struct SnapshotGate {
     waiting: tokio::sync::Notify,
     resume: tokio::sync::Notify,
+    replace_snapshot_with_update: bool,
 }
 
 struct GatedRegisters {
@@ -556,6 +579,16 @@ impl RegisterWatch for GatedWatch {
         if let Some(gate) = self.gate.take() {
             gate.waiting.notify_one();
             gate.resume.notified().await;
+            if gate.replace_snapshot_with_update {
+                let WatchEvent::Snapshot { mut entries, .. } = self.inner.next().await? else {
+                    unreachable!("the underlying watch starts with a snapshot")
+                };
+                return Ok(WatchEvent::Update(
+                    cortexkit_bus_trait::RegisterUpdate::Put(
+                        entries.pop().expect("the fixture wrote the marker"),
+                    ),
+                ));
+            }
         }
         self.inner.next().await
     }
@@ -692,4 +725,155 @@ async fn shutdown_expedites_retirement_without_waiting_for_the_current_guard() {
         .unwrap();
     assert_eq!(*first.borrow_and_update(), NatsConnectionState::Closed);
     assert!(current.connection.is_some());
+}
+
+struct ClosedWatchProbe {
+    inner: Box<dyn RegisterWatch>,
+    ended: bool,
+    polled_after_end: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl RegisterWatch for ClosedWatchProbe {
+    async fn next(&mut self) -> cortexkit_bus_trait::BusResult<WatchEvent> {
+        if self.ended {
+            self.polled_after_end.notify_one();
+            // Fail the test without repeatedly polling a permanently ended watch.
+            return std::future::pending().await;
+        }
+        let event = self.inner.next().await;
+        self.ended = event.is_err();
+        event
+    }
+
+    fn has_snapshot(&self) -> bool {
+        self.inner.has_snapshot()
+    }
+}
+
+struct ProbedRegisters(NatsRegisters, Arc<tokio::sync::Notify>);
+
+#[async_trait]
+impl Registers for ProbedRegisters {
+    async fn watch(&self, bucket: &str, key: &str) -> Result<Box<dyn RegisterWatch>, String> {
+        Ok(Box::new(ClosedWatchProbe {
+            inner: self.0.watch(bucket, key).await?,
+            ended: false,
+            polled_after_end: self.1.clone(),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn a_closed_marker_with_no_live_replacement_backs_off_instead_of_polling_again() {
+    use crate::entorhinal_changes::{spawn_marker, WatchState, BUCKET, KEY, OWNER};
+    let Some(server) = LocalNats::start().await else {
+        return;
+    };
+    let bucket = registry_bucket(&server).await;
+    bucket.put(KEY, b"one".as_slice().into()).await.unwrap();
+    let bus = local_bus(server.addr);
+    let mut raw = bus
+        .session()
+        .await
+        .unwrap()
+        .watch(OWNER, BUCKET, KEY)
+        .await
+        .unwrap();
+    assert!(matches!(
+        raw.next().await.unwrap(),
+        WatchEvent::Snapshot { .. }
+    ));
+    let polled_after_end = Arc::new(tokio::sync::Notify::new());
+    {
+        let mut slot = bus.session.lock().await;
+        let session = slot.as_mut().unwrap();
+        session.registers = Box::new(ProbedRegisters(
+            NatsRegisters(session.connection.as_ref().unwrap().clone()),
+            polled_after_end.clone(),
+        ));
+    }
+    let (change, mut events) = mpsc::unbounded_channel();
+    let state = Arc::new(WatchState::default());
+    let _marker = spawn_marker(bus.clone(), state.clone(), KEY, move || {
+        change.send(()).unwrap()
+    });
+    marker_event(&mut events).await;
+    let mut first = enter_renewal_window(&bus, server.addr).await;
+    let (second, generation) = bus.session_with_generation().await.unwrap();
+    assert_eq!(generation, 2);
+    // Install and discard the replacement without letting the marker see it.
+    second.discard();
+    assert_eq!(*bus.generations().borrow(), None);
+    closed(&mut first, Duration::from_secs(2)).await;
+
+    assert!(tokio::time::timeout(Duration::from_secs(2), raw.next())
+        .await
+        .unwrap()
+        .is_err());
+    tokio::select! {
+        biased;
+        result = raw.next() => assert!(result.is_err()),
+        () = std::future::ready(()) => panic!("expected the ended NATS watch to fail immediately again"),
+    }
+
+    bucket.put(KEY, b"two".as_slice().into()).await.unwrap();
+    tokio::select! {
+        biased;
+        () = polled_after_end.notified() => panic!("marker polled the ended watch again"),
+        event = tokio::time::timeout(Duration::from_secs(8), events.recv()) => {
+            assert_eq!(event.expect("the marker retries and reads the new snapshot"), Some(()));
+        }
+    }
+    assert_eq!(*bus.generations().borrow(), Some(3));
+    assert!(state.is_up());
+}
+
+#[tokio::test]
+async fn a_replacement_ending_before_its_snapshot_retries_after_backoff_if_none_is_live() {
+    use crate::entorhinal_changes::{spawn_marker, WatchState, KEY, RETRY_FIRST};
+    let Some(server) = LocalNats::start().await else {
+        return;
+    };
+    let bucket = registry_bucket(&server).await;
+    bucket.put(KEY, b"one".as_slice().into()).await.unwrap();
+    let gate = Arc::new(SnapshotGate {
+        replace_snapshot_with_update: true,
+        ..Default::default()
+    });
+    let bus = local_bus_with_gate(server.addr, Some(gate.clone()));
+    let (change, mut events) = mpsc::unbounded_channel();
+    let state = Arc::new(WatchState::default());
+    let _marker = spawn_marker(bus.clone(), state.clone(), KEY, move || {
+        change.send(()).unwrap()
+    });
+    marker_event(&mut events).await;
+    let (_, generation) = at_renewal(&bus, server.addr).await;
+    assert_eq!(generation, 2);
+    tokio::time::timeout(Duration::from_secs(2), gate.waiting.notified())
+        .await
+        .unwrap();
+
+    // The next watch is held before its first event while a third generation
+    // is installed and discarded. The marker must not loop on either watch.
+    let mut second = enter_renewal_window(&bus, server.addr).await;
+    let (third, generation) = bus.session_with_generation().await.unwrap();
+    assert_eq!(generation, 3);
+    third.discard();
+    closed(&mut second, Duration::from_secs(2)).await;
+    bucket.put(KEY, b"two".as_slice().into()).await.unwrap();
+    let resumed = tokio::time::Instant::now();
+    gate.resume.notify_one();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(8), events.recv())
+            .await
+            .expect("the marker reopens after the failed handoff"),
+        Some(())
+    );
+    assert!(
+        resumed.elapsed() >= RETRY_FIRST,
+        "a failed snapshot without a replacement should back off"
+    );
+    assert_eq!(*bus.generations().borrow(), Some(4));
+    assert!(state.is_up());
 }

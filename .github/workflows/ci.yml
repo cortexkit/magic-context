@@ -590,7 +590,11 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Install pinned nats-server
+        run: bash scripts/ci/install-nats-server.sh
       - name: Test mc-module (integration, binary and doctest targets)
+        env:
+          MC_REQUIRE_NATS_SERVER: "1"
         run: bash scripts/ci/rust-mc-module-integration-test-mc-module-integration-binary-and-doctest-targets.sh
       - name: Test module wire protocol with daemon and mock runner
         run: bash scripts/wire-gate.sh
@@ -697,7 +701,11 @@ jobs:
           test "$(cat ci-rust-lib/commit.txt)" = "$GITHUB_SHA"
           sha256sum --check ci-rust-lib/archive.sha256
           rustc -vV | diff - ci-rust-lib/rustc.txt
+      - name: Install pinned nats-server
+        run: bash scripts/ci/install-nats-server.sh
       - name: Run lib partition
+        env:
+          MC_REQUIRE_NATS_SERVER: "1"
         run: bash scripts/ci/rust-mc-module-lib-run-lib-partition.sh "${{ matrix.shard }}"
       - name: Check every selected test executed
         if: ${{ !cancelled() }}

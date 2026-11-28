@@ -236,44 +236,60 @@ async fn follow(
     loop {
         tokio::select! {
             biased;
-            _ = replacement(&mut generations, generation) => {
-                loop {
-                    let (mut next, new_generation) = open(bus, key).await?;
-                    let snapshot = tokio::select! {
-                        biased;
-                        _ = replacement(&mut generations, new_generation) => continue,
-                        event = next.next() => event,
-                    };
-                    let Ok(snapshot @ WatchEvent::Snapshot { .. }) = snapshot else {
-                        if bus.forget(new_generation).await {
-                            return Err("register watch ended before its snapshot".into());
-                        }
-                        continue;
-                    };
-                    // A marker requests a reread of current state. Read
-                    // the replacement snapshot while the old watch is
-                    // still subscribed, then take any later updates there.
-                    observe(state, key, new_generation, snapshot, changed);
-                    marker = next;
-                    generation = new_generation;
-                    break;
-                }
-            }
+            _ = replacement(&mut generations, generation) => {}
             event = marker.next() => match event {
-                Ok(event) => observe(state, key, generation, event, changed),
+                Ok(event) => {
+                    observe(state, key, generation, event, changed);
+                    continue;
+                }
                 Err(_) => {
-                    if bus.forget(generation).await {
+                    if !can_move_after_end(bus, &generations, generation).await {
                         return Err("register watch ended".into());
                     }
                 }
             },
         }
+        loop {
+            let (mut next, new_generation) = open(bus, key).await?;
+            let snapshot = tokio::select! {
+                biased;
+                _ = replacement(&mut generations, new_generation) => continue,
+                event = next.next() => event,
+            };
+            let Ok(snapshot @ WatchEvent::Snapshot { .. }) = snapshot else {
+                if can_move_after_end(bus, &generations, new_generation).await {
+                    continue;
+                }
+                return Err("register watch ended before its snapshot".into());
+            };
+            // A marker requests a reread of current state. Read the
+            // replacement snapshot before dropping the old watch, then
+            // take any later updates from the new subscription.
+            observe(state, key, new_generation, snapshot, changed);
+            marker = next;
+            generation = new_generation;
+            break;
+        }
     }
+}
+
+async fn can_move_after_end(
+    bus: &Bus,
+    generations: &watch::Receiver<Option<u64>>,
+    generation: u64,
+) -> bool {
+    // The counter can advance even if a publisher has since discarded the
+    // newer session. With nothing live to move to, back off and reopen.
+    !bus.forget(generation).await && has_replacement(*generations.borrow(), generation)
+}
+
+fn has_replacement(current: Option<u64>, generation: u64) -> bool {
+    current.is_some_and(|current| current != generation)
 }
 
 async fn replacement(generations: &mut watch::Receiver<Option<u64>>, generation: u64) {
     let _ = generations
-        .wait_for(|current| current.is_some_and(|current| current != generation))
+        .wait_for(|current| has_replacement(*current, generation))
         .await;
 }
 

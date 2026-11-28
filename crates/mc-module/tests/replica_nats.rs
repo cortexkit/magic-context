@@ -5,8 +5,8 @@
 //! exchanging after the server restarts. A second case fills a small copy
 //! of the stream to check how the server's refusal is read.
 //!
-//! Each case is skipped, with the reason printed, when no `nats-server`
-//! binary is on PATH.
+//! A local run may skip if `nats-server` is not on PATH. CI sets
+//! `MC_REQUIRE_NATS_SERVER`, which makes a missing server an error.
 
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -26,10 +26,15 @@ use mc_module::replica::Replica;
 
 /// The `nats-server` on PATH, if there is one.
 fn nats_server() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let binary = std::env::split_paths(&path)
         .map(|dir| dir.join("nats-server"))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| candidate.is_file());
+    assert!(
+        binary.is_some() || std::env::var_os("MC_REQUIRE_NATS_SERVER").is_none(),
+        "nats-server is required by MC_REQUIRE_NATS_SERVER; install NATS Server v2.15.0 from https://github.com/nats-io/nats-server/releases/tag/v2.15.0 and add it to PATH"
+    );
+    binary
 }
 
 /// A `nats-server` with JetStream in the `hub` domain, its store in a

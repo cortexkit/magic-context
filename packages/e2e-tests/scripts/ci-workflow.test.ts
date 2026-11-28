@@ -230,6 +230,23 @@ test("Rust archive consumers preserve all lib partitions and remaining target ki
     }
 });
 
+test("Rust module test lanes install and require the pinned NATS server", () => {
+    for (const [id, testName] of [
+        ["rust-mc-module-lib", "Run lib partition"],
+        ["rust-mc-module-integration", "Test mc-module (integration, binary and doctest targets)"],
+    ] as const) {
+        const { steps } = workflow.jobs[id]!;
+        const install = steps.findIndex((step) => step.name === "Install pinned nats-server");
+        const tests = steps.findIndex((step) => step.name === testName);
+        expect(install).toBeGreaterThan(-1);
+        expect(tests).toBeGreaterThan(install);
+        expect(steps[install]!.run).toStartWith("bash scripts/ci/install-nats-server.sh\n");
+        expect(steps[install]!.run).toContain("sha256sum --check --strict");
+        expect(steps[install]!.if).toBeUndefined();
+        expect(steps[tests]!.env?.MC_REQUIRE_NATS_SERVER).toBe("1");
+    }
+});
+
 test("unit matrices preserve both modes, package wrappers and Pi assertion isolation", () => {
     for (const id of ["unit-plugin", "unit-pi-plugin"]) {
         expect(workflow.jobs[id]!.strategy).toEqual({ "fail-fast": false, matrix: { mode: ["normal", "assertions"], shard: [0, 1, 2, 3] } });
