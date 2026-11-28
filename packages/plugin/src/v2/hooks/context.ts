@@ -352,10 +352,18 @@ function servableCarrier(stored: string, head: string | undefined): boolean {
 export function bindKeptInstructionCoordinates(
     messages: readonly V2Message[],
     incoming: V2Message | undefined,
-    reader: Pick<V2StoreReader, "instructionRowsThrough" | "latestSequence" | "sequenceForId">,
+    reader: Pick<V2StoreReader, "instructionRowsThrough" | "latestSequence" | "sequencesForIds">,
     sessionID: string,
 ): ReturnType<V2StoreReader["instructionRowsThrough"]> {
     const rows = reader.instructionRowsThrough(sessionID, reader.latestSequence(sessionID));
+    const visible = (message: V2Message) => message !== incoming && !effortPart(message);
+    const ids = new Set<string>();
+    for (const message of messages) {
+        if (!visible(message)) continue;
+        const id = nativeRowID(message);
+        if (id) ids.add(id);
+    }
+    const sequences = reader.sequencesForIds(sessionID, [...ids]);
     let previous: number | undefined;
     let pending: V2Message[] = [];
     const matches = (message: V2Message | undefined, row: (typeof rows)[number] | undefined) =>
@@ -363,6 +371,11 @@ export function bindKeptInstructionCoordinates(
         message.content.length === 1 &&
         message.content[0]?.type === "text" &&
         message.content[0].text === row?.data.text;
+    const bindRow = (message: V2Message, row: (typeof rows)[number]) => {
+        bindNativeRowID(message, row.id, row.seq);
+        // The same message object can appear again later in the walk, now with an id.
+        sequences.set(row.id, row.seq);
+    };
     const bind = (next?: number) => {
         if (!pending.length) return;
         const candidates = rows.filter(
@@ -385,7 +398,7 @@ export function bindKeptInstructionCoordinates(
         ) {
             selected.forEach((row, index) => {
                 const message = pending[index];
-                if (message) bindNativeRowID(message, row.id, row.seq);
+                if (message) bindRow(message, row);
             });
         } else {
             // A hole (rows a native fold retired) breaks that window. Then bind
@@ -407,16 +420,15 @@ export function bindKeptInstructionCoordinates(
             if (earliest.every((position) => position < candidates.length))
                 pending.forEach((message, index) => {
                     const row = candidates[earliest[index]];
-                    if (row && earliest[index] === latest[index])
-                        bindNativeRowID(message, row.id, row.seq);
+                    if (row && earliest[index] === latest[index]) bindRow(message, row);
                 });
         }
         pending = [];
     };
     for (const message of messages) {
-        if (message === incoming || effortPart(message)) continue;
+        if (!visible(message)) continue;
         const id = nativeRowID(message);
-        const seq = id ? reader.sequenceForId(sessionID, id) : undefined;
+        const seq = id ? sequences.get(id) : undefined;
         if (seq !== undefined) {
             bind(seq);
             previous = seq;

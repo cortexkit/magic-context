@@ -225,7 +225,13 @@ export function importedFloor(
     let after = -1;
     let found: StoreRow | undefined;
     while (true) {
-        const page = reader.page(sessionID, { after, through, type: "compaction", limit: 1000 });
+        const page = reader.page(sessionID, {
+            after,
+            through,
+            type: "compaction",
+            limit: 1000,
+            preferTypeIndex: true,
+        });
         if (!page.rows.length) break;
         for (const row of page.rows) {
             if (

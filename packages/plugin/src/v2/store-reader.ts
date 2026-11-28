@@ -604,6 +604,7 @@ export class V2StoreReader {
             through?: number;
             limit?: number;
             type?: MessageType;
+            preferTypeIndex?: boolean;
         } = {},
     ): { rows: StoreRow[]; cursor: number | undefined } {
         return trackDecodeOperation("page", () => {
@@ -614,10 +615,13 @@ export class V2StoreReader {
             if (!Number.isSafeInteger(after)) throw new Error("Invalid seq cursor");
             if (options.through !== undefined && !Number.isSafeInteger(options.through))
                 throw new Error("Invalid seq upper bound");
-            const predicates = ["session_id = ?", "seq > ?"];
+            // The host store has no planner statistics. For a rare type, keep
+            // seq out of index selection so SQLite reads just that type in seq order.
+            const seq = options.type && options.preferTypeIndex ? "+seq" : "seq";
+            const predicates = ["session_id = ?", `${seq} > ?`];
             const parameters: Array<string | number> = [sessionID, after];
             if (options.through !== undefined) {
-                predicates.push("seq <= ?");
+                predicates.push(`${seq} <= ?`);
                 parameters.push(options.through);
             }
             if (options.type) {
@@ -1245,6 +1249,20 @@ export class V2StoreReader {
             "SELECT seq FROM session_message WHERE session_id = ? AND id = ? LIMIT 1",
         ).get(sessionID, id) as { seq?: number } | undefined;
         return typeof row?.seq === "number" ? row.seq : undefined;
+    }
+
+    sequencesForIds(sessionID: string, ids: readonly string[]): Map<string, number> {
+        const sequences = new Map<string, number>();
+        for (let offset = 0; offset < ids.length; offset += 500) {
+            const batch = ids.slice(offset, offset + 500);
+            const rows = this.prepare(`SELECT id, seq FROM session_message
+                WHERE +session_id = ? AND id IN (${batch.map(() => "?").join(",")})`).all(
+                sessionID,
+                ...batch,
+            ) as { id: string; seq: number }[];
+            for (const row of rows) sequences.set(row.id, row.seq);
+        }
+        return sequences;
     }
 
     /** Native synthetics are user-shaped on the wire; their store kind is unambiguous. */
