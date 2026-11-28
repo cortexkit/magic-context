@@ -130,6 +130,69 @@ function directoryDoesNotExist(directory: string): boolean {
 }
 
 /**
+ * Decide whether a target that owns no rows may still receive the source's data.
+ *
+ * An empty target is normally refused: nothing records data under it, so data moved
+ * there would be stranded. One case is accepted. Rewriting a repository's history so
+ * that its root commit changes gives every checkout of it a new `git:` identity that
+ * owns nothing yet, while its data stays under the old root. The merge is accepted
+ * when both identities are `git:` and every existing folder recorded for the source
+ * resolves to the target now, by a fresh live probe. Folders that no longer exist are
+ * skipped; at least one must exist. A folder whose identity cannot be read (including
+ * one where git would have to fetch a missing object) refuses the merge rather than
+ * being guessed.
+ *
+ * Returns the folders that resolve to the target; throws a refusal saying which part
+ * of that check failed.
+ */
+function acceptRewrittenRootTarget(
+    observed: IdentitySplit[],
+    from: string,
+    to: string,
+    sourceRows: number,
+): string[] {
+    const refusal = `Refusing merge: target ${to} owns no rows while ${from} owns ${sourceRows}.`;
+    if (!to.startsWith("git:"))
+        throw new Error(
+            `${refusal} An empty target is accepted only as the new git: identity of a repository whose history was rewritten; ${to} is not a git: identity, so moving data into it would strand that data.`,
+        );
+    if (!from.startsWith("git:"))
+        throw new Error(
+            `${refusal} An empty target is accepted only after a git history rewrite, which moves a git: identity; ${from} is not a git: identity.`,
+        );
+    const folders = observed
+        .filter((row) => row.identities.some((item) => item.identity === from))
+        .map((row) => row.directory)
+        .filter((directory) => !directoryDoesNotExist(directory));
+    if (!folders.length)
+        throw new Error(
+            `${refusal} No folder recorded for ${from} exists on this machine, so nothing shows that ${to} is in use; moving data into it would strand that data.`,
+        );
+    const live = folders.map((directory) => ({ directory, identity: resolveReadOnly(directory) }));
+    const unreadable = live.filter((item) => !item.identity).map((item) => item.directory);
+    if (unreadable.length)
+        throw new Error(
+            `${refusal} The git identity of ${unreadable.join(", ")} could not be read (git failed, or would have had to fetch missing objects), so nothing shows that ${to} is in use there.`,
+        );
+    const resolved = live.map((item) => `${item.directory} → ${item.identity}`).join(", ");
+    if (new Set(live.map((item) => item.identity)).size > 1)
+        throw new Error(
+            `${refusal} The folders recorded for ${from} resolve to different identities now: ${resolved}. Merge only once they agree.`,
+        );
+    if (live[0].identity !== to)
+        throw new Error(
+            `${refusal} No folder recorded for ${from} resolves to ${to} now (${resolved}), so nothing shows that ${to} is in use; moving data into it would strand that data.`,
+        );
+    return folders;
+}
+
+interface MergePairCheck {
+    allowances: PersistedIdentityAllowance[];
+    /** Folders that resolve to an accepted empty target after a history rewrite. */
+    rewrittenRootDirs: string[];
+}
+
+/**
  * Refuse a merge that would move data the wrong way. Runs for the preview and again on
  * the writable handle immediately before `--apply` writes, and `--force` does not
  * bypass it.
@@ -140,8 +203,9 @@ function assertMergePairSafe(
     storageDir: string,
     from: string,
     to: string,
-): PersistedIdentityAllowance[] {
+): MergePairCheck {
     const allowances: PersistedIdentityAllowance[] = [];
+    let rewrittenRootDirs: string[] = [];
     // Every checkout and worktree of a repository shares its git: identity, so folding
     // it into one directory's identity would take the whole repository's pool with it.
     if (from.startsWith("git:") && !to.startsWith("git:"))
@@ -150,9 +214,7 @@ function assertMergePairSafe(
         );
     const sourceRows = countIdentityRows(db, from);
     if (sourceRows > 0 && countIdentityRows(db, to) === 0)
-        throw new Error(
-            `Refusing merge: target ${to} owns no rows while ${from} owns ${sourceRows}. Nothing uses ${to}, so moving data into it would strand that data.`,
-        );
+        rewrittenRootDirs = acceptRewrittenRootTarget(observed, from, to, sourceRows);
     for (const row of observed) {
         const involved = row.identities.filter(
             (item) => item.identity === from || item.identity === to,
@@ -187,7 +249,7 @@ function assertMergePairSafe(
                 `Refusing merge: the plugin persisted ${persisted} for ${row.directory}, where ${involved.map((item) => item.identity).join(" and ")} was observed. That persisted identity is canonical for the path; merge into ${persisted} instead of ${to}.`,
             );
     }
-    return allowances;
+    return { allowances, rewrittenRootDirs };
 }
 
 function assertMergeDirectoriesSafe(
@@ -379,9 +441,16 @@ export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityD
         }
         if (options.from === options.to)
             throw new Error(`Source and target identities must differ: ${options.from}`);
-        const allowances = assertMergePairSafe(db, observed, storageDir, options.from, options.to);
+        const { allowances, rewrittenRootDirs } = assertMergePairSafe(
+            db,
+            observed,
+            storageDir,
+            options.from,
+            options.to,
+        );
         for (const identity of [options.from, options.to]) {
             const known =
+                (identity === options.to && rewrittenRootDirs.length > 0) ||
                 auditIdentityMerge(db, identity, options.to).changedRows > 0 ||
                 db
                     .prepare(
@@ -394,7 +463,11 @@ export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityD
             .filter((row) => row.identities.some((item) => item.identity === options.from))
             .map((row) => row.directory);
         const targetDirs = observed
-            .filter((row) => row.identities.some((item) => item.identity === options.to))
+            .filter(
+                (row) =>
+                    row.identities.some((item) => item.identity === options.to) ||
+                    rewrittenRootDirs.includes(row.directory),
+            )
             .map((row) => row.directory);
         directories = [...new Set([...sourceDirs, ...targetDirs])];
         const missingSourceDirs = assertMergeDirectoriesSafe(
@@ -410,6 +483,7 @@ export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityD
             !directories.some(
                 (directory) =>
                     canonicalIdentity(directory, storageDir) === options.to ||
+                    rewrittenRootDirs.includes(directory) ||
                     allowances.some(
                         (item) => item.directory === directory && item.liveIdentity === options.to,
                     ),
@@ -419,6 +493,10 @@ export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityD
                 `Target ${options.to} does not resolve for any observed directory on this machine; use --force only after reviewing the identity.`,
             );
         const preview = mergeProjectIdentities(db, options.from, options.to, { dryRun: true });
+        if (rewrittenRootDirs.length)
+            console.log(
+                `  Empty target ${options.to} accepted: ${rewrittenRootDirs.join(", ")} ${rewrittenRootDirs.length === 1 ? "holds" : "hold"} ${options.from} and now ${rewrittenRootDirs.length === 1 ? "resolves" : "resolve"} to ${options.to} (the repository's root commit changed, as after a history rewrite).`,
+            );
         printSidecarPreview(allowances, missingSourceDirs, options.to, options.verbose);
         printReport(preview);
         if (options.dryRun) return 0;
@@ -487,12 +565,22 @@ export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityD
         // handle that is about to write.
         configureContextDatabasePragmas(db);
         observed = observations(db, hostPath, storageDir);
-        const allowances = assertMergePairSafe(db, observed, storageDir, from, to);
+        const { allowances, rewrittenRootDirs } = assertMergePairSafe(
+            db,
+            observed,
+            storageDir,
+            from,
+            to,
+        );
         const sourceDirs = observed
             .filter((row) => row.identities.some((item) => item.identity === from))
             .map((row) => row.directory);
         const targetDirs = observed
-            .filter((row) => row.identities.some((item) => item.identity === to))
+            .filter(
+                (row) =>
+                    row.identities.some((item) => item.identity === to) ||
+                    rewrittenRootDirs.includes(row.directory),
+            )
             .map((row) => row.directory);
         assertMergeDirectoriesSafe(db, from, to, sourceDirs, targetDirs, allowances);
         directories = [...new Set([...sourceDirs, ...targetDirs])];

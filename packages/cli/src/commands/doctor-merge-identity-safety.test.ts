@@ -203,6 +203,25 @@ function newRepository(name: string): { directory: string; identity: string } {
     return { directory, identity: `git:${git(directory, "rev-parse", "HEAD")}` };
 }
 
+function rewriteRoot(directory: string, message: string): string {
+    const root = git(
+        directory,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit-tree",
+        "HEAD^{tree}",
+        "-m",
+        message,
+    );
+    git(directory, "update-ref", "HEAD", root);
+    expect(git(directory, "rev-list", "--max-parents=0", "HEAD")).toBe(root);
+    return `git:${root}`;
+}
+
 function sidecarPath(store: Store, directory: string): string {
     return join(
         store.storageDir,
@@ -293,6 +312,232 @@ function deletedSessionMergeFixture(count = 48): {
     }
     return { store, source, target, directories };
 }
+
+/** A repository whose memories sit under its root, recorded in one folder by a session and a sidecar. */
+function rewrittenRootFixture(name: string): {
+    store: Store;
+    directory: string;
+    from: string;
+    sourceRows: number;
+} {
+    const store = newStore();
+    const { directory, identity: from } = newRepository(name);
+    bindSession(store, `${name}-session`, directory, from);
+    persistIdentity(store, directory, from);
+    seedRows(store, from, { memories: 2 });
+    return { store, directory, from, sourceRows: countIdentityRows(store.db, from) };
+}
+
+function memoryOwners(store: Store): string[] {
+    const db = new Database(store.dbPath);
+    try {
+        return (
+            db.prepare("SELECT project_path FROM memories ORDER BY content").all() as Array<{
+                project_path: string;
+            }>
+        ).map((row) => row.project_path);
+    } finally {
+        db.close();
+    }
+}
+
+/** Preview, forced preview and forced apply all refuse with `reason` and write nothing. */
+function expectEmptyTargetRefused(store: Store, from: string, to: string, reason: string): void {
+    const before = fileHash(store.dbPath);
+    for (const extra of [[], ["--force"], ["--apply", "--force"]])
+        expect(() =>
+            runMergeIdentityCli(
+                ["--db", store.dbPath, "--from", from, "--to", to, ...extra],
+                noHolderDeps,
+            ),
+        ).toThrow(reason);
+    expect(fileHash(store.dbPath)).toBe(before);
+    expect(
+        readdirSync(store.storageDir).filter((name) => name.startsWith("identity-merge")),
+    ).toEqual([]);
+}
+
+describe("doctor merge-identities into an empty rewritten root", () => {
+    it("previews and moves memories after a root rewrite without starting a host", () => {
+        const { store, directory, from } = rewrittenRootFixture("before-root-rewrite");
+        const to = rewriteRoot(directory, "new orphan root");
+        expect(to).not.toBe(from);
+        expect(countIdentityRows(store.db, to)).toBe(0);
+        closeStore(store);
+        const beforeDb = fileHash(store.dbPath);
+        const beforeSidecar = fileHash(sidecarPath(store, directory));
+        const args = ["--db", store.dbPath, "--from", from, "--to", to];
+        const output = captureLog();
+
+        expect(runMergeIdentityCli(args, noHolderDeps)).toBe(0);
+        expect(output()).toContain(
+            `  Empty target ${to} accepted: ${projectDirectoryKey(directory)} holds ${from} and now resolves to ${to} (the repository's root commit changed, as after a history rewrite).`,
+        );
+        expect(output()).toContain(`Identity merge preview: ${from} → ${to}`);
+        expect(fileHash(store.dbPath)).toBe(beforeDb);
+        expect(fileHash(sidecarPath(store, directory))).toBe(beforeSidecar);
+        expect(runMergeIdentityCli([...args, "--apply"], noHolderDeps)).toBe(0);
+        expect(readRememberedGitIdentity(directory, store.storageDir)).toBe(to);
+        const db = new Database(store.dbPath);
+        try {
+            expect(countIdentityRows(db, from)).toBe(0);
+            expect(
+                db.prepare("SELECT project_path, content FROM memories ORDER BY content").all(),
+            ).toEqual([
+                { project_path: to, content: `${from} memory 0` },
+                { project_path: to, content: `${from} memory 1` },
+            ]);
+        } finally {
+            db.close();
+        }
+    }, 30_000);
+
+    it("accepts a linked worktree whose HEAD is on the rewritten history", () => {
+        const { store, directory, from } = rewrittenRootFixture("worktree-rewrite");
+        const worktree = join(root, `worktree-rewrite-wt-${++fixtureCounter}`);
+        git(directory, "worktree", "add", "-q", "--detach", worktree, "HEAD");
+        bindSession(store, "worktree-session", worktree, from);
+        const to = rewriteRoot(directory, "rewritten root seen by the worktree");
+        // The worktree reads its objects through the main checkout's repository.
+        git(worktree, "checkout", "-q", "--detach", to.slice("git:".length));
+        closeStore(store);
+        const args = ["--db", store.dbPath, "--from", from, "--to", to];
+        const output = captureLog();
+
+        expect(runMergeIdentityCli(args, noHolderDeps)).toBe(0);
+        expect(output()).toContain(`  Empty target ${to} accepted: `);
+        expect(output()).toContain(projectDirectoryKey(worktree));
+        expect(runMergeIdentityCli([...args, "--apply"], noHolderDeps)).toBe(0);
+        expect(memoryOwners(store)).toEqual([to, to]);
+        expect(readRememberedGitIdentity(worktree, store.storageDir)).toBe(to);
+    }, 30_000);
+
+    it("refuses when another clone of the source still resolves to the old root", () => {
+        const { store, directory, from } = rewrittenRootFixture("clone-disagrees");
+        const clone = join(root, `clone-disagrees-copy-${++fixtureCounter}`);
+        git(root, "clone", "-q", directory, clone);
+        bindSession(store, "clone-session", clone, from);
+        const sourceRows = countIdentityRows(store.db, from);
+        const to = rewriteRoot(directory, "rewritten in one clone only");
+        closeStore(store);
+        const refusal = `Refusing merge: target ${to} owns no rows while ${from} owns ${sourceRows}. The folders recorded for ${from} resolve to different identities now: `;
+        expectEmptyTargetRefused(store, from, to, refusal);
+        expectEmptyTargetRefused(store, from, to, `${projectDirectoryKey(directory)} → ${to}`);
+        expectEmptyTargetRefused(store, from, to, `${projectDirectoryKey(clone)} → ${from}`);
+        expect(memoryOwners(store)).toEqual([from, from]);
+    }, 30_000);
+
+    it("refuses when no recorded folder of the source exists", () => {
+        const { store, directory, from, sourceRows } = rewrittenRootFixture("deleted-folder");
+        const to = rewriteRoot(directory, "rewritten, then deleted");
+        rmSync(directory, { recursive: true });
+        closeStore(store);
+        expectEmptyTargetRefused(
+            store,
+            from,
+            to,
+            `Refusing merge: target ${to} owns no rows while ${from} owns ${sourceRows}. No folder recorded for ${from} exists on this machine, so nothing shows that ${to} is in use; moving data into it would strand that data.`,
+        );
+    }, 30_000);
+
+    it("refuses when the folder is empty and resolves to a directory identity", () => {
+        const { store, directory, from, sourceRows } = rewrittenRootFixture("emptied-folder");
+        const to = rewriteRoot(directory, "rewritten, then emptied");
+        rmSync(directory, { recursive: true });
+        mkdirSync(directory);
+        closeStore(store);
+        const key = projectDirectoryKey(directory);
+        expectEmptyTargetRefused(
+            store,
+            from,
+            to,
+            `Refusing merge: target ${to} owns no rows while ${from} owns ${sourceRows}. No folder recorded for ${from} resolves to ${to} now (${key} → ${md5Identity(key)}), so nothing shows that ${to} is in use; moving data into it would strand that data.`,
+        );
+    }, 30_000);
+
+    it("refuses a git target that no recorded folder resolves to", () => {
+        const { store, directory, from, sourceRows } = rewrittenRootFixture("unresolved-target");
+        const live = rewriteRoot(directory, "the root the folder resolves to");
+        const to = gitIdentity("a root nothing resolves to");
+        closeStore(store);
+        expectEmptyTargetRefused(
+            store,
+            from,
+            to,
+            `Refusing merge: target ${to} owns no rows while ${from} owns ${sourceRows}. No folder recorded for ${from} resolves to ${to} now (${projectDirectoryKey(directory)} → ${live}), so nothing shows that ${to} is in use; moving data into it would strand that data.`,
+        );
+    }, 30_000);
+
+    it("refuses when the folder's identity cannot be read", () => {
+        const { store, directory, from, sourceRows } = rewrittenRootFixture("unreadable-folder");
+        const to = rewriteRoot(directory, "rewritten, then its commit lost");
+        const commit = to.slice("git:".length);
+        rmSync(join(directory, ".git", "objects", commit.slice(0, 2), commit.slice(2)));
+        closeStore(store);
+        expectEmptyTargetRefused(
+            store,
+            from,
+            to,
+            `Refusing merge: target ${to} owns no rows while ${from} owns ${sourceRows}. The git identity of ${projectDirectoryKey(directory)} could not be read (git failed, or would have had to fetch missing objects), so nothing shows that ${to} is in use there.`,
+        );
+    }, 30_000);
+
+    it("refuses a source or target that is not a git identity", () => {
+        const { store, directory } = rewrittenRootFixture("directory-identities");
+        const to = rewriteRoot(directory, "rewritten root for a directory source");
+        seedRows(store, "dir:aaaaaaaaaaaa", { memories: 1 });
+        bindSession(store, "directory-session", directory, "dir:aaaaaaaaaaaa");
+        const sourceRows = countIdentityRows(store.db, "dir:aaaaaaaaaaaa");
+        store.db
+            .prepare(
+                "INSERT INTO v22_identity_rekey_map(old_project_path, new_project_path, rekeyed_at) VALUES ('dir:bbbbbbbbbbbb', 'dir:cccccccccccc', 1)",
+            )
+            .run();
+        closeStore(store);
+        const refusal = `Refusing merge: target ${to} owns no rows while dir:aaaaaaaaaaaa owns ${sourceRows}.`;
+        expectEmptyTargetRefused(
+            store,
+            "dir:aaaaaaaaaaaa",
+            to,
+            `${refusal} An empty target is accepted only after a git history rewrite, which moves a git: identity; dir:aaaaaaaaaaaa is not a git: identity.`,
+        );
+        expectEmptyTargetRefused(
+            store,
+            "dir:aaaaaaaaaaaa",
+            "dir:bbbbbbbbbbbb",
+            `Refusing merge: target dir:bbbbbbbbbbbb owns no rows while dir:aaaaaaaaaaaa owns ${sourceRows}. An empty target is accepted only as the new git: identity of a repository whose history was rewritten; dir:bbbbbbbbbbbb is not a git: identity, so moving data into it would strand that data.`,
+        );
+    }, 30_000);
+
+    for (const change of ["re-rooted again", "deleted"] as const)
+        it(`refuses apply when the folder is ${change} after the preview`, () => {
+            const { store, directory, from } = rewrittenRootFixture(`changed-${change}`);
+            const to = rewriteRoot(directory, "rewritten before the preview");
+            closeStore(store);
+            const args = ["--db", store.dbPath, "--from", from, "--to", to];
+            captureLog();
+            expect(runMergeIdentityCli(args, noHolderDeps)).toBe(0);
+            const before = fileHash(store.dbPath);
+            // The holder check runs between the preview checks and the checks on the
+            // writable handle, so changing the folder here lands exactly between the two.
+            const changeFolder = {
+                ...noHolderDeps,
+                inspectHolders: () => {
+                    if (change === "deleted") rmSync(directory, { recursive: true });
+                    else rewriteRoot(directory, "rewritten again after the preview");
+                    return { safe: true, blockers: [] };
+                },
+            };
+
+            expect(() => runMergeIdentityCli([...args, "--apply"], changeFolder)).toThrow(
+                change === "deleted"
+                    ? `No folder recorded for ${from} exists on this machine`
+                    : `No folder recorded for ${from} resolves to ${to} now`,
+            );
+            expect(fileHash(store.dbPath)).toBe(before);
+            expect(memoryOwners(store)).toEqual([from, from]);
+        }, 30_000);
+});
 
 describe("doctor merge-identities stale source sidecars", () => {
     it("allows a re-cloned source with a new-root worktree and repins without changing merge semantics", () => {
