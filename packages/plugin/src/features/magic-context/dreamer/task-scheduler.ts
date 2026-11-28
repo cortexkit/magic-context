@@ -397,6 +397,8 @@ function recordTransientFailure(
 }
 
 interface DomainGroupCallbacks {
+    /** Manual runs are not tied to a durable schedule slot. */
+    ignoreSchedule?: boolean;
     /** Manual single-task run ignores the post-lease activity gate re-check. */
     forceGate?: boolean;
     /**
@@ -419,7 +421,7 @@ async function runDomainGroup(
     deps: RunDueTasksDeps,
     group: DueTask[],
     cb?: DomainGroupCallbacks,
-): Promise<void> {
+): Promise<number> {
     const { db, projectIdentity, executor } = deps;
     // All tasks in a group share a lease domain → one key for the group.
     const leaseKey = leaseKeyFor(group[0].config.task, projectIdentity);
@@ -444,9 +446,10 @@ async function runDomainGroup(
         // lease frees. No state write.
         log(`[dreamer] domain lease busy (${leaseKey}) — deferring ${group.length} task(s)`);
         for (const due of group) cb?.onBusy?.(due.config.task);
-        return;
+        return 0;
     }
 
+    let staleSlots = 0;
     try {
         for (const due of [...group].sort((a, b) =>
             compareTaskOrder(a.config.task, b.config.task),
@@ -459,6 +462,17 @@ async function runDomainGroup(
             }
 
             acquisition = { acquiredAt: Date.now(), generation: acquisition.generation };
+
+            // A different scheduler may have advanced the slot before we took the lease.
+            if (
+                !cb?.ignoreSchedule &&
+                getTaskScheduleState(db, projectIdentity, due.config.task)?.nextDueAt !==
+                    due.scheduledAt
+            ) {
+                log(`[dreamer] ${due.config.task} slot changed (${leaseKey}) — not running`);
+                staleSlots += 1;
+                continue;
+            }
 
             // Re-evaluate the gate now that we hold the lease: a sibling/other
             // process may have just consumed the work (critical for the global
@@ -564,6 +578,7 @@ async function runDomainGroup(
     } finally {
         releaseLease(db, holderId, leaseKey);
     }
+    return staleSlots;
 }
 
 export interface ManualRunResult {
@@ -688,6 +703,7 @@ export async function runManualDream(
     await Promise.all(
         [...groups.values()].map((group) =>
             runDomainGroup({ ...deps, executor: deps.executor }, group, {
+                ignoreSchedule: true,
                 forceGate,
                 leaseWaitMs: MANUAL_RUN_LEASE_WAIT_MS,
                 onRan: (t, detail, backlog) => {
@@ -715,8 +731,8 @@ export async function runManualDream(
 /**
  * One scheduler pass for a project: seed missing rows, collect due tasks,
  * pre-gate them, group by conflict-domain, and run domains CONCURRENTLY (tasks
- * within a domain sequentially in canonical order under one lease). Returns the
- * number of tasks actually executed (for logging/tests).
+ * within a domain sequentially in canonical order under one lease). The timer
+ * counts tasks that pass the pre-lease gate, excluding slots another scheduler consumed.
  */
 export async function runDueTasksForProject(deps: RunDueTasksDeps): Promise<number> {
     // A blank identity is an unresolved directory, not a project; running tasks
@@ -771,6 +787,8 @@ export async function runDueTasksForProject(deps: RunDueTasksDeps): Promise<numb
         groups.set(kind, arr);
     }
 
-    await Promise.all([...groups.values()].map((group) => runDomainGroup(deps, group)));
-    return gated.length;
+    const staleSlots = await Promise.all(
+        [...groups.values()].map((group) => runDomainGroup(deps, group)),
+    );
+    return gated.length - staleSlots.reduce((total, count) => total + count, 0);
 }

@@ -1,11 +1,16 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it, jest } from "bun:test";
+import { afterEach, describe, expect, it, jest, spyOn } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
+import { getHarness } from "../../../shared/harness";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { cleanupTestTempDir, createTestTempDir } from "../../../shared/test-temp-dir";
 import { insertMemory } from "../memory/storage-memory";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
+import * as lease from "./lease";
 import { acquireLease, releaseLease } from "./lease";
 import { setDreamState } from "./storage-dream-state";
 import {
@@ -29,8 +34,8 @@ afterEach(() => {
     db = null;
 });
 
-function freshDb(): Database {
-    const d = new Database(":memory:");
+function freshDb(path = ":memory:"): Database {
+    const d = new Database(path);
     initializeDatabase(d);
     runMigrations(d);
     return d;
@@ -377,6 +382,94 @@ function forceDue(d: Database, task: DreamTaskRuntimeConfig["task"], now: number
 }
 
 describe("task-scheduler — runDueTasksForProject", () => {
+    it.each([
+        "curate",
+        "retrospective",
+    ] as const)("does not run a collected %s slot that another scheduler consumed", async (task) => {
+        const { dir } = createTestTempDir("dream-slot-");
+        const path = join(dir, "context.db");
+        const d = freshDb(path);
+        try {
+            const now = Date.now();
+            seedActiveMemory(d);
+            d.prepare(
+                "INSERT INTO session_projects (session_id, project_path, harness, updated_at) VALUES (?, ?, ?, ?)",
+            ).run("source", PROJECT, getHarness(), now);
+            const tasks = [cfg(task, "0 3 * * *")];
+            forceDue(d, task, now);
+            d.exec(`CREATE TABLE slot_writes (status TEXT);
+                    CREATE TRIGGER count_slot_write AFTER UPDATE ON task_schedule_state
+                    BEGIN INSERT INTO slot_writes VALUES (NEW.last_status); END;`);
+
+            // Pause A at lease acquisition, after it has already collected the due slot.
+            // A separate process can run B to completion while A is still on the stack.
+            const acquire = lease.acquireLeaseWithAcquisition;
+            let otherCalls = 0;
+            const beforeLease = spyOn(lease, "acquireLeaseWithAcquisition").mockImplementationOnce(
+                (conn, holder, key) => {
+                    const child = spawnSync(
+                        process.execPath,
+                        [
+                            "--eval",
+                            `
+                            import { Database } from "../../../shared/sqlite";
+                            import { runDueTasksForProject } from "./task-scheduler";
+                            const db = new Database(${JSON.stringify(path)});
+                            let calls = 0;
+                            const ran = await runDueTasksForProject({
+                                db, projectIdentity: ${JSON.stringify(PROJECT)},
+                                tasks: ${JSON.stringify(tasks)}, now: ${now},
+                                executor: async () => { calls++; return { status: "completed" }; },
+                            });
+                            db.close();
+                            console.log(JSON.stringify({ calls, ran }));
+                        `,
+                        ],
+                        {
+                            cwd: import.meta.dir,
+                            timeout: 5_000,
+                            encoding: "utf8",
+                            windowsHide: true,
+                        },
+                    );
+                    if (child.error) throw child.error;
+                    if (child.status !== 0) throw new Error(child.stderr);
+                    const winner = JSON.parse(child.stdout) as { calls: number; ran: number };
+                    otherCalls = winner.calls;
+                    expect(otherCalls).toBe(1);
+                    expect(winner.ran).toBe(1);
+                    expect(lease.getLeaseHolder(d, key)).toBeNull();
+                    expect(getTaskScheduleState(d, PROJECT, task)?.nextDueAt).toBeGreaterThan(now);
+                    return acquire(conn, holder, key);
+                },
+            );
+            let ownCalls = 0;
+            let ownRan: number;
+            try {
+                ownRan = await runDueTasksForProject({
+                    db: d,
+                    projectIdentity: PROJECT,
+                    tasks,
+                    now,
+                    executor: async () => {
+                        ownCalls++;
+                        return { status: "completed" };
+                    },
+                });
+            } finally {
+                beforeLease.mockRestore();
+            }
+            expect(otherCalls + ownCalls).toBe(1);
+            expect(ownRan).toBe(0);
+            expect(d.prepare("SELECT status FROM slot_writes").all()).toEqual([
+                { status: "completed" },
+            ]);
+        } finally {
+            closeQuietly(d);
+            cleanupTestTempDir(dir);
+        }
+    });
+
     it("runs a due+gated task and advances next_due to the future", async () => {
         db = freshDb();
         seedActiveMemory(db);
