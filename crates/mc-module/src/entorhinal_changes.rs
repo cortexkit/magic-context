@@ -129,8 +129,11 @@ impl WatchState {
         progress.up.replace(false)
     }
 
-    fn observe(&self, entry: RegisterEntry, snapshot: bool) -> bool {
+    fn observe(&self, entry: Option<RegisterEntry>, snapshot: bool) -> bool {
         let mut progress = self.progress.lock().expect("watch state");
+        let Some(entry) = entry else {
+            return progress.last.take().is_some();
+        };
         let same = progress.last.as_ref().is_some_and(|(revision, value)| {
             value == &entry.value && (!snapshot || *revision == entry.revision)
         });
@@ -306,9 +309,10 @@ fn observe(
             (entries.into_iter().find(|entry| entry.key == key), true)
         }
         WatchEvent::Update(RegisterUpdate::Put(entry)) if entry.key == key => (Some(entry), false),
-        WatchEvent::Update(_) => (None, false),
+        WatchEvent::Update(RegisterUpdate::Delete(entry)) if entry.key == key => (None, false),
+        WatchEvent::Update(_) => return,
     };
-    if entry.is_some_and(|entry| state.observe(entry, snapshot)) {
+    if state.observe(entry, snapshot) {
         changed();
     }
 }

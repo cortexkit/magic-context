@@ -877,3 +877,32 @@ async fn a_replacement_ending_before_its_snapshot_retries_after_backoff_if_none_
     assert_eq!(*bus.generations().borrow(), Some(4));
     assert!(state.is_up());
 }
+
+#[tokio::test]
+async fn a_replacement_snapshot_without_the_marker_reports_absence_and_the_returning_value() {
+    use crate::entorhinal_changes::{spawn_marker, WatchState, KEY};
+    let Some(server) = LocalNats::start().await else {
+        return;
+    };
+    let bucket = registry_bucket(&server).await;
+    bucket.put(KEY, b"one".as_slice().into()).await.unwrap();
+    let bus = local_bus(server.addr);
+    let (change, mut events) = mpsc::unbounded_channel();
+    let state = Arc::new(WatchState::default());
+    let _marker = spawn_marker(bus.clone(), state.clone(), KEY, move || {
+        change.send(()).unwrap()
+    });
+    marker_event(&mut events).await;
+
+    enter_renewal_window(&bus, server.addr).await;
+    let (guard, generation) = bus.session_with_generation().await.unwrap();
+    assert_eq!(generation, 2);
+    // The marker cannot acquire the replacement session until both writes finish.
+    bucket.put(KEY, b"two".as_slice().into()).await.unwrap();
+    bucket.delete(KEY).await.unwrap();
+    drop(guard);
+    marker_event(&mut events).await;
+    assert!(state.is_up());
+    bucket.put(KEY, b"one".as_slice().into()).await.unwrap();
+    marker_event(&mut events).await;
+}

@@ -334,10 +334,12 @@ async fn a_panicked_marker_watch_is_down_during_backoff() {
 #[test]
 fn a_replacement_snapshot_observes_a_new_revision_of_the_same_value() {
     let state = WatchState::default();
-    let entry = |revision| cortexkit_bus_trait::RegisterEntry {
-        key: KEY.to_owned(),
-        value: marker(1),
-        revision: cortexkit_bus_trait::Revision(revision),
+    let entry = |revision| {
+        Some(cortexkit_bus_trait::RegisterEntry {
+            key: KEY.to_owned(),
+            value: marker(1),
+            revision: cortexkit_bus_trait::Revision(revision),
+        })
     };
     assert!(state.observe(entry(1), true));
     assert!(
@@ -352,4 +354,63 @@ fn a_replacement_snapshot_observes_a_new_revision_of_the_same_value() {
         state.observe(entry(4), true),
         "the value may have changed and returned"
     );
+}
+
+#[test]
+fn deleting_the_marker_then_putting_its_old_value_requests_two_rereads() {
+    let state = WatchState::default();
+    let count = AtomicUsize::new(0);
+    let event = |event| {
+        observe(&state, KEY, 1, event, &|| {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        count.load(Ordering::SeqCst)
+    };
+    let put = |revision| {
+        WatchEvent::Update(RegisterUpdate::Put(RegisterEntry {
+            key: KEY.to_owned(),
+            value: marker(1),
+            revision: Revision(revision),
+        }))
+    };
+    let delete = |key: &str, revision| {
+        WatchEvent::Update(RegisterUpdate::Delete(cortexkit_bus_trait::Tombstone {
+            key: key.to_owned(),
+            revision: Revision(revision),
+        }))
+    };
+    assert_eq!(event(put(1)), 1);
+    assert_eq!(event(delete("other", 2)), 1);
+    assert_eq!(event(delete(KEY, 3)), 2);
+    assert_eq!(event(delete(KEY, 4)), 2);
+    assert_eq!(event(put(5)), 3);
+    assert_eq!(event(put(6)), 3);
+}
+
+#[test]
+fn a_put_after_an_empty_snapshot_is_a_reread_even_if_the_value_returns() {
+    let state = WatchState::default();
+    let empty = || WatchEvent::Snapshot {
+        entries: Vec::new(),
+        revision: Revision(0),
+    };
+    let put = |revision| {
+        WatchEvent::Update(RegisterUpdate::Put(RegisterEntry {
+            key: KEY.to_owned(),
+            value: marker(1),
+            revision: Revision(revision),
+        }))
+    };
+    let count = AtomicUsize::new(0);
+    let event = |event| {
+        observe(&state, KEY, 1, event, &|| {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        count.load(Ordering::SeqCst)
+    };
+    assert_eq!(event(empty()), 0);
+    assert_eq!(event(put(1)), 1);
+    assert_eq!(event(empty()), 2);
+    assert_eq!(event(empty()), 2);
+    assert_eq!(event(put(2)), 3);
 }
