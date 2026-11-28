@@ -553,8 +553,9 @@ fn a_failed_save_at_a_cut_moves_a_day_to_the_nearest_message_once() {
         .save_app_index(&session.key, &[probe], None)
         .unwrap_err();
     assert!(refused.contains("intentional failed save"), "{refused}");
-    // Summary 2's boundary messages have their times only in the transcript
-    // index; the nearest timed message the search index knows is message 3.
+    // The second summary covers messages 5 to 8. Its first and last message
+    // have their times only in the transcript index; the nearest timed
+    // message the search index knows is message 3.
     search_rows(&session, &[(3, DAY0)]);
     let heading = |m0: &str| {
         m0.lines()
