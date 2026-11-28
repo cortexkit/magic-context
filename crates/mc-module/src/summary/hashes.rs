@@ -41,15 +41,15 @@ fn hashes_in_value(value: &Value, into: &mut BTreeSet<String>) {
     }
 }
 
-/// Every hash-like token in each message's raw parts, by ordinal: text,
+/// Every hash-like token in each message's carried parts, by ordinal: text,
 /// tool inputs and tool outputs, as the messages read in full hold them.
 pub fn by_ordinal(entries: &[Entry]) -> BTreeMap<u64, BTreeSet<String>> {
     entries
         .iter()
         .map(|entry| {
             let mut hashes = BTreeSet::new();
-            let mut frames = crate::neutral::verified_host_frames(entry).peekable();
-            for part in &entry.parts {
+            let mut frames = crate::neutral::carried_host_frames(entry).peekable();
+            for part in crate::neutral::carried_parts(entry) {
                 if frames.peek().is_some_and(|(id, _)| *id == part.id) {
                     let (_, words) = frames.next().expect("peeked frame");
                     hashes_in(words, &mut hashes);

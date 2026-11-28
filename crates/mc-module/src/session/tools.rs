@@ -423,9 +423,7 @@ impl Session {
                     .entries()
                     .iter()
                     .filter(|entry| {
-                        entry
-                            .parts
-                            .iter()
+                        crate::neutral::carried_parts(entry)
                             .any(|part| !edited.covers(&entry.mid, &part.id))
                     })
                     .map(|entry| entry.ordinal as i64)

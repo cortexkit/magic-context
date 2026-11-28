@@ -71,9 +71,9 @@ pub fn is_meaningful_user(entry: &Entry) -> bool {
     entry.role == Role::User
         && !crate::neutral::is_unkept_notice(entry)
         && entry.speaks_for.is_none()
-        && !crate::neutral::has_verified_host_frames(entry)
+        && crate::neutral::carried_host_frames(entry).next().is_none()
         && !super::chunk::is_relayed_wake(
-            &crate::neutral::authored_parts(entry)
+            &crate::neutral::carried_authored_parts(entry)
                 .filter_map(|part| match &part.body {
                     PartBody::Text { text } => Some(text.as_str()),
                     _ => None,
@@ -81,7 +81,7 @@ pub fn is_meaningful_user(entry: &Entry) -> bool {
                 .collect::<Vec<_>>()
                 .join("\n"),
         )
-        && crate::neutral::authored_parts(entry).any(|part| match &part.body {
+        && crate::neutral::carried_authored_parts(entry).any(|part| match &part.body {
             PartBody::Text { text } => !crate::injection::strip(text)
                 .as_deref()
                 .unwrap_or(text)
@@ -92,8 +92,9 @@ pub fn is_meaningful_user(entry: &Entry) -> bool {
 }
 
 pub(super) fn opens_tool_work(entry: &Entry) -> bool {
-    !crate::neutral::has_verified_host_frames(entry)
-        && crate::neutral::authored_parts(entry).any(|part| matches!(part.body, PartBody::Tool(_)))
+    crate::neutral::carried_host_frames(entry).next().is_none()
+        && crate::neutral::carried_authored_parts(entry)
+            .any(|part| matches!(part.body, PartBody::Tool(_)))
 }
 
 /// The first ordinal the summarizer must not read, given that everything
@@ -114,12 +115,13 @@ pub fn tail_start(
     tail_tokens: u64,
     force: bool,
 ) -> u64 {
-    let Some(newest) = entries.last() else {
+    let present = |entry: &&Entry| !crate::neutral::is_absent_from_request(entry);
+    let Some(newest) = entries.iter().rfind(present) else {
         return from;
     };
     let mut boundary = newest.ordinal + 1;
     let mut total = 0;
-    for entry in entries.iter().rev() {
+    for entry in entries.iter().rev().filter(present) {
         if entry.ordinal < from {
             break;
         }
@@ -330,14 +332,20 @@ pub fn cap_run(
     cap: u64,
 ) -> u64 {
     let mut total = 0;
-    for entry in entries
+    let start = entries.partition_point(|entry| entry.ordinal < from);
+    let mut first_omitted = entries.get(start).is_some_and(|entry| {
+        entry.ordinal == from && crate::neutral::is_absent_from_request(entry)
+    });
+    for entry in entries[start..]
         .iter()
-        .filter(|entry| entry.ordinal >= from && entry.ordinal < until)
+        .take_while(|entry| entry.ordinal < until)
+        .filter(|entry| !crate::neutral::is_absent_from_request(entry))
     {
         total += weight(entry);
-        if total > cap && entry.ordinal > from {
+        if total > cap && entry.ordinal > from && !first_omitted {
             return entry.ordinal;
         }
+        first_omitted = false;
     }
     until
 }

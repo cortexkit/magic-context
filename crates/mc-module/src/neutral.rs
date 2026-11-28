@@ -64,6 +64,10 @@ pub(crate) fn has_verified_host_frames(entry: &Entry) -> bool {
     verified_host_frames(entry).next().is_some()
 }
 
+pub(crate) fn carried_host_frames(entry: &Entry) -> impl Iterator<Item = (&str, &str)> {
+    verified_host_frames(entry).filter(|(id, _)| carried_parts(entry).any(|part| part.id == *id))
+}
+
 /// Parts eligible for attribution to the entry's user or assistant speaker.
 pub(crate) fn authored_parts(entry: &Entry) -> impl Iterator<Item = &Part> {
     all_parts(entry).filter(|part| host_part(entry, part).is_none())
@@ -100,7 +104,7 @@ pub(crate) fn is_unkept_notice(entry: &Entry) -> bool {
 }
 
 pub(crate) fn is_host_only(entry: &Entry) -> bool {
-    !entry.parts.is_empty() && authored_parts(entry).next().is_none()
+    has_carried_parts(entry) && carried_authored_parts(entry).next().is_none()
 }
 
 pub(crate) fn host_label(fact: &HostPart) -> String {

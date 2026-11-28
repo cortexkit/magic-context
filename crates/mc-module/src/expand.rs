@@ -276,9 +276,7 @@ fn render_part_preview(body: &PartBody, counter: crate::count::Counter) -> Optio
 fn verbose_label(entry: &Entry) -> String {
     let only_results = entry.role == Role::User
         && !entry.parts.is_empty()
-        && entry
-            .parts
-            .iter()
+        && crate::neutral::all_parts(entry)
             .all(|part| matches!(&part.body, PartBody::Tool(tool) if tool.output.is_some()));
     if only_results {
         "tool results".into()
@@ -354,7 +352,7 @@ async fn by_tag<C: RunnerClient>(
     };
     let part = entries
         .iter()
-        .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+        .flat_map(|entry| crate::neutral::carried_parts(entry).map(move |part| (entry, part)))
         .find(|(_, part)| part.tag == Some(tag));
     Ok(match part {
         None => format!(
@@ -377,9 +375,7 @@ async fn by_message<C: RunnerClient>(
             "No message at ordinal {number} in this session's stored history — it was deleted (session prune/revert) or the ordinal is wrong, so it can't be recovered. Re-run the tool if you still need the data."
         ));
     };
-    let rendered: Vec<String> = entry
-        .parts
-        .iter()
+    let rendered: Vec<String> = crate::neutral::all_parts(&entry)
         .filter_map(|part| recovered_part(&entry, part, None))
         .collect();
     let mut lines = vec![
@@ -412,10 +408,12 @@ async fn range<C: RunnerClient>(
         read.iter().map(entry_bytes).sum::<u64>() > byte_cap
     })
     .await?;
-    // Historian lines intentionally omit host text. Raw recovery must keep it,
-    // so a marked range uses per-part labels instead of the historian renderer.
+    // The summary formatter skips host text and parts the model never saw.
+    // A range containing either uses per-part recovery so neither is lost.
     if entries.iter().any(|entry| {
-        !entry.host_parts.is_empty() || crate::neutral::has_verified_host_frames(entry)
+        !entry.host_parts.is_empty()
+            || crate::neutral::has_verified_host_frames(entry)
+            || crate::neutral::all_parts(entry).any(|part| !crate::neutral::carries_part(part))
     }) {
         return Ok(recovery_blocks(&entries, start, end, counter, false));
     }
@@ -502,9 +500,7 @@ fn recovery_blocks(
     for entry in entries {
         let number = entry.ordinal;
         let header = format!("[{number}] {}", verbose_label(entry));
-        let parts: Vec<String> = entry
-            .parts
-            .iter()
+        let parts: Vec<String> = crate::neutral::all_parts(entry)
             .filter_map(|part| recovered_part(entry, part, preview.then_some(counter)))
             .collect();
         let block = if parts.is_empty() {
@@ -548,9 +544,7 @@ fn recovery_blocks(
 }
 
 fn entry_bytes(entry: &Entry) -> u64 {
-    entry
-        .parts
-        .iter()
+    crate::neutral::all_parts(entry)
         .map(|part| match &part.body {
             PartBody::Text { text } => text.len() as u64,
             PartBody::Tool(tool) => {

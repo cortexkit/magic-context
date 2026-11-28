@@ -14,7 +14,7 @@ struct Fact {
     removed: u64,
     body: u64,
     members: u64,
-    host_only: u64,
+    not_conversation: u64,
     prompt: Option<usize>,
     opens: Option<usize>,
     visible: Option<usize>,
@@ -332,7 +332,7 @@ impl Window {
             let meaningful = trigger::is_meaningful_user(entry);
             let opens = meaningful || trigger::opens_tool_work(entry);
             let rendered = chunk::render_entry(entry, false);
-            let framed = crate::neutral::has_verified_host_frames(entry);
+            let framed = crate::neutral::carried_host_frames(entry).next().is_some();
             let body = rendered
                 .as_ref()
                 .filter(|_| !framed && counter.family().is_some())
@@ -354,8 +354,11 @@ impl Window {
                         .sum::<u64>(),
                 body: before.map_or(0, |fact| fact.body) + body,
                 members: before.map_or(0, |fact| fact.members) + u64::from(rendered.is_some()),
-                host_only: before.map_or(0, |fact| fact.host_only)
-                    + u64::from(crate::neutral::is_host_only(entry)),
+                not_conversation: before.map_or(0, |fact| fact.not_conversation)
+                    + u64::from(
+                        crate::neutral::is_absent_from_request(entry)
+                            || crate::neutral::is_host_only(entry),
+                    ),
                 prompt: if meaningful {
                     Some(i)
                 } else {
@@ -389,7 +392,10 @@ impl Window {
             self.blocks.len()
         } else {
             let keep = self.blocks.partition_point(|block| block.high <= low);
-            resume = self.blocks.get(keep).map_or(low, |block| block.low);
+            resume = self
+                .blocks
+                .get(keep)
+                .map_or(low, |block| block.low.min(low));
             keep
         };
         self.from = from;
@@ -414,6 +420,11 @@ impl Window {
                 .is_none_or(|block| block.role != role || role == 'R' || block.framed || framed)
             {
                 let low = self.blocks.last().map_or(start, |block| block.high);
+                let low = low
+                    + entries[low..i]
+                        .iter()
+                        .take_while(|entry| crate::neutral::is_absent_from_request(entry))
+                        .count();
                 self.blocks.push(Block {
                     low,
                     high: i + 1,
@@ -456,19 +467,37 @@ impl Window {
         lift: bool,
         cap: u64,
     ) -> u64 {
-        let low = entries.partition_point(|entry| entry.ordinal < from);
-        if low == entries.len() {
+        let raw_low = entries.partition_point(|entry| entry.ordinal < from);
+        let mut present = entries[raw_low..]
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !crate::neutral::is_absent_from_request(entry));
+        let Some((low, _)) = present.next() else {
             return from;
-        }
+        };
+        let low = raw_low + low;
         let total = self.prefix(entries.len(), |fact| fact.raw);
-        let mut i =
+        let limit =
             self.facts[low..].partition_point(|fact| total.saturating_sub(fact.raw) >= tail) + low;
-        i = i.min(entries.len() - 1);
+        let mut i = limit.min(entries.len() - 1);
+        if let Some(offset) = entries[i..]
+            .iter()
+            .position(|entry| !crate::neutral::is_absent_from_request(entry))
+        {
+            i += offset;
+        } else {
+            i = entries[..i]
+                .iter()
+                .rposition(|entry| !crate::neutral::is_absent_from_request(entry))
+                .expect("at least one entry is present");
+        }
         let mut boundary = entries[i].ordinal;
         let weight = self.prefix(i + 1, |fact| fact.raw) - self.prefix(i, |fact| fact.raw);
         if total - self.prefix(i, |fact| fact.raw) >= tail
             && super::trigger::too_large_to_keep_raw(weight, tail)
-            && i + 1 < entries.len()
+            && entries[i + 1..]
+                .iter()
+                .any(|entry| !crate::neutral::is_absent_from_request(entry))
         {
             boundary += 1;
         }
@@ -503,8 +532,11 @@ impl Window {
         let start = self.prefix(low, |fact| fact.removed);
         let over = self.facts[low..high].partition_point(|fact| fact.removed - start <= cap) + low;
         if over < high {
-            let over = if entries[over].ordinal == from {
-                over + 1
+            let over = if entries[over].ordinal == from || (over == low && low != raw_low) {
+                entries[over + 1..high]
+                    .iter()
+                    .position(|entry| !crate::neutral::is_absent_from_request(entry))
+                    .map_or(high, |offset| over + 1 + offset)
             } else {
                 over
             };
@@ -621,8 +653,8 @@ impl Window {
                 messages = high - low;
             }
         }
-        messages -= (self.prefix(low + messages, |fact| fact.host_only)
-            - self.prefix(low, |fact| fact.host_only)) as usize;
+        messages -= (self.prefix(low + messages, |fact| fact.not_conversation)
+            - self.prefix(low, |fact| fact.not_conversation)) as usize;
         (messages > 0).then(|| trigger::Scan {
             tokens,
             commit_clusters: clusters,

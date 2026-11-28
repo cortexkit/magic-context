@@ -344,9 +344,7 @@ impl Session {
                 p.remove(ordinal);
             }
             p.positions.insert(entry.mid.clone(), ordinal);
-            let reasoning: Vec<_> = entry
-                .parts
-                .iter()
+            let reasoning: Vec<_> = crate::neutral::all_parts(entry)
                 .filter(|part| matches!(part.body, PartBody::Reasoning { .. }))
                 .collect();
             let measure = lanes::reasoning_measure(entry, &reasoning);
@@ -396,13 +394,11 @@ impl Session {
                 || row
                     .parts
                     .iter()
-                    .zip(&entry.parts)
+                    .zip(crate::neutral::all_parts(entry))
                     .any(|(old, new)| old.runner_tokens != new.tokens)
             {
                 let mut weights = reasoning_weights(&reasoning, measure.0).into_iter();
-                row.parts = entry
-                    .parts
-                    .iter()
+                row.parts = crate::neutral::all_parts(entry)
                     .map(|part| {
                         let (item_tokens, source) =
                             if matches!(part.body, PartBody::Reasoning { .. }) {

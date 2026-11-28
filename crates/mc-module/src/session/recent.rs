@@ -13,6 +13,8 @@ impl Session {
     /// `budget` tokens by the session's counter, and the last message the
     /// session's summaries cover, so the reader can see where the lines
     /// overlap them.
+    /// This shows the conversation as the model saw it, without parts the
+    /// host never sent.
     ///
     /// It is a read: it changes nothing, reads nothing from the runner, and
     /// builds no view. A session whose transcript is still being read is

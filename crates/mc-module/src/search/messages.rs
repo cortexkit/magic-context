@@ -56,9 +56,7 @@ fn content_of(entry: &Entry) -> String {
             entry.role == Role::User && entry.notice.is_none() && entry.speaks_for.is_none();
         // The search index holds one row per stored message, not per part, so
         // every frame's words go into that one row.
-        return entry
-            .parts
-            .iter()
+        return crate::neutral::all_parts(entry)
             .filter_map(|part| {
                 if frames.peek().is_some_and(|(id, _)| *id == part.id) {
                     let (_, words) = frames.next().expect("peeked frame");

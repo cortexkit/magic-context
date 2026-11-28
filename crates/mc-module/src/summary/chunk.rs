@@ -18,7 +18,7 @@ mod spoken_samples_tests;
 
 use std::sync::OnceLock;
 
-use cortexkit_role_compaction::part::PartBody;
+use cortexkit_role_compaction::part::{Part, PartBody};
 use cortexkit_role_compaction::read::{Entry, Role};
 use regex::Regex;
 use serde_json::Value;
@@ -615,6 +615,9 @@ fn build_counted(
     };
 
     for entry in entries {
+        if crate::neutral::is_absent_from_request(entry) {
+            continue;
+        }
         // Ordinals count from 1, as standalone sessions number messages, so
         // a summary names messages by their ordinal.
         let number = entry.ordinal;
@@ -938,15 +941,16 @@ pub(super) fn render_entry(
 /// Keep ordinary parts on their normal reading path in the gaps between
 /// verified frames. Tool results and ordinary system text have no line.
 fn render_frames(entry: &Entry) -> Option<Vec<FrameLine>> {
-    let mut frames = crate::neutral::verified_host_frames(entry).peekable();
+    let mut frames = crate::neutral::carried_host_frames(entry).peekable();
     frames.peek()?;
+    let parts: Vec<_> = crate::neutral::carried_parts(entry).collect();
     let mut lines = Vec::new();
     let mut first = 0;
-    for (i, part) in entry.parts.iter().enumerate() {
+    for (i, part) in parts.iter().enumerate() {
         if !frames.peek().is_some_and(|(id, _)| *id == part.id) {
             continue;
         }
-        render_ordinary_siblings(entry, first..i, &mut lines);
+        render_ordinary_siblings(entry, &parts[first..i], &mut lines);
         first = i + 1;
         let (_, words) = frames.next().expect("peeked frame");
         let text = normalize(words);
@@ -958,22 +962,19 @@ fn render_frames(entry: &Entry) -> Option<Vec<FrameLine>> {
             });
         }
     }
-    render_ordinary_siblings(entry, first..entry.parts.len(), &mut lines);
+    render_ordinary_siblings(entry, &parts[first..], &mut lines);
     Some(lines)
 }
 
-fn render_ordinary_siblings(
-    entry: &Entry,
-    range: std::ops::Range<usize>,
-    lines: &mut Vec<FrameLine>,
-) {
-    if entry.role != Role::User || range.is_empty() {
+fn render_ordinary_siblings(entry: &Entry, parts: &[&Part], lines: &mut Vec<FrameLine>) {
+    if entry.role != Role::User || parts.is_empty() {
         return;
     }
     if let Some((role, parts)) = render_user(
         entry,
-        entry.parts[range]
+        parts
             .iter()
+            .copied()
             .filter(|part| crate::neutral::host_part(entry, part).is_none()),
     ) {
         let parts = if role == 'R' {
@@ -995,11 +996,11 @@ fn render_ordinary_entry(
 ) -> Option<(char, Vec<String>, Vec<String>, bool)> {
     let _timing = crate::notice_cost_timing::span("trigger.render_entry");
     match entry.role {
-        Role::User => render_user(entry, crate::neutral::authored_parts(entry))
+        Role::User => render_user(entry, crate::neutral::carried_authored_parts(entry))
             .map(|(role, parts)| (role, parts, Vec::new(), true)),
         Role::Assistant => {
             let mut has_spoken = false;
-            let mut texts: Vec<_> = crate::neutral::authored_parts(entry)
+            let mut texts: Vec<_> = crate::neutral::carried_authored_parts(entry)
                 .filter_map(|part| match &part.body {
                     PartBody::Text { text } => Some((normalize(text), text.trim() == "sent")),
                     PartBody::Tool(tool) => {
@@ -1017,7 +1018,7 @@ fn render_ordinary_entry(
                 texts.retain(|(_, ack)| !ack);
             }
             if texts.is_empty() {
-                let calls: Vec<String> = crate::neutral::authored_parts(entry)
+                let calls: Vec<String> = crate::neutral::carried_authored_parts(entry)
                     .filter_map(|part| match &part.body {
                         PartBody::Tool(tool) => Some(tool_summary(&tool.name, &tool.input.parse())),
                         _ => None,
