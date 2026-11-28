@@ -78,6 +78,11 @@ const CKBUS: &str = "ckbus";
 const BATCH: usize = 50;
 /// A credential this close to its expiry, in seconds, is renewed first.
 const RENEW_WITHIN_S: i64 = 300;
+pub(crate) const SHUTTING_DOWN: &str = "bus_shutting_down";
+
+pub(crate) fn log_publish_during_shutdown(kind: &str) {
+    tracing::debug!(kind, "ck-mc: bus: skipping a publish during shutdown");
+}
 
 fn zeroizing_string<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -887,7 +892,7 @@ impl Bus {
     pub(crate) async fn session(&self) -> Result<SessionGuard<'_>, String> {
         let mut session = self.session.lock().await;
         if self.retirements.is_stopping() {
-            return Err("bus_shutting_down".into());
+            return Err(SHUTTING_DOWN.into());
         }
         let ready = async {
             // Whether the session got a new connection: opened, or renewed,
@@ -1044,6 +1049,7 @@ impl DocsNotices {
                 }
                 self.logged.store(false, Ordering::Relaxed);
             }
+            Err(error) if error == SHUTTING_DOWN => log_publish_during_shutdown("docs_proposal"),
             Err(error) => {
                 if !self.logged.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
@@ -1184,6 +1190,7 @@ impl AttributionEvents {
                 }
                 self.logged.store(false, Ordering::Relaxed);
             }
+            Err(error) if error == SHUTTING_DOWN => log_publish_during_shutdown("attribution_fact"),
             Err(error) => {
                 if !self.logged.swap(true, Ordering::Relaxed) {
                     tracing::warn!(

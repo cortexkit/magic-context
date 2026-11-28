@@ -840,3 +840,46 @@ async fn health_bus_state_is_readable_with_a_session_in_use() {
 
 #[path = "bus_renewal_tests.rs"]
 mod renewal;
+
+#[tokio::test]
+async fn publishers_warn_for_an_outage_but_not_for_normal_shutdown() {
+    use crate::memory_changed::{Owner, Publisher};
+    use cortexkit_role_compaction::read::SessionRef;
+    let (fixture, proposal) = proposed();
+    let parent = SessionRef::new("broca", "pi", "ses_head");
+    let child = SessionRef::new("broca", "pi", "ses_head:mc-summary:shutdown");
+    let purpose = attribution::Purpose::summary(&parent, Some("agent_alfonso"), Some("pj-a"));
+    attribution::tests::put(&fixture.db, &child, &purpose, 1);
+    crate::memory_changed::tests::agent_save(&fixture.db, "pj-a", "A pending memory wake.");
+    let owners = std::collections::BTreeSet::from([Owner::of("project", "pj-a").unwrap()]);
+    for stopping in [false, true] {
+        let transport = TestBus::new();
+        transport.down.store(true, Ordering::Relaxed);
+        let bus = transport.bus();
+        if stopping {
+            bus.close_retiring().await;
+        }
+        let notices = DocsNotices::over(bus.clone());
+        let facts = AttributionEvents::over(bus.clone());
+        let mut wakes = Publisher::new(bus, 0);
+        let log = crate::test_log::capture();
+        notices.publish(&fixture.db).await;
+        facts.publish(&fixture.db).await;
+        assert!(wakes.round(&fixture.db, owners.clone()).await.is_empty());
+        let text = log.text();
+        for warning in [
+            "docs proposal notices wait unsent until the bus is reachable",
+            "attribution fact events wait unsent until the bus is reachable",
+            "memory change wakes are dropped until the bus is reachable",
+        ] {
+            assert_eq!(
+                text.lines()
+                    .any(|line| line.trim_start().starts_with("WARN") && line.contains(warning)),
+                !stopping,
+                "{text}"
+            );
+        }
+        assert!(fixture.proposal(proposal).published_at.is_none());
+        assert!(attribution::tests::rows(&fixture.db)[0].2.is_none());
+    }
+}

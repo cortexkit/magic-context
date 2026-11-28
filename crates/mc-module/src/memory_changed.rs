@@ -30,7 +30,7 @@ use cortexkit_bus_trait::{ContentDigest, Headers};
 use rusqlite::Connection;
 use tokio::sync::Notify;
 
-use crate::bus::{Bus, Notice};
+use crate::bus::{log_publish_during_shutdown, Bus, Notice, SHUTTING_DOWN};
 use crate::context_db::ContextDb;
 
 /// The event, and its version.
@@ -277,6 +277,7 @@ impl Publisher {
         }
         match outcome {
             Ok(()) => self.logged = false,
+            Err(error) if error == SHUTTING_DOWN => log_publish_during_shutdown(EVENT_NAME),
             Err(error) => {
                 if !std::mem::replace(&mut self.logged, true) {
                     tracing::warn!(

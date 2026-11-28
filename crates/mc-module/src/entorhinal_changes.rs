@@ -25,7 +25,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use crate::bus::{Bus, BusGeneration};
+use crate::bus::{Bus, BusGeneration, SHUTTING_DOWN};
 
 /// The module that writes the bucket, the bucket's name, and the key.
 pub(crate) const OWNER: &str = "entorhinal";
@@ -125,7 +125,12 @@ impl WatchState {
 
     /// The watch couldn't start or ended, because of `why`.
     fn down(&self, why: &str) {
-        if !self.mark_down() {
+        let already_reported = self.mark_down();
+        if why == SHUTTING_DOWN {
+            tracing::debug!(
+                "ck-mc: entorhinal changes: not opening a marker watch during shutdown"
+            );
+        } else if !already_reported {
             match self.effect {
                 None => tracing::warn!(
                     reason = %why,
