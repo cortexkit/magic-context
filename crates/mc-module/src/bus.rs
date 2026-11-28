@@ -901,6 +901,10 @@ impl Bus {
         self.current.subscribe()
     }
 
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
     /// Start closing all retired sockets immediately on module shutdown,
     /// and await their closes before the runtime exits.
     pub async fn close_retiring(&self) {

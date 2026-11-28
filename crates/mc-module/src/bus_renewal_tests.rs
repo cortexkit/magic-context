@@ -65,12 +65,20 @@ impl Drop for LocalNats {
     }
 }
 
-struct LocalCredential(Credential);
+struct LocalCredential {
+    first: Mutex<Option<Credential>>,
+    repeat: Credential,
+}
 
 #[async_trait]
 impl CredentialProvider for LocalCredential {
     async fn issue(&self) -> Result<Credential, String> {
-        Ok(self.0.clone())
+        Ok(self
+            .first
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| self.repeat.clone()))
     }
 
     async fn renewal(&self, credential: &Credential) -> Result<Renewal, String> {
@@ -123,8 +131,16 @@ fn local_bus_with_gate(
     addr: std::net::SocketAddr,
     stall_next_snapshot: Option<Arc<SnapshotGate>>,
 ) -> Arc<Bus> {
+    local_bus_at(addr, addr, stall_next_snapshot)
+}
+
+fn local_bus_at(
+    first_addr: std::net::SocketAddr,
+    next_addr: std::net::SocketAddr,
+    stall_next_snapshot: Option<Arc<SnapshotGate>>,
+) -> Arc<Bus> {
     let credential_public = "UTEST".to_owned();
-    let provider = Arc::new(LocalCredential(Credential {
+    let repeat = Credential {
         jwt: "original-fixture-token".to_owned().into(),
         exp: now_ms() / 1000 + 900,
         acct: account().account().to_owned(),
@@ -132,12 +148,19 @@ fn local_bus_with_gate(
         inbox_prefix: ConnectConfig::new(&credential_public)
             .unwrap()
             .inbox_prefix(),
-        server_url: addr.to_string(),
+        server_url: next_addr.to_string(),
         credential_public,
         user_jwt_id: "original".into(),
         spawn_generation: 1,
         credential_epoch: 1,
-    }));
+    };
+    let provider = Arc::new(LocalCredential {
+        first: Mutex::new(Some(Credential {
+            server_url: first_addr.to_string(),
+            ..repeat.clone()
+        })),
+        repeat,
+    });
     Arc::new(Bus::with_factory(Arc::new(LocalSessions {
         provider,
         stall_next_snapshot,
@@ -266,7 +289,7 @@ async fn renewal_retires_the_connection_held_by_a_marker_watch() {
 }
 
 #[tokio::test]
-async fn a_marker_recovers_on_the_next_generation_after_reconnect_exhaustion() {
+async fn a_marker_opens_a_fresh_session_by_itself_after_reconnect_exhaustion() {
     use crate::entorhinal_changes::{spawn_marker, WatchState, BUCKET, KEY, OWNER};
     use tokio::io::AsyncWriteExt as _;
     let Some(server) = LocalNats::start().await else {
@@ -301,7 +324,7 @@ async fn a_marker_recovers_on_the_next_generation_after_reconnect_exhaustion() {
         drop(retry);
     });
 
-    let bus = local_bus(proxy_addr);
+    let bus = local_bus_at(proxy_addr, server.addr, None);
     let (change, mut events) = mpsc::unbounded_channel();
     let state = Arc::new(WatchState::default());
     let _task = spawn_marker(bus.clone(), state.clone(), KEY, move || {
@@ -335,6 +358,7 @@ async fn a_marker_recovers_on_the_next_generation_after_reconnect_exhaustion() {
     .await
     .expect("the first connection observed the disconnect")
     .unwrap();
+    let mut generations = bus.generations();
     {
         let pending = watch.next();
         tokio::pin!(pending);
@@ -349,23 +373,32 @@ async fn a_marker_recovers_on_the_next_generation_after_reconnect_exhaustion() {
             .await
             .expect("the exhausted handler rejects commands")
             .is_err());
-        assert_eq!(*first.borrow(), NatsConnectionState::Disconnected);
-        tokio::select! {
-            biased;
-            outcome = &mut pending => panic!("watch returned when the handler exited: {outcome:?}"),
-            () = std::future::ready(()) => {}
-        }
-        assert!(
-            first.has_changed().is_ok(),
-            "the watch still owns a state sender"
-        );
-        eprintln!("generation 1 handler rejects flush after reconnect exhaustion; state is still Disconnected and watch.next() is pending");
+        closed(&mut first, Duration::from_secs(15)).await;
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(15), pending)
+                .await
+                .unwrap(),
+            Err(BusError::Unavailable { .. })
+        ));
+        eprintln!("reconnect exhaustion closed generation 1 and ended its register watch with Unavailable");
     }
 
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        generations.wait_for(Option::is_none),
+    )
+    .await
+    .expect("the marker forgets its lost session without another user")
+    .unwrap();
+    assert!(!state.is_up());
     bucket.put(KEY, b"two".as_slice().into()).await.unwrap();
-    let (_, generation) = at_renewal(&bus, server.addr).await;
-    assert_eq!(generation, 2);
-    marker_event(&mut events).await;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(15), events.recv())
+            .await
+            .unwrap(),
+        Some(())
+    );
+    assert_eq!(*generations.borrow(), Some(2));
     assert!(
         state.is_up(),
         "the original marker task recovered without a restart"

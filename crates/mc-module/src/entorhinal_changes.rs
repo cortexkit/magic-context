@@ -151,15 +151,25 @@ impl WatchState {
 /// Start the watch: open the bus session and watch `key`. A watch the bus
 /// refused leaves the session to the others that use it; any other failure
 /// drops it, since its connection may be gone.
-async fn open(bus: &Bus, key: &str) -> Result<(Box<dyn RegisterWatch>, u64), String> {
-    let (session, generation) = bus.session_with_generation().await?;
+async fn open(bus: &Bus, key: &str) -> Result<(Box<dyn RegisterWatch>, u64), WatchFailure> {
+    let attempted = bus.generation();
+    let (session, generation) =
+        bus.session_with_generation()
+            .await
+            .map_err(|reason| WatchFailure {
+                reason,
+                generation: attempted,
+            })?;
     match session.watch(OWNER, BUCKET, key).await {
         Ok(watch) => Ok((watch, generation)),
         Err(error) => {
             if error == "nats_watch_failed" {
                 session.discard();
             }
-            Err(error)
+            Err(WatchFailure {
+                reason: error,
+                generation,
+            })
         }
     }
 }
@@ -211,7 +221,7 @@ pub(crate) fn spawn_marker(
             tokio::select! {
                 biased;
                 _ = &mut stopped => break,
-                _ = tokio::time::sleep(state.next_retry()) => {}
+                () = retry(&bus, &state, bus.generation()) => {}
             }
         }
         tasks.shutdown().await;
@@ -223,8 +233,22 @@ pub(crate) fn spawn_marker(
 async fn run_marker(bus: &Bus, state: &WatchState, key: &str, changed: &(impl Fn() + Sync)) {
     loop {
         let error = follow(bus, state, key, changed).await.unwrap_err();
-        state.down(&error);
-        tokio::time::sleep(state.next_retry()).await;
+        state.down(&error.reason);
+        retry(bus, state, error.generation).await;
+    }
+}
+
+#[derive(Debug)]
+struct WatchFailure {
+    reason: String,
+    generation: u64,
+}
+
+async fn retry(bus: &Bus, state: &WatchState, failed_generation: u64) {
+    let mut generations = bus.generations();
+    tokio::select! {
+        () = tokio::time::sleep(state.next_retry()) => {}
+        () = replacement(&mut generations, failed_generation) => {}
     }
 }
 
@@ -233,7 +257,7 @@ async fn follow(
     state: &WatchState,
     key: &str,
     changed: &(impl Fn() + Sync),
-) -> Result<std::convert::Infallible, String> {
+) -> Result<std::convert::Infallible, WatchFailure> {
     let mut generations = bus.generations();
     let (mut marker, mut generation) = open(bus, key).await?;
     loop {
@@ -247,7 +271,7 @@ async fn follow(
                 }
                 Err(_) => {
                     if !can_move_after_end(bus, &generations, generation).await {
-                        return Err("register watch ended".into());
+                        return Err(WatchFailure { reason: "register watch ended".into(), generation });
                     }
                 }
             },
@@ -263,7 +287,10 @@ async fn follow(
                 if can_move_after_end(bus, &generations, new_generation).await {
                     continue;
                 }
-                return Err("register watch ended before its snapshot".into());
+                return Err(WatchFailure {
+                    reason: "register watch ended before its snapshot".into(),
+                    generation: new_generation,
+                });
             };
             // A marker requests a reread of current state. Read the
             // replacement snapshot before dropping the old watch, then

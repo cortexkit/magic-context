@@ -414,3 +414,32 @@ fn a_put_after_an_empty_snapshot_is_a_reread_even_if_the_value_returns() {
     assert_eq!(event(empty()), 2);
     assert_eq!(event(put(2)), 3);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_new_session_ends_marker_backoff_without_waiting_for_the_timer() {
+    let test_bus = TestBus::new();
+    test_bus.kv.put(KEY, marker(1)).await.unwrap();
+    let bus = test_bus.bus();
+    let state = Arc::new(WatchState::default());
+    let callback = Arc::new(tokio::sync::Notify::new());
+    let _watch = spawn_marker(bus.clone(), state.clone(), KEY, {
+        let callback = callback.clone();
+        move || callback.notify_one()
+    });
+    callback.notified().await;
+    test_bus.down.store(true, Ordering::Relaxed);
+    test_bus.cut_watches();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(!state.is_up());
+    assert_eq!(test_bus.watched.lock().unwrap().len(), 1);
+
+    test_bus.kv.put(KEY, marker(2)).await.unwrap();
+    test_bus.down.store(false, Ordering::Relaxed);
+    let resumed = tokio::time::Instant::now();
+    drop(bus.session().await.unwrap());
+    tokio::time::timeout(Duration::from_millis(1), callback.notified())
+        .await
+        .expect("the watch follows the live session before its timer");
+    assert_eq!(tokio::time::Instant::now(), resumed);
+    assert!(state.is_up());
+}
