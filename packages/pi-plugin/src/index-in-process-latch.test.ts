@@ -27,11 +27,13 @@ import {
 	clearProducerModelObservations,
 	observeProducerModelsForTest,
 } from "@magic-context/core/hooks/magic-context/producer-window-test-support";
+import * as loggerModule from "@magic-context/core/shared/logger";
 import {
 	cleanupTestTempDir,
 	createTestTempDir,
 } from "@magic-context/core/shared/test-temp-dir";
 
+import { loadPiConfig } from "./config";
 import {
 	awaitInFlightHistorians,
 	hasPendingMaterialization,
@@ -238,6 +240,60 @@ describe("Pi in-process child guard (#247)", () => {
 		expect(scheduled).not.toHaveBeenCalled();
 		await runtime.emitPiEvent("session_shutdown", {}, ctx);
 	}, 20_000);
+
+	it.each([
+		"literal",
+		"expanded",
+	] as const)("logs the %s unknown nightly task warning when Pi starts", async (kind) => {
+		const configDir = join(isolateXdgEnv(), "cortexkit");
+		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
+		const path = join(configDir, "magic-context.jsonc");
+		const secret = "sk-fixture-nightly-task-do-not-print";
+		const task =
+			kind === "literal" ? "refresh-prmiers" : "{env:TEST_NIGHTLY_TASK}";
+		const warningText =
+			kind === "literal"
+				? '"dreamer.tasks.refresh-prmiers": unknown task name, ignoring.'
+				: "a nightly task name from variable expansion is unknown, ignoring.";
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(
+			path,
+			JSON.stringify({
+				dreamer: {
+					tasks: {
+						[task]: { schedule: "" },
+						"refresh-primers": { schedule: "15 2 * * *" },
+					},
+				},
+			}),
+		);
+		__test.resetLoggedPiConfigDirs();
+		const capture = spyOn(loggerModule, "log").mockImplementation(
+			() => undefined,
+		);
+		const previousSecret = process.env.TEST_NIGHTLY_TASK;
+		process.env.TEST_NIGHTLY_TASK = secret;
+		try {
+			await magicContextPiExtension(createCountingPi().pi);
+			const lines = capture.mock.calls.map(([line]) => line);
+			const warnings = lines.filter((line) => line.includes(warningText));
+			expect(lines.join("\n")).not.toContain(secret);
+			expect(warnings).toHaveLength(1);
+			const loaded = loadPiConfig({ cwd: process.cwd() });
+			expect(loaded.config.dreamer?.tasks["refresh-primers"].schedule).toBe(
+				"15 2 * * *",
+			);
+			expect(warnings[0]?.split(" WARN config: ")[1]).toBe(
+				loaded.warnings.find((warning) => warning.includes(warningText)),
+			);
+			expect(warnings[0]).toContain(`${path}: ${warningText}`);
+		} finally {
+			if (previousSecret === undefined) delete process.env.TEST_NIGHTLY_TASK;
+			else process.env.TEST_NIGHTLY_TASK = previousSecret;
+			capture.mockRestore();
+			__test.resetLoggedPiConfigDirs();
+		}
+	});
 
 	it("shutdown owns cancelled hydration until its worker is released", async () => {
 		isolateXdgEnv();

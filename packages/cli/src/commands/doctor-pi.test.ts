@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { LATEST_SUPPORTED_VERSION } from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { loadPiConfig } from "@magic-context/pi-core/config";
 import { parse as parseJsonc } from "comment-json";
 import {
     createTestTempDirFromPath,
@@ -416,6 +417,53 @@ describe("Pi doctor", () => {
             "compress-cues now uses the dreamer model for each harness",
         );
         expect(output).not.toContain("PASS Pi Magic Context config loads successfully");
+    });
+
+    it.each([
+        "literal",
+        "expanded",
+    ] as const)("prints the Pi loader's %s unknown nightly task warning once in doctor", async (kind) => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const path = join(root, ".config", "cortexkit", "magic-context.jsonc");
+        const secret = "sk-fixture-nightly-task-do-not-print";
+        const task = kind === "literal" ? "refresh-prmiers" : "{env:TEST_NIGHTLY_TASK}";
+        const warningText =
+            kind === "literal"
+                ? '"dreamer.tasks.refresh-prmiers": unknown task name, ignoring.'
+                : "a nightly task name from variable expansion is unknown, ignoring.";
+        writeFileSync(
+            path,
+            JSON.stringify({
+                embedding: { provider: "local" },
+                dreamer: {
+                    tasks: {
+                        [task]: { schedule: "" },
+                        "refresh-primers": { schedule: "15 2 * * *" },
+                    },
+                },
+            }),
+        );
+        const prompts = new MockPrompts();
+
+        const previousSecret = process.env.TEST_NIGHTLY_TASK;
+        process.env.TEST_NIGHTLY_TASK = secret;
+        try {
+            await runDoctor(baseOptions(root, cwd, prompts));
+            const lines = prompts.messages.filter((line) => line.includes(warningText));
+            expect(prompts.messages.join("\n")).not.toContain(secret);
+            expect(lines).toHaveLength(1);
+            const warning = loadPiConfig({ cwd }).warnings.find((entry) =>
+                entry.includes(warningText),
+            );
+            expect(warning).toContain(`${path}: ${warningText}`);
+            expect(lines[0]).toContain(`WARN ${warning}`);
+        } finally {
+            if (previousSecret === undefined) delete process.env.TEST_NIGHTLY_TASK;
+            else process.env.TEST_NIGHTLY_TASK = previousSecret;
+        }
     });
 
     it("names the database and repair command when integrity_check fails", async () => {

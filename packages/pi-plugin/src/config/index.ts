@@ -13,7 +13,10 @@ import {
 	warnDeprecatedMuralModel,
 	warnDeprecatedWindowOverlayPath,
 } from "@magic-context/core/config/deprecated-config";
-import { migrateDreamerV2 } from "@magic-context/core/config/migrate-dreamer-v2";
+import {
+	migrateDreamerV2,
+	unknownDreamTaskWarnings,
+} from "@magic-context/core/config/migrate-dreamer-v2";
 import { migrateLegacyExperimental } from "@magic-context/core/config/migrate-experimental";
 import { resolveConfigProfile } from "@magic-context/core/config/profiles";
 import {
@@ -202,6 +205,9 @@ function loadConfigFile(
 				...raw.warnings.map((warning) => `${path}: ${warning}`),
 				...substituted.warnings.map((warning) => `${path}: ${warning}`),
 				...unsafeKeyWarnings.map((warning) => `${path}: ${warning}`),
+				...unknownDreamTaskWarnings(config, raw.text).map(
+					(warning) => `${path}: ${warning}`,
+				),
 			],
 			parseFailures,
 			warningDetails: parseFailures,

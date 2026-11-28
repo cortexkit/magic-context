@@ -204,7 +204,7 @@ Project config may only set `"rerank": {"provider": "off"}`. Project routing, cr
 
 ## Background agents
 
-Off-hours maintenance through Dreamer.
+Off-hours maintenance through Dreamer. Unknown task names under `dreamer.tasks` are ignored with a warning; valid schedules in the same file still apply.
 
 | Key | Type | Default | Description |
 |---|---|---|---|

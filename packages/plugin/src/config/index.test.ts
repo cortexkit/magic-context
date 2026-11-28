@@ -121,6 +121,64 @@ function loadWithUserAndProjectConfig(
     }
 }
 
+describe("nightly task settings", () => {
+    it("warns once about an unknown nightly task and preserves a valid sibling", () => {
+        const config = loadWithUserConfig(
+            JSON.stringify({
+                dreamer: {
+                    tasks: {
+                        "refresh-prmiers": { schedule: "" },
+                        "refresh-primers": { schedule: "15 2 * * *" },
+                    },
+                },
+            }),
+        );
+        expect(config.dreamer?.tasks["refresh-primers"].schedule).toBe("15 2 * * *");
+        expect(config.dreamer?.tasks).not.toHaveProperty("refresh-prmiers");
+        expect(config.configWarnings).toEqual([
+            expect.stringMatching(
+                /magic-context\.jsonc: "dreamer\.tasks\.refresh-prmiers": unknown task name, ignoring\. Valid task names:.*\brefresh-primers\b/,
+            ),
+        ]);
+    });
+
+    it("does not warn about valid nightly task names", () => {
+        const config = loadWithUserConfig(
+            JSON.stringify({
+                dreamer: {
+                    tasks: {
+                        "refresh-primers": { schedule: "" },
+                        "compress-cues": { schedule: "15 2 * * *" },
+                    },
+                },
+            }),
+        );
+        expect(config.dreamer?.tasks["refresh-primers"].schedule).toBe("");
+        expect(config.dreamer?.tasks["compress-cues"].schedule).toBe("15 2 * * *");
+        expect(config.configWarnings ?? []).toEqual([]);
+    });
+
+    it("warns about an expanded unknown nightly task without revealing the expansion", () => {
+        const secret = "sk-fixture-nightly-task-do-not-print";
+        const config = loadWithUserConfig(
+            JSON.stringify({
+                dreamer: {
+                    tasks: {
+                        "{env:TEST_NIGHTLY_TASK}": { schedule: "" },
+                    },
+                },
+            }),
+            { TEST_NIGHTLY_TASK: secret },
+        );
+        expect(config.configWarnings).toEqual([
+            expect.stringContaining(
+                "a nightly task name from variable expansion is unknown, ignoring.",
+            ),
+        ]);
+        expect(JSON.stringify(config.configWarnings)).not.toContain(secret);
+    });
+});
+
 describe("loadPluginConfig — retired Fusiform window path", () => {
     it("parses the old key but warns once that it is ignored", () => {
         const path = "/tmp/retired-fusiform-window.json";

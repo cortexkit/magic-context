@@ -34,6 +34,12 @@
  *    verify + curate before schema parsing strips unknown keys.
  */
 
+import {
+    CANONICAL_DREAM_TASKS,
+    isCanonicalDreamTask,
+} from "../features/magic-context/dreamer/task-registry";
+import { parseJsoncRecovering } from "../shared/jsonc-parser";
+
 const OLD_VERIFY_TASK = "verify";
 const OLD_CURATE_TASKS = ["consolidate", "archive-stale", "improve"] as const;
 const RETIRED_OBJECT_MEMORY_TASKS = ["maintain-memory", ...OLD_CURATE_TASKS] as const;
@@ -71,6 +77,42 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
     return typeof value === "object" && value !== null && !Array.isArray(value)
         ? (value as Record<string, unknown>)
         : undefined;
+}
+
+export function unknownDreamTaskWarnings(
+    config: Record<string, unknown>,
+    authoredText: string,
+): string[] {
+    const tasks = asObject(asObject(config.dreamer)?.tasks);
+    if (!tasks) return [];
+    const unknown = Object.keys(tasks).filter(
+        (key) =>
+            !isCanonicalDreamTask(key) &&
+            key !== "key-files" &&
+            !(RETIRED_OBJECT_MEMORY_TASKS as readonly string[]).includes(key),
+    );
+    if (unknown.length === 0) return [];
+
+    // Name only keys that appear in the file before substitution. Expanded keys
+    // can contain secrets, and multiple authored keys can expand to the same key.
+    const authored = asObject(parseJsoncRecovering(authoredText).value);
+    const authoredTasks = asObject(asObject(authored?.dreamer)?.tasks);
+    const valid = `Valid task names: ${CANONICAL_DREAM_TASKS.join(", ")}.`;
+    const warnings: string[] = [];
+    let expandedUnknown = false;
+    for (const name of unknown) {
+        if (authoredTasks && Object.hasOwn(authoredTasks, name)) {
+            warnings.push(
+                `${JSON.stringify(`dreamer.tasks.${name}`)}: unknown task name, ignoring. ${valid}`,
+            );
+        } else {
+            expandedUnknown = true;
+        }
+    }
+    if (expandedUnknown) {
+        warnings.push(`a nightly task name from variable expansion is unknown, ignoring. ${valid}`);
+    }
+    return warnings;
 }
 
 function cronIntervalScore(schedule: string): number {

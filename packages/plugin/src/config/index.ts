@@ -24,7 +24,7 @@ import {
     resolveLegacyConfigSources,
     resolveLegacyConfigSourcesForHarness,
 } from "./migrate-config-location";
-import { migrateDreamerV2 } from "./migrate-dreamer-v2";
+import { migrateDreamerV2, unknownDreamTaskWarnings } from "./migrate-dreamer-v2";
 import { migrateLegacyExperimental } from "./migrate-experimental";
 import { resolveConfigProfile } from "./profiles";
 import {
@@ -203,6 +203,9 @@ function loadConfigFileDetailed(
                 ...rawWarnings.map((warning) => `${configPath}: ${warning}`),
                 ...substituted.warnings.map((warning) => `${configPath}: ${warning}`),
                 ...unsafeKeyWarnings.map((warning) => `${configPath}: ${warning}`),
+                ...unknownDreamTaskWarnings(config, rawText).map(
+                    (warning) => `${configPath}: ${warning}`,
+                ),
             ],
             parseFailures,
             warningDetails: parseFailures,
