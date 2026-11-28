@@ -7,7 +7,7 @@ mkdir -p "$logs"
 log=$logs/nextest.log
 { rustc -vV; cargo nextest --version; } > "$log" 2>&1
 
-start_windows_home
+start_windows_home x86_64-pc-windows-msvc
 
 command=(cargo nextest run --locked -p mc-module --lib --no-fail-fast --color never
     --show-progress none --status-level pass --final-status-level none --failure-output never)
