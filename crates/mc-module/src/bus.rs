@@ -69,6 +69,9 @@ use crate::context_db::ContextDb;
 use crate::docs_proposals::{self as proposals, Proposal};
 use crate::run_ends::{self, RunEnds};
 
+#[path = "bus_retirement.rs"]
+mod retirement;
+
 /// The module ck-bus runs as.
 const CKBUS: &str = "ckbus";
 /// The most pending notices one round publishes.
@@ -785,16 +788,14 @@ pub struct Bus {
     /// hook must not wait for a publisher holding the session across I/O.
     connected: AtomicBool,
     /// Advances each time the session gets a new connection, opened or
-    /// renewed, so the run-end reader can tell that it is bound on an older
-    /// one.
+    /// renewed. Readers and marker watches can follow the replacement.
     generation: AtomicU64,
+    current: tokio::sync::watch::Sender<Option<u64>>,
+    retirements: retirement::Retirements,
 }
 
 /// The bus's open session, held until dropped.
-pub(crate) struct SessionGuard<'a>(
-    tokio::sync::MutexGuard<'a, Option<BusSession>>,
-    &'a AtomicBool,
-);
+pub(crate) struct SessionGuard<'a>(tokio::sync::MutexGuard<'a, Option<BusSession>>, &'a Bus);
 
 impl std::ops::Deref for SessionGuard<'_> {
     type Target = BusSession;
@@ -808,9 +809,15 @@ impl SessionGuard<'_> {
     /// Drop the session after a failure on it, so the next user opens a
     /// fresh one.
     pub(crate) fn discard(mut self) {
-        *self.0 = None;
-        self.1.store(false, Ordering::Relaxed);
+        self.1.discard_session(&mut self.0);
     }
+}
+
+fn retirement_of(session: &BusSession) -> Option<(NatsConnection, i64)> {
+    Some((
+        session.connection.clone()?,
+        session.credential.as_ref()?.exp,
+    ))
 }
 
 impl Bus {
@@ -830,6 +837,8 @@ impl Bus {
             session: tokio::sync::Mutex::new(None),
             connected: AtomicBool::new(false),
             generation: AtomicU64::new(0),
+            current: tokio::sync::watch::channel(None).0,
+            retirements: retirement::Retirements::new(),
         }
     }
 
@@ -839,13 +848,19 @@ impl Bus {
 
     /// The open session: opened first when there is none, and renewed when
     /// its credential is about to expire. A failure leaves no session, so
-    /// the next caller starts a fresh one.
+    /// the next caller starts a fresh one. Renewal needs no separate timer:
+    /// even on an idle bus the run-end reader calls this before each pull,
+    /// and each pull has a two-second server expiry.
     pub(crate) async fn session(&self) -> Result<SessionGuard<'_>, String> {
         let mut session = self.session.lock().await;
+        if self.retirements.is_stopping() {
+            return Err("bus_shutting_down".into());
+        }
         let ready = async {
             // Whether the session got a new connection: opened, or renewed,
             // since a renewal opens a new connection too.
             let mut connected = false;
+            let mut replaced = None;
             if session.is_none() {
                 *session = Some(self.factory.open().await?);
                 connected = true;
@@ -856,11 +871,16 @@ impl Bus {
                 .as_ref()
                 .is_some_and(|credential| credential.exp - now_ms() / 1000 < RENEW_WITHIN_S)
             {
+                replaced = retirement_of(active);
                 self.factory.renew(active).await?;
                 connected = true;
             }
             if connected {
-                self.generation.fetch_add(1, Ordering::SeqCst);
+                let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+                self.current.send_replace(Some(generation));
+            }
+            if let Some((connection, expires)) = replaced {
+                self.retirements.park(connection, expires);
             }
             Ok::<(), String>(())
         }
@@ -868,14 +888,33 @@ impl Bus {
         match ready {
             Ok(()) => {
                 self.connected.store(true, Ordering::Relaxed);
-                Ok(SessionGuard(session, &self.connected))
+                Ok(SessionGuard(session, self))
             }
             Err(error) => {
-                *session = None;
-                self.connected.store(false, Ordering::Relaxed);
+                self.discard_session(&mut session);
                 Err(error)
             }
         }
+    }
+
+    pub(crate) fn generations(&self) -> tokio::sync::watch::Receiver<Option<u64>> {
+        self.current.subscribe()
+    }
+
+    /// Start closing any retired socket immediately on module shutdown, and
+    /// finish the close before the runtime that owns the socket exits.
+    pub async fn close_retiring(&self) {
+        self.retirements.finish().await;
+    }
+
+    fn discard_session(&self, session: &mut Option<BusSession>) {
+        if let Some(previous) = session.take() {
+            self.current.send_replace(None);
+            if let Some((connection, expires)) = retirement_of(&previous) {
+                self.retirements.park(connection, expires);
+            }
+        }
+        self.connected.store(false, Ordering::Relaxed);
     }
 
     /// This computer's box id, as ck-bus names it in the module's bus
@@ -896,12 +935,13 @@ impl Bus {
     /// Drop the session after a reader found its connection lost,
     /// unless it got a new connection after `generation`, which another user
     /// may already be using.
-    pub(crate) async fn forget(&self, generation: u64) {
+    pub(crate) async fn forget(&self, generation: u64) -> bool {
         let mut session = self.session.lock().await;
-        if self.generation.load(Ordering::SeqCst) == generation {
-            *session = None;
-            self.connected.store(false, Ordering::Relaxed);
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return false;
         }
+        self.discard_session(&mut session);
+        true
     }
 }
 
@@ -1199,38 +1239,51 @@ impl run_ends::Cursor for RunEndCursor {
     }
 
     async fn next(&mut self) -> Result<Option<run_ends::Delivery>, String> {
-        // Opening the session renews its credential when that is due, which
-        // moves the session to a new connection; the durable is then bound
-        // again on that one.
-        let current = {
-            let _session = self.bus.session().await?;
-            self.bus.generation.load(Ordering::SeqCst)
-        };
-        if current != self.binding.generation {
-            self.binding = bind_run_ends(&self.bus).await?;
+        loop {
+            let (_, current) = self.bus.session_with_generation().await?;
+            if current != self.binding.generation {
+                self.binding = bind_run_ends(&self.bus).await?;
+            }
+            let pulled = self.pull().await;
+            if pulled.is_err() && self.rebind_after_failure().await? {
+                continue;
+            }
+            return pulled;
         }
-        let pulled = self.pull().await;
-        if pulled.is_err()
-            && self.binding.connection.client().connection_state()
-                != async_nats::connection::State::Connected
-        {
-            // A lost connection is not reconnected: the next use of the bus
-            // opens a new session.
-            self.bus.forget(self.binding.generation).await;
-        }
-        pulled
     }
 
     async fn ack(&mut self) -> Result<(), String> {
-        self.binding
-            .cursor
-            .ack()
-            .await
-            .map_err(|_| "nats_ack_failed".to_owned())
+        if self.binding.cursor.ack().await.is_ok() || self.rebind_after_failure().await? {
+            // If the old ack did not reach the server, the same durable can
+            // redeliver the event. The run-end reader deduplicates its wake.
+            Ok(())
+        } else {
+            Err("nats_ack_failed".into())
+        }
     }
 }
 
 impl RunEndCursor {
+    /// A pull or acknowledgement can outlive its connection's generation.
+    /// Only a failure on the current generation is a run-end reader outage.
+    async fn rebind_after_failure(&mut self) -> Result<bool, String> {
+        let replaced = {
+            let mut session = self.bus.session.lock().await;
+            let replaced = self.bus.generation.load(Ordering::SeqCst) != self.binding.generation;
+            if !replaced
+                && self.binding.connection.client().connection_state()
+                    != async_nats::connection::State::Connected
+            {
+                self.bus.discard_session(&mut session);
+            }
+            replaced
+        };
+        if replaced {
+            self.binding = bind_run_ends(&self.bus).await?;
+        }
+        Ok(replaced)
+    }
+
     /// Pull a delivery, using the shared connection's request timeout.
     async fn pull(&mut self) -> Result<Option<run_ends::Delivery>, String> {
         loop {

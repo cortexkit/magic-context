@@ -330,3 +330,26 @@ async fn a_panicked_marker_watch_is_down_during_backoff() {
         "panicked watch must read down"
     );
 }
+
+#[test]
+fn a_replacement_snapshot_observes_a_new_revision_of_the_same_value() {
+    let state = WatchState::default();
+    let entry = |revision| cortexkit_bus_trait::RegisterEntry {
+        key: KEY.to_owned(),
+        value: marker(1),
+        revision: cortexkit_bus_trait::Revision(revision),
+    };
+    assert!(state.observe(entry(1), true));
+    assert!(
+        !state.observe(entry(2), false),
+        "an identical live put does not reread"
+    );
+    assert!(
+        !state.observe(entry(2), true),
+        "a handoff with no gap does not reread"
+    );
+    assert!(
+        state.observe(entry(4), true),
+        "the value may have changed and returned"
+    );
+}

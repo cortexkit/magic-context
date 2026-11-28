@@ -583,7 +583,7 @@ async fn pull_one_run_end(
         .await
         .unwrap();
     let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(run_end_pull_peer(listener, deliveries));
+    let server = tokio::spawn(run_end_pull_peer(listener, deliveries, None));
     let connection = NatsConnection::connect(
         addr.to_string(),
         async_nats::ConnectOptions::new(),
@@ -617,6 +617,11 @@ struct PeerDelivery {
     decodable: bool,
 }
 
+struct PausedPull {
+    waiting: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
 impl PeerDelivery {
     fn new(subject: &str, consumer: &str, decodable: bool) -> Self {
         Self {
@@ -634,6 +639,7 @@ impl PeerDelivery {
 async fn run_end_pull_peer(
     listener: tokio::net::TcpListener,
     deliveries: Vec<PeerDelivery>,
+    mut paused: Option<PausedPull>,
 ) -> Vec<(String, String)> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -714,6 +720,20 @@ async fn run_end_pull_peer(
                         .await
                         .unwrap();
                 } else if *subject == pull_subject {
+                    if let Some(pause) = paused.take() {
+                        pause.waiting.send(()).unwrap();
+                        pause.resume.await.unwrap();
+                        let headers = "NATS/1.0 409 Consumer Deleted\r\n\r\n";
+                        let len = headers.len();
+                        write
+                            .write_all(
+                                format!("HMSG {reply} {sid} {len} {len}\r\n{headers}\r\n")
+                                    .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                        return acks;
+                    }
                     pulls += 1;
                     let next = deliveries
                         .get(pulls - 1)
@@ -817,3 +837,6 @@ async fn health_bus_state_is_readable_with_a_session_in_use() {
     session.discard();
     assert!(!bus.is_connected());
 }
+
+#[path = "bus_renewal_tests.rs"]
+mod renewal;

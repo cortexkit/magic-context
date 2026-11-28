@@ -272,16 +272,18 @@ async fn serve(dreamer: &tokio::runtime::Handle) -> Result<(), Box<dyn Error + S
     mc_module::bus::spawn_run_end_reader(Arc::clone(&bus), run_end_waits);
     module.spawn_dreamer(dreamer).await?;
     module.spawn_legacy_projects();
-    let registry_watch = module.spawn_entorhinal_follow(bus);
+    let registry_watch = module.spawn_entorhinal_follow(Arc::clone(&bus));
     // An install a move started before a crash is finished in every build:
     // its sessions are refused until it is.
     module.spawn_move_recovery();
     let result = serve.await;
     drop(registry_watch);
-    if let Some(replica) = replica {
-        replica.stop().await;
-    }
-    module.flush_app_snapshots().await;
+    tokio::join!(bus.close_retiring(), async {
+        if let Some(replica) = replica {
+            replica.stop().await;
+        }
+        module.flush_app_snapshots().await;
+    });
     result?;
     Ok(())
 }

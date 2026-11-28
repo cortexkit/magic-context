@@ -20,8 +20,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cortexkit_bus_trait::{RegisterUpdate, RegisterWatch, WatchEvent};
-use tokio::sync::oneshot;
+use cortexkit_bus_trait::{RegisterEntry, RegisterUpdate, RegisterWatch, Revision, WatchEvent};
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinSet;
 
 use crate::bus::Bus;
@@ -40,7 +40,9 @@ pub(crate) const RETRY_CAP: Duration = Duration::from_secs(5 * 60);
 struct Progress {
     /// `None` until the first try; then whether the watch is up.
     up: Option<bool>,
-    last: Option<Vec<u8>>,
+    last: Option<(Revision, Vec<u8>)>,
+    snapshot_generation: Option<u64>,
+    current_generation: Option<watch::Receiver<Option<u64>>>,
     retry: Duration,
 }
 
@@ -49,6 +51,8 @@ impl Default for Progress {
         Self {
             up: None,
             last: None,
+            snapshot_generation: None,
+            current_generation: None,
             retry: RETRY_FIRST,
         }
     }
@@ -76,14 +80,20 @@ impl WatchState {
     /// Whether the watch is up now.
     #[cfg(test)]
     pub(crate) fn is_up(&self) -> bool {
-        self.progress.lock().expect("watch state").up == Some(true)
+        let progress = self.progress.lock().expect("watch state");
+        progress.up == Some(true)
+            && progress.current_generation.as_ref().is_some_and(|current| {
+                *current.borrow() == progress.snapshot_generation
+                    && progress.snapshot_generation.is_some()
+            })
     }
 
     /// The watch is up.
-    fn up(&self) {
+    fn up(&self, generation: u64) {
         let previous = {
             let mut progress = self.progress.lock().expect("watch state");
             progress.retry = RETRY_FIRST;
+            progress.snapshot_generation = Some(generation);
             progress.up.replace(true)
         };
         if previous != Some(true) {
@@ -114,7 +124,20 @@ impl WatchState {
     }
 
     fn mark_down(&self) -> Option<bool> {
-        self.progress.lock().expect("watch state").up.replace(false)
+        let mut progress = self.progress.lock().expect("watch state");
+        progress.snapshot_generation = None;
+        progress.up.replace(false)
+    }
+
+    fn observe(&self, entry: RegisterEntry, snapshot: bool) -> bool {
+        let mut progress = self.progress.lock().expect("watch state");
+        let same = progress.last.as_ref().is_some_and(|(revision, value)| {
+            value == &entry.value && (!snapshot || *revision == entry.revision)
+        });
+        // An identical live put needs no reread. Remember its revision so an
+        // unchanged snapshot after renewal doesn't cause a duplicate reread.
+        progress.last = Some((entry.revision, entry.value));
+        !same
     }
 
     fn next_retry(&self) -> Duration {
@@ -154,6 +177,11 @@ pub(crate) fn spawn_marker(
 ) -> MarkerTask {
     let (stop, mut stopped) = oneshot::channel();
     let changed = Arc::new(changed);
+    state
+        .progress
+        .lock()
+        .expect("watch state")
+        .current_generation = Some(bus.generations());
     tokio::spawn(async move {
         let mut tasks = JoinSet::new();
         while matches!(stopped.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
@@ -191,43 +219,81 @@ pub(crate) fn spawn_marker(
 
 async fn run_marker(bus: &Bus, state: &WatchState, key: &str, changed: &(impl Fn() + Sync)) {
     loop {
-        match open(bus, key).await {
-            Err(error) => state.down(&error),
-            Ok((mut watch, generation)) => {
-                let ended = loop {
-                    let value = match watch.next().await {
-                        Ok(WatchEvent::Snapshot { entries, .. }) => {
-                            state.up();
-                            entries
-                                .into_iter()
-                                .find(|entry| entry.key == key)
-                                .map(|entry| entry.value)
-                        }
-                        Ok(WatchEvent::Update(RegisterUpdate::Put(entry))) if entry.key == key => {
-                            Some(entry.value)
-                        }
-                        Ok(WatchEvent::Update(_)) => None,
-                        Err(_) => break "register watch ended",
-                    };
-                    let is_new = value.is_some_and(|value| {
-                        let mut progress = state.progress.lock().expect("watch state");
-                        if progress.last.as_ref() == Some(&value) {
-                            return false;
-                        }
-                        progress.last = Some(value);
-                        true
-                    });
-                    if is_new {
-                        changed();
-                    }
-                };
-                // The failed watch may still be on a connection that has
-                // already been replaced for other bus users.
-                bus.forget(generation).await;
-                state.down(ended);
-            }
-        }
+        let error = follow(bus, state, key, changed).await.unwrap_err();
+        state.down(&error);
         tokio::time::sleep(state.next_retry()).await;
+    }
+}
+
+async fn follow(
+    bus: &Bus,
+    state: &WatchState,
+    key: &str,
+    changed: &(impl Fn() + Sync),
+) -> Result<std::convert::Infallible, String> {
+    let mut generations = bus.generations();
+    let (mut marker, mut generation) = open(bus, key).await?;
+    loop {
+        tokio::select! {
+            biased;
+            _ = replacement(&mut generations, generation) => {
+                loop {
+                    let (mut next, new_generation) = open(bus, key).await?;
+                    let snapshot = tokio::select! {
+                        biased;
+                        _ = replacement(&mut generations, new_generation) => continue,
+                        event = next.next() => event,
+                    };
+                    let Ok(snapshot @ WatchEvent::Snapshot { .. }) = snapshot else {
+                        if bus.forget(new_generation).await {
+                            return Err("register watch ended before its snapshot".into());
+                        }
+                        continue;
+                    };
+                    // A marker requests a reread of current state. Read
+                    // the replacement snapshot while the old watch is
+                    // still subscribed, then take any later updates there.
+                    observe(state, key, new_generation, snapshot, changed);
+                    marker = next;
+                    generation = new_generation;
+                    break;
+                }
+            }
+            event = marker.next() => match event {
+                Ok(event) => observe(state, key, generation, event, changed),
+                Err(_) => {
+                    if bus.forget(generation).await {
+                        return Err("register watch ended".into());
+                    }
+                }
+            },
+        }
+    }
+}
+
+async fn replacement(generations: &mut watch::Receiver<Option<u64>>, generation: u64) {
+    let _ = generations
+        .wait_for(|current| current.is_some_and(|current| current != generation))
+        .await;
+}
+
+fn observe(
+    state: &WatchState,
+    key: &str,
+    generation: u64,
+    event: WatchEvent,
+    changed: &(impl Fn() + Sync),
+) {
+    let (entry, snapshot) = match event {
+        WatchEvent::Snapshot { entries, .. } => {
+            state.up(generation);
+            (entries.into_iter().find(|entry| entry.key == key), true)
+        }
+        WatchEvent::Update(RegisterUpdate::Put(entry)) if entry.key == key => (Some(entry), false),
+        WatchEvent::Update(_) => (None, false),
+    };
+    if entry.is_some_and(|entry| state.observe(entry, snapshot)) {
+        changed();
     }
 }
 
