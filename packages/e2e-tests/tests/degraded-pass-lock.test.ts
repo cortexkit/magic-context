@@ -13,7 +13,7 @@ import { openTestDb } from "../src/test-db";
 // conversation without the session's persisted drops. This drives a real
 // OpenCode 1.18.30 host: a session with a dropped ballast message is served
 // once healthy, and on the next turn a second process holds context.db's
-// writer lock from the tagging step's first write until the pass settles. No
+// writer lock across either tag allocation or a source-content backfill. No
 // request captured after that may carry the ballast, or be larger than the
 // previous managed request plus the new turn.
 //
@@ -55,9 +55,8 @@ function assertIsolated(pid: number, root: string, label: string): string[] {
 	return databases;
 }
 
-(enabled ? test : test.skip)(
-	"OpenCode 1.18.30: a writer lock held across tagging never sends an unmanaged request",
-	async () => {
+function writerLockCase(name: string, writer: "begin" | "autocommit") {
+	(enabled ? test : test.skip)(name, async () => {
 		expect(
 			execFileSync("opencode", ["--version"], { encoding: "utf8" }).trim(),
 		).toBe("1.18.30");
@@ -73,18 +72,19 @@ function assertIsolated(pid: number, root: string, label: string): string[] {
 			dirname(PLUGIN_ENTRY),
 			"features/magic-context/storage-db.ts",
 		);
-		// The wrapper loads the plugin under test unchanged. Once armed, the
-		// first writer acquisition made from the tagging step blocks the host
-		// until the test's second process holds context.db's writer lock, so
-		// that acquisition, and only it, meets the lock. Every earlier write in
-		// the pass has already committed. The tagging step is recognized by
-		// its stack, so the plugin must load from source (the harness does
-		// that whenever the bundle is older than the source).
+		// Pause before the selected tagging write until the second process
+		// holds the lock. Match source stack frames so earlier stages don't
+		// meet the lock, and distinguish a tag allocation's BEGIN IMMEDIATE
+		// from the zero-timeout probe before a source-content INSERT.
+		const [targetSql, caller] = writer === "begin"
+			? ["BEGIN IMMEDIATE", /features\/magic-context\/tagger\.ts/]
+			: ["PRAGMA busy_timeout=0", /\bsaveSourceContent\b/];
 		writeFileSync(
 			wrapper,
 			`import mc from ${JSON.stringify(PLUGIN_ENTRY)};
 import { openDatabase } from ${JSON.stringify(storageModule)};
 import { existsSync, writeFileSync } from "node:fs";
+const caller = ${caller};
 let fired = false;
 function holdTaggingWriter() {
     const db = openDatabase();
@@ -93,9 +93,9 @@ function holdTaggingWriter() {
     db.exec = (sql, ...rest) => {
         if (
             !fired &&
-            /^PRAGMA busy_timeout=/.test(String(sql)) &&
-            /tag-messages\\.ts|features\\/magic-context\\/tagger\\.ts/.test(new Error().stack ?? "") &&
-            existsSync(${JSON.stringify(arm)})
+            sql === ${JSON.stringify(targetSql)} &&
+            existsSync(${JSON.stringify(arm)}) &&
+            caller.test(new Error().stack ?? "")
         ) {
             fired = true;
             writeFileSync(${JSON.stringify(ready)}, "ready");
@@ -143,6 +143,7 @@ export default {
 
 			// Persist a drop of the ballast message, as a flushed ctx_reduce leaves it.
 			const writable = openTestDb(h.contextDbPath());
+			let ballastTag: number;
 			try {
 				const tag = writable
 					.prepare(
@@ -150,11 +151,12 @@ export default {
 					)
 					.get(sessionId) as { tag_number: number } | null;
 				if (!tag) throw new Error("the first turn left no tag to drop");
+				ballastTag = tag.tag_number;
 				writable
 					.prepare(
 						"UPDATE tags SET status = 'dropped' WHERE session_id = ? AND harness = 'opencode' AND tag_number = ?",
 					)
-					.run(sessionId, tag.tag_number);
+					.run(sessionId, ballastTag);
 			} finally {
 				writable.close();
 			}
@@ -165,6 +167,19 @@ export default {
 			const managed = mainRequests().at(-1) ?? "";
 			expect(managed).toContain("turn two");
 			expect(managed).not.toContain(BALLAST_MARKER);
+			if (writer === "autocommit") {
+				// Leave the dropped tag intact but remove its saved text so tagging
+				// backfills it with an autocommit INSERT on the locked pass.
+				const db = openTestDb(h.contextDbPath());
+				try {
+					const deleted = db.prepare(
+						"DELETE FROM source_contents WHERE session_id = ? AND harness = 'opencode' AND tag_id = ?",
+					).run(sessionId, ballastTag);
+					expect(deleted.changes).toBe(1);
+				} finally {
+					db.close();
+				}
+			}
 			assertIsolated(h.opencode.pid, root, "before-lock");
 			const before = h.mock.requests().length;
 			writeFileSync(arm, "armed");
@@ -206,19 +221,14 @@ export default {
 			).toBe(true);
 			writeFileSync(locked, "locked");
 
-			// Hold the lock until the pass either reaches tagging or stops at an
-			// earlier stage that needs the writer (the overflow-state block
-			// writes on every pass) and the wrapper settles it. Releasing
-			// earlier would let a pass that continues past a failed stage find
-			// the writer free again at tagging.
-			const settled =
-				/transform tag persistence failed|lkg_replay_served|storage-busy refusal/;
+			// Keep the lock until this session's tagging stage reports failure.
+			const tagFailure = `[magic-context][${sessionId}] transform tag persistence failed; not serving this pass:`;
 			const failDeadline = Date.now() + 30_000;
 			const passLog = () =>
 				existsSync(logPath)
 					? readFileSync(logPath, "utf8").slice(logOffset)
 					: "";
-			while (!settled.test(passLog()) && Date.now() < failDeadline) {
+			while (!passLog().includes(tagFailure) && Date.now() < failDeadline) {
 				await Bun.sleep(20);
 			}
 			writeFileSync(release, "release");
@@ -232,7 +242,11 @@ export default {
 				.filter((request) => Array.isArray(request.body.messages))
 				.map((request) => JSON.stringify(request.body.messages));
 			const log = passLog();
-			const lockHit = /sqlite writer site=[^\n]* outcome=busy/.test(log);
+			// Writer timing lines only cover slow writes and use different
+			// outcomes for BEGIN and autocommit. The tagging error names BUSY
+			// for either path, regardless of how long SQLite waited.
+			const busyFailure = `${tagFailure} SQLite writer acquisition remained busy`;
+			const lockHit = log.split("\n").some((line) => line.endsWith(busyFailure));
 			const failedStages = [
 				...log.matchAll(
 					/(transform tag persistence failed[^\n]*|overflow recovery state read failed[^\n]*|transform failed [^\n]*)/g,
@@ -244,7 +258,7 @@ export default {
 					? "storage-busy refusal"
 					: "pass served";
 			console.info(
-				`degraded-pass result lock_hit=${lockHit} failed_stages=${JSON.stringify(failedStages)} outcome=${outcome} served=${served} ` +
+				`degraded-pass result writer=${writer} lock_hit=${lockHit} failed_stages=${JSON.stringify(failedStages)} outcome=${outcome} served=${served} ` +
 					`unmanaged_bytes=${unmanaged.length} managed_bytes=${managed.length} ` +
 					`after_bytes=${JSON.stringify(after.map((body) => body.length))}`,
 			);
@@ -266,8 +280,16 @@ export default {
 			if (previousEntry === undefined) delete process.env.MC_E2E_PLUGIN_ENTRY;
 			else process.env.MC_E2E_PLUGIN_ENTRY = previousEntry;
 		}
-	},
-	300_000,
+	}, 300_000);
+}
+
+writerLockCase(
+	"OpenCode 1.18.30: a writer lock held across tagging never sends an unmanaged request",
+	"begin",
+);
+writerLockCase(
+	"OpenCode 1.18.30: a writer lock held across an autocommit tagging write never sends an unmanaged request",
+	"autocommit",
 );
 
 // Exceptions inside replay-only lanes used to be swallowed whenever the size
