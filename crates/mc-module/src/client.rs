@@ -176,8 +176,10 @@ pub trait RunnerClient: Send + Sync + 'static {
     > + Send {
         async { Err(ClientError::new("no code-reading tools")) }
     }
-    /// The dreamer lab fetches guidance and tool definitions together so the
-    /// guidance describes the same set of tools.
+    /// A provider's tool definitions together with its own guidance text for
+    /// the model, fetched in one request so that the guidance describes
+    /// exactly the tools served. Used by `ck-mc lab run`, the development
+    /// harness that replays nightly memory checks on a copy of the store.
     fn lab_tool_catalog(
         &self,
         _child: &Child,

@@ -398,7 +398,9 @@ impl History {
         let scope = HistoryScope::load(conn, project, selected)?;
         let mut coverage = messages::Coverage::default();
         let sessions = if searchable {
-            // The frozen index never changes; reuse the coverage scan across queries.
+            // A lab run reads a copy of the store that nothing writes to, so
+            // its message index cannot change. One coverage scan serves
+            // every query of the run.
             coverage.for_snapshot(0);
             scope
                 .sessions
