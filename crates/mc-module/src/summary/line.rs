@@ -109,8 +109,9 @@ pub(crate) trait Costs {
     fn piece(&mut self, index: usize, form: u8) -> u64;
     /// Summary `index` as one line under a day heading.
     fn group_line(&mut self, index: usize) -> u64;
-    /// The day heading over the titles `members`.
-    fn group_header(&mut self, members: &[usize]) -> u64;
+    /// A day heading. Its text shows only its first and last title and how
+    /// many there are ([`Heading`]), so that is all its cost may depend on.
+    fn group_header(&mut self, heading: Heading) -> u64;
     /// What joining two pieces into the block adds to its count, per joint.
     fn joint(&mut self) -> f64 {
         0.0
@@ -343,7 +344,223 @@ pub(crate) struct Scores<'s> {
 /// that fits is history the block would otherwise drop, while the messages
 /// it covers are already out of the request. The titles join day headings
 /// like any other.
-fn fill_titles(
+///
+/// `forms` must fit the budget, as every plan before the fill does. The
+/// total is kept as a running sum rather than counted again for every title
+/// tried: since the fill goes newest first and stops at the first title that
+/// does not fit, every summary newer than the one tried is already shown,
+/// and adding its title changes only the runs of titles on either side of
+/// it (see [`TitleFill`]). The full count runs once, at the end.
+pub(crate) fn fill_titles(
+    summaries: &[Summary],
+    mut forms: Vec<u8>,
+    budget: f64,
+    costs: &mut impl Costs,
+    options: Options,
+) -> (Vec<u8>, Vec<Vec<usize>>, u64) {
+    let limit = options.limit(budget);
+    let (groups, total) = cost_within(summaries, &forms, costs, options, limit);
+    if !forms.contains(&NOT_SHOWN) {
+        return (forms, groups, total);
+    }
+    debug_assert!(
+        total as f64 <= budget,
+        "the plan to fill is over its budget"
+    );
+    let mut fill = TitleFill::new(summaries, &forms, options, costs, &groups, total);
+    let mut filled = false;
+    for index in (0..forms.len()).rev() {
+        if forms[index] != NOT_SHOWN {
+            fill.settle(&forms, index);
+            continue;
+        }
+        let (sum, pieces) = fill.with_title(&forms, index, costs);
+        if (sum + fill.joints(pieces)) as f64 > budget {
+            break;
+        }
+        forms[index] = TITLE;
+        (fill.sum, fill.pieces) = (sum, pieces);
+        fill.settle(&forms, index);
+        filled = true;
+    }
+    if !filled {
+        return (forms, groups, total);
+    }
+    let total = fill.sum + fill.joints(fill.pieces);
+    let groups = if options.day_headers {
+        day_groups(summaries, &forms)
+    } else {
+        Vec::new()
+    };
+    debug_assert_eq!(
+        cost_of(summaries, &forms, costs, options),
+        (groups.clone(), total),
+        "the title fill's running sum"
+    );
+    (forms, groups, total)
+}
+
+/// The running sum of [`fill_titles`]. While the fill tries the title of
+/// summary `i`, every summary newer than `i` is shown and every older one has
+/// its form from before the fill. A title of `i` can join the run of titles
+/// of its day right after it (which starts at `i + 1`, all shown) and the one
+/// before it (which ends at the newest shown summary older than `i`; hidden
+/// summaries between do not break a run), or split the one run those two
+/// form together when it is of another day or has none. Nothing else in the
+/// block changes.
+struct TitleFill<'s, 'd> {
+    summaries: &'s [Summary<'d>],
+    day_headers: bool,
+    joint: f64,
+    /// The shown pieces' cost without the joints, and how many pieces.
+    sum: u64,
+    pieces: usize,
+    /// For each summary older than the fill's start: the newest shown
+    /// summary before it, from before the fill.
+    before: Vec<Option<usize>>,
+    /// For each shown title of a day, from before the fill: the first title
+    /// and the length of the run of titles of its day that ends at it.
+    run_back: Vec<(usize, usize)>,
+    /// For each summary the fill has passed (all shown): the last summary of
+    /// the run of titles of its day that starts at it.
+    run_end: Vec<usize>,
+}
+
+impl<'s, 'd> TitleFill<'s, 'd> {
+    fn new(
+        summaries: &'s [Summary<'d>],
+        forms: &[u8],
+        options: Options,
+        costs: &mut impl Costs,
+        groups: &[Vec<usize>],
+        total: u64,
+    ) -> Self {
+        let count = forms.len();
+        let mut fill = Self {
+            summaries,
+            day_headers: options.day_headers,
+            joint: costs.joint(),
+            sum: 0,
+            pieces: forms.iter().filter(|&&form| form < NOT_SHOWN).count() + groups.len(),
+            before: vec![None; count],
+            run_back: (0..count).map(|index| (index, 1)).collect(),
+            run_end: (0..count).collect(),
+        };
+        fill.sum = total - fill.joints(fill.pieces);
+        let mut newest_shown: Option<usize> = None;
+        for index in 0..count {
+            fill.before[index] = newest_shown;
+            if forms[index] == NOT_SHOWN {
+                continue;
+            }
+            if let Some(previous) = newest_shown.filter(|&p| fill.joins(forms, p, index)) {
+                let (first, length) = fill.run_back[previous];
+                fill.run_back[index] = (first, length + 1);
+            }
+            newest_shown = Some(index);
+        }
+        fill
+    }
+
+    fn joints(&self, pieces: usize) -> u64 {
+        (self.joint * pieces.saturating_sub(1) as f64).ceil() as u64
+    }
+
+    /// Whether summary `index` is a title that can share a day heading.
+    fn groups(&self, forms: &[u8], index: usize) -> bool {
+        self.day_headers && forms[index] == TITLE && self.summaries[index].day.is_some()
+    }
+
+    /// Whether shown summaries `older` and `newer`, with no shown summary
+    /// between them, are titles in one run.
+    fn joins(&self, forms: &[u8], older: usize, newer: usize) -> bool {
+        self.groups(forms, older)
+            && self.groups(forms, newer)
+            && self.summaries[older].day == self.summaries[newer].day
+    }
+
+    /// Record the run that starts at `index`, now that every summary from
+    /// it on keeps its form.
+    fn settle(&mut self, forms: &[u8], index: usize) {
+        let next = index + 1;
+        self.run_end[index] = if next < forms.len() && self.joins(forms, index, next) {
+            self.run_end[next]
+        } else {
+            index
+        };
+    }
+
+    /// The sum and piece count with the title of hidden summary `index`.
+    fn with_title(&self, forms: &[u8], index: usize, costs: &mut impl Costs) -> (u64, usize) {
+        // The runs on either side, as (first, last, length).
+        let older = self.before[index]
+            .filter(|&p| self.groups(forms, p))
+            .map(|p| {
+                let (first, length) = self.run_back[p];
+                (first, p, length)
+            });
+        let newer = Some(index + 1)
+            .filter(|&q| q < forms.len() && self.groups(forms, q))
+            .map(|q| (q, self.run_end[q], self.run_end[q] - q + 1));
+        let day = |at: usize| self.summaries[at].day;
+        let own = self.day_headers && day(index).is_some();
+        let joins_older = older.filter(|run| own && day(run.1) == day(index));
+        let joins_newer = newer.filter(|run| own && day(run.0) == day(index));
+        let (before, after) = match (older, newer) {
+            // One run spans the hidden summary: it grows, or splits around
+            // a title of another day or of none.
+            (Some(o), Some(n)) if day(o.1) == day(n.0) => {
+                let joined = (o.0, n.1, o.2 + n.2);
+                if joins_older.is_some() {
+                    (vec![joined], vec![(o.0, n.1, o.2 + n.2 + 1)])
+                } else {
+                    (vec![joined], vec![o, (index, index, 1), n])
+                }
+            }
+            _ => match (joins_older, joins_newer) {
+                (Some(o), _) => (vec![o], vec![(o.0, index, o.2 + 1)]),
+                (_, Some(n)) => (vec![n], vec![(index, n.1, n.2 + 1)]),
+                _ => (Vec::new(), vec![(index, index, 1)]),
+            },
+        };
+        // A run costs its heading and its lines, or one title its piece. The
+        // lines of the titles shown before stay, so only the difference
+        // between a run's heading and a title alone is counted, and the new
+        // title's line.
+        let own_line = costs.group_line(index) as i64;
+        let mut cost = |(first, last, length): (usize, usize, usize)| -> (i64, usize) {
+            if length == 1 {
+                let alone = costs.piece(first, TITLE) as i64 - costs.group_line(first) as i64;
+                (alone, 1)
+            } else {
+                let heading = Heading {
+                    first,
+                    last,
+                    count: length,
+                };
+                (costs.group_header(heading) as i64, length + 1)
+            }
+        };
+        let mut sum = self.sum as i64 + own_line;
+        let mut pieces = self.pieces as i64;
+        for run in before {
+            let (extra, count) = cost(run);
+            sum -= extra;
+            pieces -= count as i64;
+        }
+        for run in after {
+            let (extra, count) = cost(run);
+            sum += extra;
+            pieces += count as i64;
+        }
+        (sum as u64, pieces as usize)
+    }
+}
+
+/// The title fill as it first was: the whole plan counted again for every
+/// title tried. [`fill_titles`] must choose exactly what this chooses.
+#[cfg(test)]
+pub(crate) fn fill_titles_reference(
     summaries: &[Summary],
     mut forms: Vec<u8>,
     budget: f64,
@@ -490,7 +707,7 @@ fn step_down(
         while forms[index] < NOT_SHOWN {
             forms[index] += 1;
             let (block, pieces) = if next_is_title && joins(&forms, front, front + 1) {
-                let header = costs.group_header(&order[front..=end]);
+                let header = costs.group_header(Heading::of(&order[front..=end]));
                 let line = costs.group_line(index);
                 (
                     header + line + lines[end + 1] - lines[front + 1],
@@ -536,7 +753,7 @@ fn run_cost(
         (costs.piece(order[from], TITLE), 1)
     } else {
         (
-            costs.group_header(&order[from..=to]) + lines[to + 1] - lines[from],
+            costs.group_header(Heading::of(&order[from..=to])) + lines[to + 1] - lines[from],
             to - from + 2,
         )
     }
@@ -665,7 +882,7 @@ fn cost_within(
         match group_of[index] {
             _ if form >= NOT_SHOWN => {}
             Some(group) if group.last() == Some(&index) => {
-                total += costs.group_header(group) + costs.group_line(index);
+                total += costs.group_header(Heading::of(group)) + costs.group_line(index);
             }
             Some(_) => total += costs.group_line(index),
             None => total += costs.piece(index, form),
@@ -707,15 +924,35 @@ pub(crate) fn day_groups(summaries: &[Summary], forms: &[u8]) -> Vec<Vec<usize>>
     groups
 }
 
+/// A day heading over a run of titles: its first and last title and how
+/// many there are, which is all its text shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Heading {
+    pub first: usize,
+    pub last: usize,
+    pub count: usize,
+}
+
+impl Heading {
+    /// The heading over `members`, a run of at least one title.
+    pub(crate) fn of(members: &[usize]) -> Self {
+        Self {
+            first: members[0],
+            last: members[members.len() - 1],
+            count: members.len(),
+        }
+    }
+}
+
 /// A rendered piece of the history block.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Piece<'a> {
+pub(crate) enum Piece {
     /// Summary `index` on its own at a form (1..=5).
     Form(usize, u8),
     /// Summary `index` as one line under a day heading.
     Line(usize),
-    /// The day heading over these titles.
-    Header(&'a [usize]),
+    /// A day heading.
+    Header(Heading),
 }
 
 /// The token counts of one summary's pieces: its five forms on its own and
@@ -757,7 +994,7 @@ pub(crate) struct CountedCosts<'k, R, C> {
     /// Which of each summary's six slots (five forms, then the line) this
     /// render has checked or counted.
     checked: Vec<[bool; 6]>,
-    headers: HashMap<(usize, usize, usize), u64>,
+    headers: HashMap<Heading, u64>,
     joint: f64,
 }
 
@@ -826,13 +1063,12 @@ where
         self.tokens(index, 5, Piece::Line(index))
     }
 
-    fn group_header(&mut self, members: &[usize]) -> u64 {
-        let key = (members[0], members[members.len() - 1], members.len());
+    fn group_header(&mut self, heading: Heading) -> u64 {
         let (render, count) = (&self.render, &self.count);
         *self
             .headers
-            .entry(key)
-            .or_insert_with(|| count(&render(Piece::Header(members))))
+            .entry(heading)
+            .or_insert_with(|| count(&render(Piece::Header(heading))))
     }
 
     fn joint(&mut self) -> f64 {

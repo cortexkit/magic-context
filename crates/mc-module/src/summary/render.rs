@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 
 use super::line::{
-    self, Costs, CountedCosts, Options, Piece, PieceCounts, Summary, NOT_SHOWN, TITLE,
+    self, Costs, CountedCosts, Heading, Options, Piece, PieceCounts, Summary, NOT_SHOWN, TITLE,
 };
 use crate::context_db::StoredCompartment;
 
@@ -290,15 +290,15 @@ fn summary_day(c: &DecayRenderCompartment) -> Option<&str> {
 /// The heading over a run of titles of one day. Its range runs from the first
 /// summary's first message to the last one's last message, so it still reads
 /// as one `## start-end` stretch of history.
-pub(super) fn group_header(rows: &[&DecayRenderCompartment], members: &[usize]) -> String {
-    let first = rows[members[0]];
-    let last = rows[members[members.len() - 1]];
+pub(super) fn group_header(rows: &[&DecayRenderCompartment], heading: Heading) -> String {
+    let first = rows[heading.first];
+    let last = rows[heading.last];
     format!(
         "## {}-{} · {} · {} summaries",
         first.start_message,
         last.end_message,
         summary_day(first).unwrap_or_default(),
-        members.len()
+        heading.count
     )
 }
 
@@ -540,7 +540,7 @@ fn render_rows(
         |piece: Piece| match piece {
             Piece::Form(i, form) => render_one_compartment(rows[i], rendered_tier(rows[i], form)),
             Piece::Line(i) => group_line(rows[i]),
-            Piece::Header(members) => group_header(rows, members),
+            Piece::Header(heading) => group_header(rows, heading),
         },
         count,
     );
@@ -620,8 +620,9 @@ fn join_plan<C: Costs>(
                 if group[0] != i {
                     continue;
                 }
-                let mut section = group_header(rows, group);
-                let mut header_tokens = costs.group_header(group);
+                let heading = Heading::of(group);
+                let mut section = group_header(rows, heading);
+                let mut header_tokens = costs.group_header(heading);
                 for &member in group {
                     section.push('\n');
                     section.push_str(&group_line(rows[member]));

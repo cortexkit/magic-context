@@ -612,8 +612,8 @@ impl super::line::Costs for Counted<'_> {
             .entry((index, 0))
             .or_insert_with(|| counter.count(&group_line(rows[index])))
     }
-    fn group_header(&mut self, members: &[usize]) -> u64 {
-        self.counter.count(&group_header(&self.rows, members))
+    fn group_header(&mut self, heading: super::line::Heading) -> u64 {
+        self.counter.count(&group_header(&self.rows, heading))
     }
     fn joint(&mut self) -> f64 {
         self.joint
@@ -1088,4 +1088,77 @@ fn past_the_plan_cap_the_oldest_steps_down_until_the_body_fits() {
     assert!(rendered.plan.forms[..oldest_left]
         .iter()
         .all(|&form| form == NOT_SHOWN));
+}
+
+/// What the title fill costs at its worst, with the exact Claude counter:
+/// the newest summary larger than the budget in every form but its title,
+/// and room for about every older title, on one day or with the day changing
+/// every two summaries. Without the fill, cold (nothing counted yet) and
+/// warm (counted by the render before).
+#[test]
+#[ignore = "a measurement; run with --release --ignored --nocapture"]
+fn title_fill_worst_case_time() {
+    let counter = claude();
+    let count = |text: &str| counter.count(text) as usize;
+    for n in [4_000, 8_000] {
+        let mut rows: Vec<DecayRenderCompartment> = (0..n)
+            .map(|i| {
+                let start_message = i as i64 * 4 + 1;
+                let content = if i + 1 == n {
+                    " token".repeat(n * 25)
+                } else {
+                    "Most of these hidden rows have bodies much larger than their title. "
+                        .repeat(15)
+                };
+                DecayRenderCompartment {
+                    start_message,
+                    end_message: start_message + 3,
+                    title: format!("Work {i}"),
+                    content: String::new(),
+                    start_date: Some("2026-11-01".into()),
+                    end_date: Some("2026-11-01".into()),
+                    p1: Some(content.clone()),
+                    p2: Some(content.clone()),
+                    p3: Some(content.clone()),
+                    p4: Some(content),
+                    importance: Some(if i + 1 == n {
+                        100
+                    } else {
+                        (i % 100 + 1) as i32
+                    }),
+                    legacy: Some(0),
+                }
+            })
+            .collect();
+        for paired in [false, true] {
+            if paired {
+                for (i, row) in rows.iter_mut().enumerate() {
+                    let day = ["2026-11-01", "2026-11-02"][i / 2 % 2].to_owned();
+                    row.start_date = Some(day.clone());
+                    row.end_date = Some(day);
+                }
+            }
+            let budget = (n * 19) as f64;
+            let mut known = vec![super::line::PieceCounts::default(); n];
+            for (fill, label) in [(false, "no fill"), (true, "cold fill"), (true, "warm fill")] {
+                if label == "cold fill" {
+                    known.fill(Default::default());
+                }
+                let options = super::line::Options {
+                    fill,
+                    ..Default::default()
+                };
+                let started = std::time::Instant::now();
+                let rendered = render_history_counted(&rows, budget, count, &mut known, options);
+                let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+                assert!(counter.count(&rendered.text) as f64 <= budget);
+                println!(
+                    "FILL_TIME {n} summaries, paired days {paired}, {label}: {elapsed:.1} ms, {} shown, {} day headings, body {}",
+                    rendered.items.len(),
+                    rendered.plan.groups.len(),
+                    counter.count(&rendered.text)
+                );
+            }
+        }
+    }
 }

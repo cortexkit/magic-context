@@ -20,7 +20,7 @@ impl Costs for Table {
     fn group_line(&mut self, index: usize) -> u64 {
         self.lines[index]
     }
-    fn group_header(&mut self, _members: &[usize]) -> u64 {
+    fn group_header(&mut self, _heading: Heading) -> u64 {
         self.header
     }
 }
@@ -580,8 +580,8 @@ impl Costs for Asked<'_> {
         self.asked += 1;
         self.table.group_line(index)
     }
-    fn group_header(&mut self, members: &[usize]) -> u64 {
-        self.table.group_header(members)
+    fn group_header(&mut self, heading: Heading) -> u64 {
+        self.table.group_header(heading)
     }
 }
 
@@ -1070,7 +1070,7 @@ impl Costs for Looked<'_> {
         self.lookups += 1;
         10
     }
-    fn group_header(&mut self, _: &[usize]) -> u64 {
+    fn group_header(&mut self, _: Heading) -> u64 {
         self.lookups += 1;
         1
     }
@@ -1117,6 +1117,303 @@ fn stepping_down_looks_costs_up_a_linear_number_of_times() {
                 "{at}: {} lookups, {} a summary",
                 costs.lookups,
                 costs.lookups / n
+            );
+        }
+    }
+}
+
+/// The title fill looks each cost up a number of times linear in the
+/// summaries, however many titles it adds: the newest summary is larger
+/// than the budget in every form but its title, so the plan steps it down
+/// to its title, and the budget then has room for every older summary's
+/// title, which the fill adds one by one. All on one day (one long day
+/// heading) and in pairs of two days (a new day heading every two titles).
+#[test]
+fn the_title_fill_looks_costs_up_a_linear_number_of_times() {
+    for paired in [false, true] {
+        for n in [4_000usize, 8_000] {
+            let budget = (n * 19) as f64;
+            let forms = move |index: usize, form: u8| match form {
+                TITLE => 4,
+                _ if index == n - 1 => (n * 25) as u64,
+                _ => 200,
+            };
+            let days: Vec<&str> = (0..n)
+                .map(|index| match (paired, index / 2 % 2) {
+                    (true, 1) => "2026-11-02",
+                    _ => "2026-11-01",
+                })
+                .collect();
+            let summaries: Vec<Summary> = (0..n)
+                .map(|index| Summary {
+                    score: if index == n - 1 {
+                        100.0
+                    } else {
+                        (index % 100 + 1) as f64
+                    },
+                    scored: true,
+                    day: Some(days[index]),
+                })
+                .collect();
+            let mut costs = Looked {
+                forms: &forms,
+                lookups: 0,
+            };
+            let plan = plan(&summaries, budget, &mut costs, Options::default());
+            let at = format!("{n} summaries, paired days {paired}");
+            let titles = plan.forms.iter().filter(|&&form| form == TITLE).count();
+            assert!(titles > n / 2, "{at}: {titles} titles");
+            assert!(plan.total as f64 <= budget, "{at}");
+            assert!(
+                costs.lookups <= 60 * n,
+                "{at}: {} lookups, {} a summary",
+                costs.lookups,
+                costs.lookups / n
+            );
+        }
+    }
+}
+
+/// Costs given per summary, with a day heading whose cost depends on what it
+/// shows (its first and last title and how many) and a joint that can be a
+/// fraction, so that a wrong heading or piece count shows in the total.
+struct Varied {
+    forms: Vec<[u64; 5]>,
+    lines: Vec<u64>,
+    joint: f64,
+}
+
+impl Costs for Varied {
+    fn piece(&mut self, index: usize, form: u8) -> u64 {
+        self.forms[index][usize::from(form - 1)]
+    }
+    fn group_line(&mut self, index: usize) -> u64 {
+        self.lines[index]
+    }
+    fn group_header(&mut self, heading: Heading) -> u64 {
+        ((heading.first * 7 + heading.last * 3 + heading.count * 5) % 13 + 1) as u64
+    }
+    fn joint(&mut self) -> f64 {
+        self.joint
+    }
+}
+
+/// The title fill chooses exactly what counting the whole plan again for
+/// every title chose: the same forms, day groups and total. Over generated
+/// plans with titles, other forms and hidden summaries in any order, days
+/// that repeat in runs or are missing, titles that cost more or less than
+/// their line, day headings on and off, fractional joints, sums stopped
+/// early or not, and budgets from what the plan costs to far more.
+#[test]
+fn the_title_fill_chooses_what_counting_every_plan_again_chooses() {
+    let mut random = Random::new(4_242);
+    let mut compared = 0;
+    let mut filled = 0;
+    for round in 0..400 {
+        let count = random.between(1, 160) as usize;
+        let days_seen = ["2026-11-01", "2026-11-02", "2026-11-03"];
+        let mut day = Some(days_seen[0]);
+        let days: Vec<Option<&str>> = (0..count)
+            .map(|_| {
+                match random.between(1, 10) {
+                    1 => day = None,
+                    2 | 3 => day = Some(days_seen[random.between(0, 2) as usize]),
+                    _ => {}
+                }
+                day
+            })
+            .collect();
+        let summaries: Vec<Summary> = days
+            .iter()
+            .map(|&day| Summary {
+                score: 50.0,
+                scored: true,
+                day,
+            })
+            .collect();
+        let forms: Vec<u8> = (0..count)
+            .map(|_| match random.between(1, 10) {
+                1..=5 => NOT_SHOWN,
+                6..=8 => TITLE,
+                _ => random.between(1, 4) as u8,
+            })
+            .collect();
+        let mut costs = Varied {
+            forms: (0..count)
+                .map(|_| {
+                    let title = random.between(2, 30);
+                    [
+                        random.between(100, 600),
+                        random.between(50, 200),
+                        random.between(20, 90),
+                        random.between(10, 50),
+                        title,
+                    ]
+                })
+                .collect(),
+            lines: (0..count).map(|_| random.between(1, 30)).collect(),
+            joint: [0.0, 0.3, 1.0, 1.7][round % 4],
+        };
+        for day_headers in [true, false] {
+            for stop_early in [true, false] {
+                let options = Options {
+                    day_headers,
+                    stop_early,
+                    ..Options::default()
+                };
+                let (_, cost) = cost_of(&summaries, &forms, &mut costs, options);
+                for extra in [0, 1, 6, 40, 250, 2_000, 1_000_000] {
+                    let budget = (cost + extra) as f64;
+                    let at = format!(
+                        "round {round}, {count} summaries, headings {day_headers}, early {stop_early}, budget {budget}"
+                    );
+                    let linear =
+                        fill_titles(&summaries, forms.clone(), budget, &mut costs, options);
+                    let reference = fill_titles_reference(
+                        &summaries,
+                        forms.clone(),
+                        budget,
+                        &mut costs,
+                        options,
+                    );
+                    assert_eq!(linear, reference, "{at}");
+                    filled += usize::from(linear.0 != forms);
+                    compared += 1;
+                }
+            }
+        }
+    }
+    // An empty plan at the smallest budgets.
+    let summaries = vec![
+        Summary {
+            score: 50.0,
+            scored: true,
+            day: Some("2026-11-01"),
+        };
+        3
+    ];
+    let mut costs = Varied {
+        forms: vec![[50, 40, 30, 20, 5]; 3],
+        lines: vec![4; 3],
+        joint: 0.5,
+    };
+    for budget in [0.0, 1.0, 4.0, 5.0, 9.0, 10.0, 20.0] {
+        let hidden = vec![NOT_SHOWN; 3];
+        assert_eq!(
+            fill_titles(
+                &summaries,
+                hidden.clone(),
+                budget,
+                &mut costs,
+                Options::default()
+            ),
+            fill_titles_reference(&summaries, hidden, budget, &mut costs, Options::default()),
+            "at {budget}"
+        );
+    }
+    assert!(
+        compared > 5_000 && filled > compared / 4,
+        "{compared} compared, {filled} filled"
+    );
+}
+
+/// Through the whole plan: the title fill after the line, the floor (whose
+/// titles can sit inside a run of one day) and any step down gives what
+/// the first fill gave, on generated sessions with both score scales and
+/// on the two shapes that made the first fill slowest (a newest summary
+/// larger than the budget, then room for every older title, on one day or
+/// in pairs of days).
+#[test]
+fn the_title_fill_in_a_plan_chooses_what_the_first_fill_chose() {
+    let compare = |summaries: &[Summary],
+                   budget: f64,
+                   costs: &mut dyn FnMut() -> Table,
+                   options: Options,
+                   at: &str| {
+        let with = plan(summaries, budget, &mut costs(), options);
+        let mut table = costs();
+        let without = plan(
+            summaries,
+            budget,
+            &mut table,
+            Options {
+                fill: false,
+                ..options
+            },
+        );
+        let reference = fill_titles_reference(
+            summaries,
+            without.forms,
+            without.budget,
+            &mut table,
+            options,
+        );
+        assert_eq!((with.forms, with.groups, with.total), reference, "{at}");
+    };
+    let mut random = Random::new(77);
+    for &count in &[1, 2, 7, 49, 50, 51, 300, 1_200] {
+        let (session, table) = Generated::new(&mut random, count);
+        let summaries = session.summaries();
+        for reference_scale in [true, false] {
+            for budget in [1.0, 40.0, 300.0, 2_000.0, 15_000.0, 60_000.0] {
+                let options = Options {
+                    reference_scale,
+                    ..Options::default()
+                };
+                let at = format!("{count} summaries, reference {reference_scale}, budget {budget}");
+                compare(
+                    &summaries,
+                    budget,
+                    &mut || Table {
+                        forms: table.forms.clone(),
+                        lines: table.lines.clone(),
+                        header: table.header,
+                    },
+                    options,
+                    &at,
+                );
+            }
+        }
+    }
+    for paired in [false, true] {
+        let n = 600;
+        let days: Vec<&str> = (0..n)
+            .map(|index| match (paired, index / 2 % 2) {
+                (true, 1) => "2026-11-02",
+                _ => "2026-11-01",
+            })
+            .collect();
+        let summaries: Vec<Summary> = (0..n)
+            .map(|index| Summary {
+                score: if index == n - 1 {
+                    100.0
+                } else {
+                    (index % 100 + 1) as f64
+                },
+                scored: true,
+                day: Some(days[index]),
+            })
+            .collect();
+        for budget in [(n * 19) as f64, (n * 7) as f64, (n * 3) as f64] {
+            compare(
+                &summaries,
+                budget,
+                &mut || Table {
+                    forms: (0..n)
+                        .map(|index| {
+                            if index == n - 1 {
+                                let big = (n * 25) as u64;
+                                [big, big, big, big, 4]
+                            } else {
+                                [200, 150, 100, 60, 4 + index as u64 % 3]
+                            }
+                        })
+                        .collect(),
+                    lines: (0..n).map(|index| 3 + index as u64 % 2).collect(),
+                    header: 6,
+                },
+                Options::default(),
+                &format!("{n} summaries, paired {paired}, budget {budget}"),
             );
         }
     }
