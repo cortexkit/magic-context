@@ -526,9 +526,18 @@ async fn account_waits_share_the_scheduled_occurrences_token_budget() {
 
 #[tokio::test(start_paused = true)]
 async fn account_reroute_waits_until_routing_reset_then_selects_again() {
+    use chrono::Timelike;
+
     let (_dir, db) = store();
     let engine = engine(1);
-    let settings = Settings::default();
+    // A waiting task is due at its next cron slot or at the reset, whichever
+    // comes first. Put the slot at least an hour away, so the default slot
+    // cannot fall inside the ten-minute wait when the test runs just before it.
+    let hour = (chrono::Local::now().hour() + 2) % 24;
+    let settings = Settings {
+        schedules: [("classify-memories".into(), format!("0 {hour} * * *"))].into(),
+        ..Settings::default()
+    };
     let now = now_ms();
     let reset = now + 10 * 60_000;
     engine.see_project(&db, PROJECT, FOLDER, profile(), &settings, now);
