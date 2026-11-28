@@ -423,6 +423,14 @@ impl<C: RunnerClient + Router + Send + Sync + 'static> Module<C> {
         &self.inner.app_read
     }
 
+    /// Observe the app reader closing its store connections after its last sender drops.
+    /// The returned receiver does not keep the module or reader alive.
+    /// If the reader has already exited, the receiver is immediately disconnected.
+    #[doc(hidden)]
+    pub fn observe_app_reader_exit(&self) -> std::sync::mpsc::Receiver<()> {
+        self.inner.app_read.observe_exit()
+    }
+
     /// The move journal and its gate.
     pub fn journal(&self) -> &Arc<crate::agent_data::Journal> {
         &self.inner.journal

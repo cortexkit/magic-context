@@ -408,6 +408,7 @@ enum Command {
     LoadGate(mpsc::Sender<()>, mpsc::Receiver<()>),
     #[cfg(test)]
     ThreadGate(oneshot::Sender<()>, mpsc::Receiver<()>),
+    ObserveExit(mpsc::Sender<()>),
     Activate(SessionRef, oneshot::Sender<()>),
     #[cfg(test)]
     Publish(Box<Snapshot>),
@@ -559,6 +560,7 @@ impl AppRead {
                     head_warnings: Default::default(),
                     apps: Default::default(),
                 };
+                let mut exit_waiters = Vec::new();
                 replica.load();
                 loop {
                     replica.evict_idle(std::time::Instant::now());
@@ -581,6 +583,7 @@ impl AppRead {
                             let _ = started.send(());
                             let _ = resume.recv();
                         }
+                        Command::ObserveExit(waiter) => exit_waiters.push(waiter),
                         Command::Activate(key, reply) => {
                             replica.activate(&key);
                             let _ = reply.send(());
@@ -612,6 +615,10 @@ impl AppRead {
                         Command::Attach(attachment) => replica.apps.attached = Some(attachment),
                     }
                 }
+                drop(replica);
+                for waiter in exit_waiters {
+                    let _ = waiter.send(());
+                }
             })
             .expect("app read replica thread");
         Self { tx }
@@ -624,6 +631,14 @@ impl AppRead {
 
     pub(crate) fn update(&self, update: Update) {
         let _ = self.tx.send(Command::Update(update));
+    }
+
+    pub(crate) fn observe_exit(&self) -> mpsc::Receiver<()> {
+        // Keep accepted waiters until the reader exits. Removing a waiter
+        // earlier could let a fixture delete a store while it is still open.
+        let (tx, rx) = mpsc::channel();
+        let _ = self.tx.send(Command::ObserveExit(tx));
+        rx
     }
 
     /// Pause the replica before its next command until the sender is signalled or dropped.
@@ -1401,6 +1416,9 @@ pub(crate) fn strings(value: Option<&Value>, limit: usize) -> Result<Vec<String>
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod teardown_tests;
 
 #[cfg(test)]
 pub(crate) fn pin_retired_session_kind(result: &mut Value, frozen_sample: &std::path::Path) {
