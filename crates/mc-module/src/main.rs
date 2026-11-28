@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 use std::error::Error;
+use std::fmt;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -24,6 +25,32 @@ use mc_module::store::Store;
 use mc_module::transport::{manifest_for, Handler, SubcRunnerClient};
 
 const DEFAULT_MODULE_ID: &str = mc_module::MODULE_ID;
+
+/// An error that names a store path a person may need to copy from stderr.
+struct CliPathRefusal(String);
+
+impl fmt::Display for CliPathRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl fmt::Debug for CliPathRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // A Result returned from main prints its error with Debug. Keep the
+        // quotes and control-character escapes, but let Windows paths be copied.
+        #[cfg(windows)]
+        {
+            formatter.write_str(&format!("{:?}", self.0).replace("\\\\", "\\"))
+        }
+        #[cfg(not(windows))]
+        {
+            fmt::Debug::fmt(&self.0, formatter)
+        }
+    }
+}
+
+impl Error for CliPathRefusal {}
 
 fn main() -> Result<ExitCode, Box<dyn Error + Send + Sync>> {
     let mut args = std::env::args_os().skip(1);
@@ -192,8 +219,8 @@ async fn serve(dreamer: &tokio::runtime::Handle) -> Result<(), Box<dyn Error + S
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_MODULE_ID.to_owned());
-    let context_path = context_db_path()?;
-    let sessions_path = store_path(&context_path)?;
+    let context_path = context_db_path().map_err(CliPathRefusal)?;
+    let sessions_path = store_path(&context_path).map_err(CliPathRefusal)?;
     // With managed settings, a 0.49-shaped user file is converted once,
     // before ck-mc connects to the daemon or reads its settings.
     #[cfg(feature = "managed-settings")]
@@ -203,8 +230,8 @@ async fn serve(dreamer: &tokio::runtime::Handle) -> Result<(), Box<dyn Error + S
         mc_module::config::managed::rewrite_0_49(settings.user_path(), &data_dir);
         settings.managed(&data_dir)
     };
-    let db = open_context_db(&context_path)?;
-    let store = Store::open(&sessions_path)?;
+    let db = open_context_db(&context_path).map_err(CliPathRefusal)?;
+    let store = Store::open(&sessions_path).map_err(CliPathRefusal)?;
     // Moves are enforced in every build: the journal is read before any
     // session is served, so a session a move holds is refused from the
     // first request on. Serving new moves is a separate switch.
@@ -294,7 +321,7 @@ fn move_in() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Err(MISSING_STORE.into());
     }
     let db = open_context_db(&context_path)?;
-    let store = Store::open(&store_path(&context_path)?)?;
+    let store = Store::open(&store_path(&context_path).map_err(CliPathRefusal)?)?;
     let request: mc_module::move_in::MoveRequest = serde_json::from_reader(std::io::stdin())?;
     // The session's rows are rewritten under both the harness it runs as and
     // the one the plugin kept it under; a move holding either is refused.
@@ -349,7 +376,8 @@ fn rekey_runner() -> Result<(), Box<dyn Error + Send + Sync>> {
             .iter()
             .map(|session| (request.harness.as_str(), session.as_str())),
     )?;
-    let summary = mc_module::rekey::rekey_runner(&store_path(&context)?, &context, &request)?;
+    let store = store_path(&context).map_err(CliPathRefusal)?;
+    let summary = mc_module::rekey::rekey_runner(&store, &context, &request)?;
     println!("{}", serde_json::to_string(&summary)?);
     Ok(())
 }
@@ -403,14 +431,14 @@ fn tag_floor() -> Result<(), Box<dyn Error + Send + Sync>> {
 /// The refusal of a command that needs an existing store.
 const MISSING_STORE: &str = "Magic Context has no context.db. Run `npx @cortexkit/magic-context doctor store init`, then restart ck-mc.";
 
-fn open_context_db(path: &std::path::Path) -> Result<ContextDb, Box<dyn Error + Send + Sync>> {
+fn open_context_db(path: &std::path::Path) -> Result<ContextDb, String> {
     // From 0.50 the module owns the store: a machine without one gets a new
     // one, and a store the 0.49 plugin left behind is migrated on open.
     if !path.exists() {
         tracing::info!(path = %path.display(), "ck-mc: creating context.db");
-        return Ok(ContextDb::create(path)?);
+        return ContextDb::create(path);
     }
-    Ok(ContextDb::open(path)?)
+    ContextDb::open(path)
 }
 
 fn subc_arg() -> Option<PathBuf> {
@@ -421,4 +449,19 @@ fn subc_arg() -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CliPathRefusal;
+
+    #[test]
+    fn store_refusal_quotes_the_message_and_keeps_controls_escaped() {
+        let refusal = CliPathRefusal("store in C:\\work\\old\"dir\nrefused".into());
+        #[cfg(windows)]
+        let expected = r#""store in C:\work\old\"dir\nrefused""#;
+        #[cfg(not(windows))]
+        let expected = r#""store in C:\\work\\old\"dir\nrefused""#;
+        assert_eq!(format!("{refusal:?}"), expected);
+    }
 }
